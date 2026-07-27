@@ -41,13 +41,16 @@ def u(v, bits):
     return v & ((1 << bits) - 1)
 
 
-# opcode constants (this core's decode table, see design/Control.v)
+# opcode constants (this core's decode table, see design/riscv_defs.vh)
 OP_R = 0b0110011
 OP_I = 0b0010011
 OP_LOAD = 0b0000011
 OP_STORE = 0b0100011
 OP_BRANCH = 0b1100011
 OP_JAL = 0b1101111
+OP_JALR = 0b1100111
+OP_LUI = 0b0110111
+OP_AUIPC = 0b0010111
 OP_CUSTOM = 0b0101010
 
 R_TYPE = {  # mnemonic: (funct7[5], funct3)
@@ -59,7 +62,12 @@ I_TYPE = {  # mnemonic: funct3 (funct7[5] used only by srli/srai)
     "addi": 0b000, "slli": 0b001, "slti": 0b010, "sltiu": 0b011,
     "xori": 0b100, "srli": 0b101, "srai": 0b101, "ori": 0b110, "andi": 0b111,
 }
-BRANCH = {"beq": 0b000, "bne": 0b001, "blt": 0b010, "bge": 0b011, "ble": 0b100, "bgt": 0b101}
+BRANCH = {  # mnemonic: funct3 -- beq/bne/blt/bge/ble/bgt/bltu/bgeu (ble/bgt custom, see docs/ARCHITECTURE.md sec 5)
+    "beq": 0b000, "bne": 0b001, "blt": 0b010, "bge": 0b011,
+    "ble": 0b100, "bgt": 0b101, "bltu": 0b110, "bgeu": 0b111,
+}
+LOAD = {"lb": 0b000, "lh": 0b001, "lw": 0b010, "lbu": 0b100, "lhu": 0b101}
+STORE = {"sb": 0b000, "sh": 0b001, "sw": 0b010}
 
 
 def r_type(mn, rd, rs1, rs2):
@@ -82,16 +90,28 @@ def i_type(mn, rd, rs1, immv):
     return (u(imm12, 12) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_I
 
 
-def load(rd, offs, rs1):
+def load(mn, rd, offs, rs1):
     imm12 = imm(offs, 12, signed=True)
-    return (u(imm12, 12) << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | OP_LOAD
+    return (u(imm12, 12) << 20) | (rs1 << 15) | (LOAD[mn] << 12) | (rd << 7) | OP_LOAD
 
 
-def store(rs2, offs, rs1):
+def store(mn, rs2, offs, rs1):
     imm12 = imm(offs, 12, signed=True)
     hi = (imm12 >> 5) & 0x7F
     lo = imm12 & 0x1F
-    return (hi << 25) | (rs2 << 20) | (rs1 << 15) | (0b010 << 12) | (lo << 7) | OP_STORE
+    return (hi << 25) | (rs2 << 20) | (rs1 << 15) | (STORE[mn] << 12) | (lo << 7) | OP_STORE
+
+
+def jalr(rd, offs, rs1):
+    imm12 = imm(offs, 12, signed=True)
+    return (u(imm12, 12) << 20) | (rs1 << 15) | (rd << 7) | OP_JALR
+
+
+def u_type(opcode, rd, imm20):
+    # imm20 is inst[31:12] directly (i.e. already "the upper 20 bits"), not
+    # left-shifted again here -- matches typical `lui rd, 0x12345` usage.
+    v = imm(imm20, 20, signed=False)
+    return (v << 12) | (rd << 7) | opcode
 
 
 def branch(mn, rs1, rs2, offset_bytes):
@@ -160,20 +180,30 @@ def assemble(lines):
         elif mn in I_TYPE:
             rd, rs1 = reg(args[0]), reg(args[1])
             words.append(i_type(mn, rd, rs1, args[2]))
-        elif mn == "lw":
+        elif mn in LOAD:
             rd = reg(args[0])
             m = re.match(r"(-?\w+)\((x\d+)\)", args[1])
-            words.append(load(rd, m.group(1), reg(m.group(2))))
-        elif mn == "sw":
+            words.append(load(mn, rd, m.group(1), reg(m.group(2))))
+        elif mn in STORE:
             rs2 = reg(args[0])
             m = re.match(r"(-?\w+)\((x\d+)\)", args[1])
-            words.append(store(rs2, m.group(1), reg(m.group(2))))
+            words.append(store(mn, rs2, m.group(1), reg(m.group(2))))
         elif mn in BRANCH:
             rs1, rs2 = reg(args[0]), reg(args[1])
             words.append(branch(mn, rs1, rs2, resolve(args[2], cur_addr)))
         elif mn == "jal":
             rd = reg(args[0])
             words.append(jal(rd, resolve(args[1], cur_addr)))
+        elif mn == "jalr":
+            rd = reg(args[0])
+            m = re.match(r"(-?\w+)\((x\d+)\)", args[1])
+            words.append(jalr(rd, m.group(1), reg(m.group(2))))
+        elif mn == "lui":
+            rd = reg(args[0])
+            words.append(u_type(OP_LUI, rd, args[1]))
+        elif mn == "auipc":
+            rd = reg(args[0])
+            words.append(u_type(OP_AUIPC, rd, args[1]))
         else:
             raise ValueError(f"unknown mnemonic {mn!r} in line: {line!r}")
     return words

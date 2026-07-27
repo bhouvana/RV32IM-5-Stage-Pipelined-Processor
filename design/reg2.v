@@ -21,6 +21,9 @@ module reg2(
     input [4:0] readReg1,
     input [4:0] readReg2,
     input jump,
+    input jalr,
+    input lui,
+    input auipc,
 
     output reg branch_regde,
     output reg memRead_regde,
@@ -39,7 +42,10 @@ module reg2(
     output reg [2:0] funct3_regde,
     output reg [4:0] readReg1_regde,
     output reg [4:0] readReg2_regde,
-    output reg jump_regde
+    output reg jump_regde,
+    output reg jalr_regde,
+    output reg lui_regde,
+    output reg auipc_regde
 
 );
 
@@ -65,6 +71,9 @@ begin
         readData1_regde <= 0;
         readData2_regde <= 0;
         jump_regde <= 0;
+        jalr_regde <= 0;
+        lui_regde <= 0;
+        auipc_regde <= 0;
 
     end
 
@@ -88,6 +97,9 @@ begin
     readReg1_regde     <= 0;
     readReg2_regde     <= 0;
     jump_regde         <= 0;
+    jalr_regde         <= 0;
+    lui_regde          <= 0;
+    auipc_regde        <= 0;
 end
 
     else if(flush)
@@ -110,6 +122,9 @@ end
         readReg1_regde <= readReg1;
         readReg2_regde <= readReg2;
         jump_regde <= 0;
+        jalr_regde <= 0;
+        lui_regde <= 0;
+        auipc_regde <= 0;
     end
 
     else
@@ -132,6 +147,9 @@ end
         readReg1_regde <= readReg1;
         readReg2_regde <= readReg2;
         jump_regde <= jump;
+        jalr_regde <= jalr;
+        lui_regde <= lui;
+        auipc_regde <= auipc;
 
     end
 end

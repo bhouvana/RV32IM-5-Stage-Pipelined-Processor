@@ -59,7 +59,17 @@ module ImmGen#(parameter Width = 32) (
                 //imm[10:1] = inst[30:21];
                 imm ={1'b0,{11{inst[31]}},inst[31],inst[19:12],inst[20],inst[30:21]};
             end
-            
+
+            7'b1100111://jalr -- plain I-type immediate (NOT the shifted branch/jal
+            begin                //convention: jalr's target is rs1+imm, computed directly, no ShiftLeftOne)
+                imm = {{20{inst[31]}},inst[31:20]};
+            end
+
+            7'b0110111, //lui
+            7'b0010111: //auipc -- both U-type: imm = inst[31:12] in the top 20 bits, low 12 zero
+            begin
+                imm = {inst[31:12], 12'b0};
+            end
 
 	endcase
     end

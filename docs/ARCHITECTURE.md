@@ -24,10 +24,16 @@ verification as the highest-leverage next investment rather than a nice-to-have:
    already-correctly-computed `readData2_final`. Any `sw` whose data
    register was written 1-2 instructions earlier stored stale data. See
    `docs/adr/0003-store-data-forwarding.md`.
+4. **`slt`/`blt`/`bge`/`ble`/`bgt` compared as unsigned** -- the same root
+   cause as the `sra` bug (plain, non-`signed` ALU ports), found while
+   implementing `bltu`/`bgeu` and fixed in the same pass. See
+   `docs/adr/0004-signed-arithmetic-casts.md`.
 
 Also implemented in this pass: `jal` (previously decoded but functionally
 inert, §11) is now fully wired -- target, link value, and forwarding
-correction. See `docs/adr/0001-jal-implementation.md`. §11's ISA coverage
+correction (`docs/adr/0001-jal-implementation.md`) -- followed by the rest
+of RV32I completeness: `jalr`, `lui`, `auipc`, `bltu`/`bgeu`, and
+byte/halfword loads/stores (`docs/adr/0005-isa-completeness.md`). §11's ISA coverage
 table and §15's readiness table are otherwise still accurate as written;
 this errata doesn't change them, it documents what the errata itself
 found.
@@ -185,24 +191,26 @@ However: the signal is called `rst` throughout the design but is literally wired
 
 ## 11. ISA coverage matrix (RV32I base, 47 instructions)
 
+**Updated by `docs/adr/0001` and `docs/adr/0005`** — this section originally documented real gaps (jal inert, jalr/lui/auipc absent, bltu/bgeu absent, byte/halfword access absent); all have since been closed and verified (`sim/run_tests.sh`, 12 tests / 50 checks). Table below reflects current state; see those ADRs for what changed and why.
+
 | Category | Implemented | Missing |
 |---|---|---|
 | R-type ALU | `add sub sll slt sltu xor srl sra or and` (10/10) | — |
-| I-type ALU | `addi slti sltiu xori srli srai ori andi` (8/8, via `ALUOp=11`) | `slli` shares path, present |
-| Loads | `lw` only | `lb lh lbu lhu` (blocked by `DataMemory` word-only access, §9) |
-| Stores | `sw` only | `sb sh` (same blocker) |
-| Branches | `beq bne` correct; **`blt/bge` reassigned to custom `ble/bgt` semantics** (§5) | `bltu bgeu` **not present at all** — no unsigned branch comparisons exist anywhere in `ALU.v` |
-| Jumps | `jal` decoded in `Control.v` (`ALUSrc=1, regWrite=1`) but **`ImmGen.v` computes a J-type immediate that is never added to PC** — nothing in `riscvpipeline.v` routes `jal`'s target computation to the PC-select mux, and nothing computes `PC+4` as the link value for `rd`. **`jal` is decoded but not functionally implemented** — this is the most important correctness gap found in this audit and should be a P0 fix, since a README that says "JAL supported" would be actively misleading. | `jalr` entirely absent (no opcode `1100111` case in `Control.v`) |
-| Upper-immediate | none | `lui auipc` entirely absent — no opcode `0110111`/`0010111` cases anywhere |
+| I-type ALU | `addi slti sltiu xori srli srai ori andi` (8/8, via `ALUOp=11`) | — |
+| Loads | `lw lb lh lbu lhu` (5/5, funct3-selected width in `DataMemory.v`) | — |
+| Stores | `sw sb sh` (3/3) | — |
+| Branches | `beq bne blt bge bltu bgeu` (6/6 standard) plus custom `ble bgt` (funct3=100/101, using the two funct3 codes standard RV32I leaves for `bltu`/`bgeu` — those got the two *other* free codes, funct3=110/111; see `docs/adr/0005`) | — |
+| Jumps | `jal jalr` (both fully wired: target, PC+4 link, forwarding correction) | — |
+| Upper-immediate | `lui auipc` (both reuse the ALU's `ADD` via an A-operand override, no new writeback path) | — |
 | Custom | `ctz`-like instruction, opcode `0101010`, `ALUOp=10`, funct7=`1`/funct3=`111` pattern | — |
-| Fence/system | none | `fence ecall ebreak` absent (expected — no exception support yet, consistent with README scope) |
+| Fence/system | none | `fence ecall ebreak` and CSR absent (expected — no exception/privilege support yet; tracked as its own Phase 5 item, deliberately not bundled into ISA completeness) |
 
-**Bottom line**: this is not yet a complete RV32I core. It implements a well-chosen *teaching subset* (R/I-type ALU ops, `lw`/`sw`, `beq`/`bne`, a stubbed-out `jal`) plus one custom instruction, and the README's claim of "all the R I L S B type instructions" is **accurate for R/I/L(partial)/S(partial)/B(partial)** but should be corrected to note: byte/halfword load-store, `bltu/bgeu`, `jal` target computation, `jalr`, and `lui/auipc` are gaps, not yet features.
+**Bottom line**: RV32I base ISA is complete except `fence`/`ecall`/`ebreak`/CSR, which need real exception/privilege-mode infrastructure and are scoped as their own milestone rather than an "ISA completeness" checkbox item. The README's claim of "all the R I L S B type instructions" is now accurate.
 
 ## 12. Coding style / synthesis-friendliness observations
 
-- No `` `default_nettype none`` in any file — an accidentally-undeclared wire becomes an implicit 1-bit net instead of a compile error. Cheap, high-value fix.
-- No shared constants/parameters package — opcodes, ALUCtl codes, and funct3/funct7 values are magic numbers duplicated across `Control.v`, `ALUCtrl.v`, and `ImmGen.v`. A `riscv_defs.vh`/`riscv_pkg.sv` would remove an entire class of copy-paste bugs (and is a prerequisite for RV32M/CSR extension work in Phase 5).
+- No `` `default_nettype none`` in any file — an accidentally-undeclared wire becomes an implicit 1-bit net instead of a compile error. Cheap, high-value fix, still open.
+- ~~No shared constants/parameters package~~ **Done**: `design/riscv_defs.vh` centralizes opcodes/ALUOp/ALUCtl encodings, migrated into `Control.v`/`ALUCtrl.v`/`ALU.v` (`ImmGen.v` left as literals — already clearly commented per-case, migrating it was judged not worth the churn). `sim/tools/asm.py` still keeps an independent Python copy of the same encodings (can't `` `include`` a Verilog header) — noted as a known sync-by-hand gap in `docs/ROADMAP.md`.
 - `wire [14:12] funct3_regde;` in `riscvpipeline.v` — a 3-bit wire declared with the *instruction-field* bit range `[14:12]` instead of a normal `[2:0]`. Functionally identical (3 bits either way) but stylistically inconsistent with every other 3-bit signal in the file and likely copy-pasted from an instruction-slicing line. Cosmetic, but the kind of thing a linter (Verible) would flag.
 - `ImmGen.v`'s `case` statement has no `default` arm — for any opcode not in {`0010011`,`1100011`,`0000011`,`0100011`,`1101111`}, `imm` is left unassigned in that evaluation of the `always @*` block, which in a real synthesis tool infers a **level-sensitive latch**, not a wire. Not a functional bug today (every consumer of `imm` gates it behind `ALUSrc`, which is 0 for opcodes ImmGen doesn't cover), but it will show up as a "latch inferred" warning the moment anyone runs a real lint pass, and is exactly the kind of thing Phase 3 (verification) should catch with an assertion or lint gate before it's allowed to merge again.
 - `reg1.v`/`reg2.v` repeat their entire reset-value field list three times (reset arm, branch-squash arm, flush arm) with only 1-2 fields differing between arms. This is the most duplicative code in the repository and the best candidate for a `packed struct`/SystemVerilog `typedef` refactor (turns ~90 lines of repeated field assignment into ~20).
@@ -233,14 +241,14 @@ This is the correct **starting point** for Phase 3, not a criticism of what exis
 | Phase | Current readiness |
 |---|---|
 | 1. Audit | This document. Done. |
-| 2. Code quality | Latch risk (`ImmGen.v` default) and the hardcoded instruction-memory path (§13.4) are fixed. `riscv_defs.vh`, lint config, and the `reg1`/`reg2` duplication cleanup (§12) are still open. |
-| 3. Verification | Underway. Self-checking directed suite exists (`sim/run_tests.sh`, `sim/tools/asm.py`, 8 programs / 36 checks, all passing) covering ISA coverage, EX/MEM and MEM/WB forwarding, load-use stall, store/load round-trip, taken/not-taken branches, and `jal`. Found and fixed 3 real bugs (see errata above). Still open: constrained-random testing (V-4), coverage collection (V-5), assertions (V-3). |
+| 2. Code quality | Latch risk, hardcoded instruction-memory path, and the defs package (§12) are fixed. Lint config and the `reg1`/`reg2` duplication cleanup are still open. |
+| 3. Verification | Underway. Self-checking directed suite (`sim/run_tests.sh`, `sim/tools/asm.py`, 12 programs / 50 checks, all passing) covering ISA coverage (now the *complete* RV32I base, §11), EX/MEM and MEM/WB forwarding, load-use stall, store/load round-trip (word and byte/halfword), taken/not-taken branches, signed/unsigned branch comparisons, `jal`, and `jalr`. Found and fixed 4 real bugs (see errata above). Still open: constrained-random testing (V-4), coverage collection (V-5), assertions (V-3). |
 | 4. Visualization | Not started. Needs a machine-readable execution trace first (a byproduct of Phase 3's self-checking testbench). |
-| 5. Extensions (RV32M/CSR/caches/prediction/etc.) | Not started; base ISA itself isn't complete yet (§11 — `jal`/`jalr`/`lui`/`auipc`/byte-store gaps should arguably close before layering M/CSR/privilege on top). |
+| 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1) done — `docs/adr/0005`. RV32M/CSR/privilege/caches/prediction not started. |
 | 6. Research platform (pluggable subsystems) | Not started; requires the parameterization work in §12 first. |
 | 7. FPGA support | Not started; `DataMemory`'s async-read model (§9) needs a BRAM-friendly variant first. |
-| 8. Tooling | Not started. |
-| 9. Documentation | This document + README are the current total. |
-| 10. Benchmarking | Not started; no working ISA-complete core to benchmark yet. |
+| 8. Tooling | `sim/tools/asm.py` (assembler) and `sim/tb/trace_debug.v` (ad hoc cycle trace) exist as early building blocks; not yet the dedicated profiler/debugger/trace-explorer tooling Phase 8 describes. |
+| 9. Documentation | This document, `docs/ROADMAP.md`, and 5 ADRs (`docs/adr/`) as of this update. |
+| 10. Benchmarking | Not started; ISA is now complete enough to be a meaningful benchmarking target, but no benchmark suite exists yet. |
 
-No git repository exists at the project root either — worth setting up before any of Phases 2–10 produce a commit history, PR review flow, or CI, all of which the later phases assume.
+Git repository initialized and committed as of this update (see commit history).

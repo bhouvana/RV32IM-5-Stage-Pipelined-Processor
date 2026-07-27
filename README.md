@@ -29,3 +29,21 @@ graph LR
         REG4[MEM/WB Register] --> WB_MUX[WB Select Mux]
     end
     WB_MUX -.->|Writeback Data| RF
+```
+
+## Project status
+
+RV32I base ISA is complete (R/I-type ALU ops, byte/halfword/word loads and
+stores, all standard branches plus two custom ones, `jal`/`jalr`,
+`lui`/`auipc`) apart from `fence`/`ecall`/`ebreak`/CSR, which need real
+exception/privilege infrastructure and are tracked as a separate milestone.
+A self-checking directed test suite (`sim/run_tests.sh`) covers ISA
+coverage, forwarding, hazards, and branch/jump resolution -- currently 12
+tests / 50 checks, all passing.
+
+This project is under active development toward a broader research-platform
+goal (RV32M, CSR/privilege, caches, branch prediction, FPGA bring-up,
+visualization/benchmarking tooling). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for the full technical audit and [docs/ROADMAP.md](docs/ROADMAP.md) for the
+phased backlog; `docs/adr/` has the design rationale for every non-trivial
+change so far.

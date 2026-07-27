@@ -1,0 +1,44 @@
+`include "riscvpipeline.v"
+`include "PC.v"
+`include "Adder.v"
+`include "ALU.v"
+`include "ALUCtrl.v"
+`include "Control.v"
+`include "DataMemory.v"
+`include "ImmGen.v"
+`include "InstructionMemory.v"
+`include "Mux2to1.v"
+`include "Mux4to1.v"
+`include "Register.v"
+`include "ShiftLeftOne.v"
+`include "reg1.v"
+`include "reg2.v"
+`include "reg3.v"
+`include "reg4.v"
+`include "Hazard.v"
+`include "Forward.v"
+
+module tb_mem_bytes;
+    reg clk = 0;
+    reg start = 0;
+
+    PIPELINED #(.INIT_FILE("sim/programs/mem_bytes.mem")) dut(clk, start);
+    `include "check_tasks.vh"
+
+    always #5 clk = ~clk;
+
+    initial begin
+        start = 0;
+        #10 start = 1;
+        #800;
+
+        check_reg(7,  32'hFFFFFFFF, "lb sign-extends 0xFF -> -1");
+        check_reg(8,  32'h000000FF, "lbu zero-extends 0xFF -> 255");
+        check_reg(10, 32'hFFFFE000, "lh sign-extends 0xE000 (bit15 set)");
+        check_reg(11, 32'h0000E000, "lhu zero-extends 0xE000");
+        check_reg(12, 32'h0000E000, "sh wrote only 2 bytes: lw readback has zero upper half");
+
+        report("mem_bytes");
+        $finish;
+    end
+endmodule

@@ -1,3 +1,5 @@
+`include "riscv_defs.vh"
+
 module ALU (
     input [4:0] ALUCtl,
     input [31:0] A,B,
@@ -15,60 +17,73 @@ begin
     ALUOut = 0;
     branch_zero =0;
 case(ALUCtl)
-    5'b00000: 
+    `ALUCTL_ADD:
     ALUOut = A + B;//simply adding
-    5'b00001:
+    `ALUCTL_SUB:
     ALUOut = A - B;//just subtracting
-    5'b00010:
+    `ALUCTL_SLL:
     ALUOut = (A << B);//logical shift left
-    5'b00011:
-    ALUOut = (A < B) ? 1 :0;//set less than
-    5'b00100:
+    `ALUCTL_SLT:
+    // A/B are plain (unsigned) ports -- $signed() is required here, the same
+    // way it is for SRA below, or this "signed" comparison would silently
+    // run unsigned (e.g. slt with A=-1 would wrongly read as A > any
+    // positive B). See docs/adr/0004-signed-arithmetic-casts.md.
+    ALUOut = ($signed(A) < $signed(B)) ? 1 :0;//set less than
+    `ALUCTL_SLTU:
     ALUOut = ($unsigned(A) < $unsigned(B)) ? 1 : 0;//set less than unsigned
-    5'b00101:
+    `ALUCTL_XOR:
     ALUOut = A ^ B;//xor
-    5'b00110:
+    `ALUCTL_SRL:
     ALUOut = (A >> B);//shift right logical
-    5'b00111:
-    // A/B are plain (unsigned) ports, so >>> alone would silently degrade to a
-    // logical shift (Verilog only sign-extends >>> when the operand's *type*
-    // is signed). $signed(A) forces true sign-extension for negative operands.
+    `ALUCTL_SRA:
+    // See docs/adr/0004-signed-arithmetic-casts.md -- >>> only sign-extends
+    // when the operand's *type* is signed, which A/B are not by default.
     ALUOut = ($signed(A) >>> B);//shift right arithmetic
-    5'b01000:
+    `ALUCTL_OR:
     ALUOut = ( A | B ) ;//OR
-    5'b01001:
+    `ALUCTL_AND:
     ALUOut = ( A & B );//AND
-    5'b01010:
+    `ALUCTL_BEQ:
         begin
             branch_zero = ( A == B ) ? 1 : 0;
             ALUOut = A & B;// beq
         end
-    5'b01011:
+    `ALUCTL_BNE:
         begin
             branch_zero = ( A != B ) ? 1 : 0;
             ALUOut = A & B;//bne
         end
-    5'b01100:
+    `ALUCTL_BLT:
         begin
-            branch_zero = ( A < B ) ? 1 : 0;
-            ALUOut = A & B;//blt
+            branch_zero = ( $signed(A) < $signed(B) ) ? 1 : 0;
+            ALUOut = A & B;//blt (signed, per RV32I)
         end
-    5'b01101:
+    `ALUCTL_BGE:
         begin
-            branch_zero = ( A >= B ) ? 1 : 0;
-            ALUOut = A & B;//bge
+            branch_zero = ( $signed(A) >= $signed(B) ) ? 1 : 0;
+            ALUOut = A & B;//bge (signed, per RV32I)
         end
-    5'b01110:
+    `ALUCTL_BLE:
         begin
-            branch_zero = ( A <= B ) ? 1 : 0;
-            ALUOut = A & B;//ble
+            branch_zero = ( $signed(A) <= $signed(B) ) ? 1 : 0;
+            ALUOut = A & B;//ble (custom; signed, consistent with blt/bge)
         end
-    5'b01111:
+    `ALUCTL_BGT:
         begin
-            branch_zero = ( A > B ) ? 1 : 0;
-            ALUOut = A & B;//bgt
+            branch_zero = ( $signed(A) > $signed(B) ) ? 1 : 0;
+            ALUOut = A & B;//bgt (custom; signed, consistent with blt/bge)
         end
-    5'b10101: 
+    `ALUCTL_BLTU:
+        begin
+            branch_zero = ( $unsigned(A) < $unsigned(B) ) ? 1 : 0;
+            ALUOut = A & B;//bltu
+        end
+    `ALUCTL_BGEU:
+        begin
+            branch_zero = ( $unsigned(A) >= $unsigned(B) ) ? 1 : 0;
+            ALUOut = A & B;//bgeu
+        end
+    `ALUCTL_CTZ:
         begin
 
             count = 0;
@@ -81,16 +96,14 @@ case(ALUCtl)
                 done =1;
             end
             ALUOut = count;
-            
+
         end
-    
+
 endcase
             zero = branch_zero;
 end
 
-//assign zero = branch_zero;
-    // ALU has two operand, it execute different operator based on ALUctl wire 
-    // output zero is for determining taking branch or not 
+    // ALU has two operands, executes a different operation based on ALUCtl.
+    // `zero` (really "branch condition true") feeds the fetch-stage redirect mux.
 
 endmodule
-

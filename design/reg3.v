@@ -13,6 +13,7 @@ module reg3(
     input [4:0] write_to_Reg_regde,
     input jump_regde,
     input [31:0] pc_plus4_regde,   // rd = PC+4 link value for jal, computed in EX
+    input [2:0] funct3_regde,      // load/store access width+signedness, for DataMemory
     //input [31:0] inst_regde,
 
     output reg memtoReg_regem,
@@ -26,7 +27,8 @@ module reg3(
     output reg [31:0] readData2_regem,
     output reg [4:0] write_to_Reg_regem,
     output reg jump_regem,
-    output reg [31:0] pc_plus4_regem
+    output reg [31:0] pc_plus4_regem,
+    output reg [2:0] funct3_regem
    // output reg [31:0] inst_regem
 );
 
@@ -46,6 +48,7 @@ if(~rst)
     write_to_Reg_regem <=0;
     jump_regem <=0;
     pc_plus4_regem <=0;
+    funct3_regem <=0;
     end
 else
     begin
@@ -61,6 +64,7 @@ else
     write_to_Reg_regem <=write_to_Reg_regde;
     jump_regem <=jump_regde;
     pc_plus4_regem <=pc_plus4_regde;
+    funct3_regem <=funct3_regde;
     end
 end
 endmodule

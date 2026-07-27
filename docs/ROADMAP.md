@@ -31,7 +31,7 @@ Three more bugs surfaced *while building the verification harness* (P0-adjacent,
 
 ## Phase 2 — Code quality (foundation for everything else)
 
-- **CQ-1**: Add `riscv_defs.vh` — single source of truth for opcodes, ALUCtl encodings, funct3/funct7 values. Migrate `Control.v`, `ALUCtrl.v`, `ImmGen.v` to use it. Removes an entire class of copy-paste bugs and is a prerequisite for RV32M/CSR work (Phase 5) which will add opcodes to the same table.
+- **CQ-1**: ✅ Done. `design/riscv_defs.vh` centralizes opcodes/ALUOp/ALUCtl encodings; migrated into `Control.v`, `ALUCtrl.v`, `ALU.v` (`ImmGen.v` left as literals — already clearly per-case commented, not worth the churn). `sim/tools/asm.py` keeps an independent Python copy (can't `` `include`` a Verilog header) — still a known hand-sync gap.
 - **CQ-2**: Add `` `default_nettype none`` to every file. Fix whatever implicit-net warnings surface.
 - **CQ-3**: Refactor `reg1.v`/`reg2.v` to eliminate the 3x-duplicated field-assignment arms (§12) — likely via a packed struct/typedef (requires moving to SystemVerilog, or a disciplined macro in plain Verilog).
 - **CQ-4**: Remove dead fields `branch_regem`/`zero_regem`/`imm_sum_regem` from `reg3.v` (confirmed unused downstream, §3).
@@ -55,8 +55,8 @@ Depends on V-1's execution trace format existing first. Once it does:
 ## Phase 5 — ISA/architectural extensions
 
 Ordered by how much they build on each other:
-1. **ISA completeness first**: `jalr`, `lui`, `auipc`, `bltu`/`bgeu` (currently entirely missing, §11), byte/halfword loads-stores (needs `DataMemory.v` to gain funct3-aware access width, §9). This closes the actual RV32I base before adding extensions on top of an incomplete one.
-2. **RV32M** (mul/div) — new opcode in `riscv_defs.vh` (CQ-1 dependency), new execute-stage unit, likely multi-cycle (division isn't single-cycle-friendly) which means this is also the project's first real excuse to design a stall/multi-cycle-execute mechanism generically instead of ad hoc.
+1. **ISA completeness first**: ✅ Done (`docs/adr/0005-isa-completeness.md`). `jalr`, `lui`, `auipc`, `bltu`/`bgeu`, byte/halfword loads-stores all implemented and verified (4 new directed tests, 16 checks). Found and fixed a real bug along the way (`docs/adr/0004`: `slt`/`blt`/`bge`/`ble`/`bgt` were comparing unsigned). RV32I base is now complete except `fence`/`ecall`/`ebreak`/CSR (see item 3).
+2. **RV32M** (mul/div) — new opcode in `riscv_defs.vh` (CQ-1, done), new execute-stage unit, likely multi-cycle (division isn't single-cycle-friendly) which means this is also the project's first real excuse to design a stall/multi-cycle-execute mechanism generically instead of ad hoc. **Next up.**
 3. **CSR + machine mode + exceptions/interrupts** — largest single item in this list; touches fetch (illegal instruction), decode (CSR opcode), and adds real architectural state (`mcause`, `mepc`, etc.). Needs its own ADR and probably its own sub-roadmap.
 4. Branch prediction (static, then BTB/dynamic), caches, MMU, dual-issue — genuinely research-scale items; each deserves to be evaluated on its own merits once the base core is verified and benchmarked, not bolted on speculatively. Listed here as backlog, not committed to.
 
@@ -82,6 +82,6 @@ Not meaningful until the core is ISA-complete (Phase 5.1) and verified (Phase 3)
 
 ---
 
-**Status**: P0 and the core of V-1/V-2 are done (see above) — Icarus Verilog is now installed and on this machine, the suite runs via `sim/run_tests.sh` or `make test`, and it found and fixed 3 real RTL bugs plus completed `jal`. 8/8 tests, 36/36 checks passing as of this update.
+**Status**: P0, CQ-1, V-1/V-2, and Phase 5.1 (ISA completeness) are done. Icarus Verilog is installed on this machine, the suite runs via `sim/run_tests.sh` or `make test`, and it found and fixed 5 real RTL bugs (`docs/adr/0002-0004`) plus completed `jal`/`jalr`/`lui`/`auipc`/`bltu`/`bgeu`/byte-halfword memory (`docs/adr/0001`, `0005`). **12/12 tests, 50/50 checks passing** as of this update. RV32I base ISA is complete except fence/ecall/ebreak/CSR.
 
-**Recommended next milestone**: CQ-1 (`riscv_defs.vh`) before touching RV32M/CSR opcodes, since those add to the same magic-number tables `Control.v`/`ALUCtrl.v` currently hardcode — or, if the priority is finishing ISA completeness first, `jalr`/`lui`/`auipc`/byte-store (Phase 5.1) using the same assemble-a-directed-test workflow this session established. Either is a reasonable next step; genuinely a judgment call on what matters more right now, not something to guess at from the roadmap alone.
+**Recommended next milestone**: RV32M (Phase 5 item 2) is the natural next step now that ISA completeness is done and would otherwise be the next thing layered on top — or Phase 4 (visualization), which is now unblocked since a real execution trace format exists via the directed-test infrastructure. Both are reasonable; RV32M keeps momentum on the ISA/verification side, visualization is a good place to make the project's current state legible to someone browsing it for the first time.

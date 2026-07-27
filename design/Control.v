@@ -1,3 +1,5 @@
+`include "riscv_defs.vh"
+
 module Control (
     input [6:0] opcode,
     //
@@ -13,7 +15,10 @@ module Control (
     output reg regWrite,
     output reg [2:0] funct3,
     output reg funct7,
-    output reg jump   // unconditional control transfer (JAL); target = EX-stage adder, link = PC+4
+    output reg jump,   // unconditional control transfer (jal/jalr); target computed in EX, link = PC+4
+    output reg jalr,   // target = rs1+imm (vs. jal's PC+imm) -- see riscvpipeline.v's target-address mux
+    output reg lui,    // ALU A operand forced to 0 (result = imm)
+    output reg auipc   // ALU A operand forced to PC (result = PC+imm)
     );
 
 always@(*)begin
@@ -21,118 +26,119 @@ always@(*)begin
     branch    = 0;
     memRead   = 0;
     memtoReg  = 0;
-    ALUOp     = 2'b00;
+    ALUOp     = `ALUOP_LOAD_STORE;
     memWrite  = 0;
     ALUSrc    = 0;
     regWrite  = 0;
     jump      = 0;
+    jalr      = 0;
+    lui       = 0;
+    auipc     = 0;
 
 
 case(opcode)
-    7'b0101010: 
+    `OPCODE_CUSTOM:
     begin// the new instruction that u people asked for
-    
-        branch =0;
-        memRead =0;
-        memtoReg =0;
-        ALUOp =2'b10;
-        memWrite =0;
-        ALUSrc =0;
+
+        ALUOp =`ALUOP_RTYPE;
         regWrite =1;
-        
+
     end
 
-    7'b0000011: 
+    `OPCODE_LOAD:
     begin//load inst
-    
-        branch =0;
+
         memRead =1;
         memtoReg =1;
-        ALUOp =2'b00;
-        memWrite =0;
         ALUSrc =1;
         regWrite =1;
-        
+
     end
-    7'b0100011://store inst
+    `OPCODE_STORE://store inst
     begin
-        branch =0;
-        memRead =0;
-        memtoReg =0;
-        ALUOp =2'b00;
         memWrite =1;
         ALUSrc =1;
-        regWrite =0;
-      
+
     end
 
-    7'b0010011://immediate inst
+    `OPCODE_I://immediate inst
     begin
-        branch =0;
-        memRead =0;
-        memtoReg =0;
-        ALUOp =2'b11;
-        memWrite =0;
+        ALUOp =`ALUOP_ITYPE;
         ALUSrc =1;
         regWrite =1;
-        
-    end
-    
-    7'b0110011://add and sub R type inst
-    begin
-         branch =0;
-        memRead =0;
-         memtoReg =0;
-        ALUOp =2'b10;
-        memWrite =0;
-        ALUSrc =0;
-        regWrite =1;
-        
+
     end
 
-    7'b1100011://branch inst
+    `OPCODE_R://add and sub R type inst
+    begin
+        ALUOp =`ALUOP_RTYPE;
+        regWrite =1;
+
+    end
+
+    `OPCODE_BRANCH:
     begin
         branch =1;
-        memRead =0;
-        memtoReg =0;
-        ALUOp =2'b01;
-        memWrite =0;
-        ALUSrc =0;
-        regWrite =0;
-        
+        ALUOp =`ALUOP_BRANCH;
+
     end
 
-    7'b1101111://jump and link inst (jal)
+    `OPCODE_JAL://jump and link (jal): target = PC+imm, link = PC+4
     begin
-        branch =0;
-        memRead =0;
-        memtoReg =0;
-        ALUOp =2'b00;
-        memWrite =0;
         ALUSrc =0;   // ALU result is unused for jal (target/link computed on dedicated adders)
         regWrite =1;
         jump = 1;
 
     end
+
+    `OPCODE_JALR://jump and link register (jalr): target = rs1+imm, link = PC+4
+    begin
+        ALUSrc =0;
+        regWrite =1;
+        jump = 1;
+        jalr = 1;
+
+    end
+
+    `OPCODE_LUI://load upper immediate (lui): rd = imm (ALU computes 0+imm)
+    begin
+        ALUOp = `ALUOP_LOAD_STORE;  // ALUCtl=ADD
+        ALUSrc =1;
+        regWrite =1;
+        lui = 1;
+
+    end
+
+    `OPCODE_AUIPC://add upper immediate to pc (auipc): rd = PC+imm (ALU computes PC+imm)
+    begin
+        ALUOp = `ALUOP_LOAD_STORE;  // ALUCtl=ADD
+        ALUSrc =1;
+        regWrite =1;
+        auipc = 1;
+
+    end
+
     default:
     begin
 
     branch    = 0;
     memRead   = 0;
     memtoReg  = 0;
-    ALUOp     = 2'b00;
+    ALUOp     = `ALUOP_LOAD_STORE;
     memWrite  = 0;
     ALUSrc    = 0;
     regWrite  = 0;
     jump      = 0;
+    jalr      = 0;
+    lui       = 0;
+    auipc     = 0;
 
     end
 endcase
 
  funct3 = funt3;
  funct7 = funt7;
-    
+
 
 end
 endmodule
-  

@@ -1,6 +1,8 @@
+`include "riscv_defs.vh"
+
 module ALUCtrl (
     input [1:0] ALUOp,
-      
+
     input funct7_c,    //funct7 = funct7[5] 6th bit of the 7 bit number funct7 taken from the instruction
     input [2:0] funct3_c,
     output reg [4:0] ALUCtl
@@ -14,86 +16,90 @@ assign concat2 = {ALUOp,funct3};
 assign concat1 = {ALUOp,funct7,funct3};
 always@(*)
 begin
-if(ALUOp == 2'b00)
+if(ALUOp == `ALUOP_LOAD_STORE)
     begin
-        ALUCtl = 5'b00000;
+        ALUCtl = `ALUCTL_ADD;
     end
-else if(ALUOp == 2'b10)
+else if(ALUOp == `ALUOP_RTYPE)
     begin
     case(concat1)
         6'b100000: // add
-        ALUCtl = 5'b00000;
+        ALUCtl = `ALUCTL_ADD;
         6'b101000: //subtract
-        ALUCtl = 5'b00001;
+        ALUCtl = `ALUCTL_SUB;
         6'b100001://shift left logical
-        ALUCtl = 5'b00010;
+        ALUCtl = `ALUCTL_SLL;
         6'b100010://set less than
-        ALUCtl = 5'b00011;
+        ALUCtl = `ALUCTL_SLT;
         6'b100011://set less than unsigned
-        ALUCtl = 5'b00100;
+        ALUCtl = `ALUCTL_SLTU;
         6'b100100://xor
-        ALUCtl = 5'b00101;
+        ALUCtl = `ALUCTL_XOR;
         6'b100101://srl
-        ALUCtl = 5'b00110;
+        ALUCtl = `ALUCTL_SRL;
         6'b101101://sra
-        ALUCtl = 5'b00111;
+        ALUCtl = `ALUCTL_SRA;
         6'b100110:
-        ALUCtl = 5'b01000;//OR
+        ALUCtl = `ALUCTL_OR;
         6'b100111:
-        ALUCtl = 5'b01001;//AND
+        ALUCtl = `ALUCTL_AND;
         6'b101111:
-        ALUCtl = 5'b10101;//new instruction calculating number of trailing zeroes
+        ALUCtl = `ALUCTL_CTZ;//new instruction calculating number of trailing zeroes
         default:
-        ALUCtl = 5'b11111;//jaathre
+        ALUCtl = `ALUCTL_ILLEGAL;//jaathre
     endcase
     end
 
 
-else if(ALUOp == 2'b01)
+else if(ALUOp == `ALUOP_BRANCH)
     begin
     case(concat2)
         5'b01000: //beq
-        ALUCtl = 5'b01010;//beq
+        ALUCtl = `ALUCTL_BEQ;
         5'b01001: //bne
-        ALUCtl = 5'b01011;//bne
+        ALUCtl = `ALUCTL_BNE;
         5'b01010: //blt
-        ALUCtl = 5'b01100;//blt
+        ALUCtl = `ALUCTL_BLT;
         5'b01011: //bge
-        ALUCtl = 5'b01101;//bge
-        5'b01100: //ble
-        ALUCtl = 5'b01110;//ble
-        5'b01101: // bgt
-        ALUCtl = 5'b10000;//bgt
+        ALUCtl = `ALUCTL_BGE;
+        5'b01100: //ble (custom)
+        ALUCtl = `ALUCTL_BLE;
+        5'b01101: // bgt (custom)
+        ALUCtl = `ALUCTL_BGT;
+        5'b01110: //bltu
+        ALUCtl = `ALUCTL_BLTU;
+        5'b01111: //bgeu
+        ALUCtl = `ALUCTL_BGEU;
         default:
-        ALUCtl = 5'b11111;//jaathre
+        ALUCtl = `ALUCTL_ILLEGAL;//jaathre
     endcase
     end
-else if(ALUOp == 2'b11)
+else if(ALUOp == `ALUOP_ITYPE)
     begin
     case(concat2)
         5'b11000: // add imm
-        ALUCtl = 5'b00000;
+        ALUCtl = `ALUCTL_ADD;
         5'b11001://shift left logical imm
-        ALUCtl = 5'b00010;
+        ALUCtl = `ALUCTL_SLL;
         5'b11010://set less than imm
-        ALUCtl = 5'b00011;
+        ALUCtl = `ALUCTL_SLT;
         5'b11011://set less than unsigned imm
-        ALUCtl = 5'b00100;
+        ALUCtl = `ALUCTL_SLTU;
         5'b11100://xor imm
-        ALUCtl = 5'b00101;
+        ALUCtl = `ALUCTL_XOR;
         5'b11101://srl imm and sra imm
         begin
             if(funct7 ==1)
-            ALUCtl = 5'b00111;
+            ALUCtl = `ALUCTL_SRA;
             else
-            ALUCtl = 5'b00110;
+            ALUCtl = `ALUCTL_SRL;
         end
         5'b11110:
-        ALUCtl = 5'b01000;//OR imm
+        ALUCtl = `ALUCTL_OR;//OR imm
         5'b11111:
-        ALUCtl = 5'b01001;//AND imm
+        ALUCtl = `ALUCTL_AND;//AND imm
         default:
-        ALUCtl = 5'b11111;//jaathre
+        ALUCtl = `ALUCTL_ILLEGAL;//jaathre
     endcase
     end
 

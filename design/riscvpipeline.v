@@ -34,6 +34,9 @@ wire [31:0] pc_new;
 //wire [2:0] funct3;
 wire [31:0] readData;
 wire jump;
+wire jalr;
+wire lui;
+wire auipc;
 
 // rst is active-low and synchronous: while low, every pipeline register
 // and the architectural register file hold their reset values; once
@@ -104,7 +107,10 @@ wire funct7_control;
         .regWrite(regWrite),
         .funct3(funct3_control),
         .funct7(funct7_control),
-        .jump(jump)
+        .jump(jump),
+        .jalr(jalr),
+        .lui(lui),
+        .auipc(auipc)
     );
 //
     ImmGen #(.Width(32)) m_ImmGen(
@@ -151,6 +157,9 @@ wire funct7_control;
     wire [1:0] forwardA;
     wire [1:0] forwardB;
     wire jump_regde;
+    wire jalr_regde;
+    wire lui_regde;
+    wire auipc_regde;
     //
 reg2 m_reg2(
     .clk(clk),
@@ -175,6 +184,9 @@ reg2 m_reg2(
     .readReg1(inst_regfd[19:15]),
     .readReg2(inst_regfd[24:20]),
     .jump(jump),
+    .jalr(jalr),
+    .lui(lui),
+    .auipc(auipc),
 
     .branch_regde(branch_regde),
     .memRead_regde(memRead_regde),
@@ -193,7 +205,10 @@ reg2 m_reg2(
     .funct3_regde(funct3_regde),
     .readReg1_regde(readReg1_regde),
     .readReg2_regde(readReg2_regde),
-    .jump_regde(jump_regde)
+    .jump_regde(jump_regde),
+    .jalr_regde(jalr_regde),
+    .lui_regde(lui_regde),
+    .auipc_regde(auipc_regde)
 );
 
 wire funct7_regde;
@@ -223,11 +238,19 @@ Forward m_Forward(
     .o(imm_s)
     );
 //
+    // Target-address base/offset: branch/jal use PC + (shifted immediate);
+    // jalr uses rs1 + (plain, unshifted immediate) with bit0 cleared per
+    // spec. Same adder, muxed inputs -- avoids a second dedicated adder for
+    // what is otherwise identical redirect-target-computation plumbing.
+    wire [31:0] target_base = jalr_regde ? readData1_final : pc_o_regde;
+    wire [31:0] target_off  = jalr_regde ? imm_regde : imm_s;
+    wire [31:0] imm_sum_raw;
     Adder m_Adder_2(
-    .a(pc_o_regde),
-    .b(imm_s),
-    .sum(imm_sum)
+    .a(target_base),
+    .b(target_off),
+    .sum(imm_sum_raw)
     );
+    assign imm_sum = {imm_sum_raw[31:1], 1'b0};  // clear bit0 (only jalr needs this; branch/jal sums are already even)
 
     // Link value for jal (rd = PC+4). Reuses the generic Adder the same way
     // Adder_1 (fetch, PC+4) and Adder_2 (branch/jump target) already do.
@@ -284,9 +307,24 @@ Forward m_Forward(
     .ALUCtl(ALUCtl)
     );
 //
+    // lui/auipc have no real rs1 (those instruction bits are part of the
+    // U-type immediate) -- they reuse the ALU's ADD by overriding its A
+    // operand: 0 for lui (result = imm), PC for auipc (result = PC+imm).
+    // This is why lui/auipc need no writeback-mux override or forwarding
+    // correction the way jal/jalr did: ALUOut is already the right value,
+    // so it flows through the existing EX/MEM path untouched.
+    wire [31:0] aluA;
+    Mux4to1 #(.size(32)) m_Mux_ALU_A_Src(
+    .sel({auipc_regde, lui_regde}),
+    .s0(readData1_final),
+    .s1(32'b0),
+    .s2(pc_o_regde),
+    .out(aluA)
+    );
+
     ALU m_ALU(
     .ALUCtl(ALUCtl),
-    .A(readData1_final),
+    .A(aluA),
     .B(imm_reg_val),
     .ALUOut(ALUOut),
     .zero(zero),
@@ -308,6 +346,7 @@ wire [31:0] readData2_regem;
 wire [4:0] write_to_Reg_regem;
 wire jump_regem;
 wire [31:0] pc_plus4_regem;
+wire [2:0] funct3_regem;
 //
 reg3 m_reg3(
     .clk(clk),
@@ -330,6 +369,7 @@ reg3 m_reg3(
     .write_to_Reg_regde(write_to_Reg_regde),
     .jump_regde(jump_regde),
     .pc_plus4_regde(pc_plus4_regde),
+    .funct3_regde(funct3_regde),
 
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
@@ -342,7 +382,8 @@ reg3 m_reg3(
     .readData2_regem(readData2_regem),
     .write_to_Reg_regem(write_to_Reg_regem),
     .jump_regem(jump_regem),
-    .pc_plus4_regem(pc_plus4_regem)
+    .pc_plus4_regem(pc_plus4_regem),
+    .funct3_regem(funct3_regem)
 );
 
 //MEMORY
@@ -353,6 +394,7 @@ reg3 m_reg3(
     .memRead(memRead_regem),
     .address(ALUOut_regem),
     .writeData(readData2_regem),
+    .funct3(funct3_regem),
     .readData(readData)
     );
 //

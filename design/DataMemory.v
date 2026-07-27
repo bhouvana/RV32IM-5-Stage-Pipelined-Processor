@@ -5,9 +5,10 @@ module DataMemory(
 	input memRead,
 	input [31:0] address,
 	input [31:0] writeData,
+	input [2:0] funct3,   // access width/signedness: 000=b(signed) 001=h(signed) 010=w 100=bu 101=hu
 	output reg [31:0] readData
 );
-	
+
 
 	reg [7:0] data_memory [127:0];
 	always @ (posedge clk) begin
@@ -143,21 +144,37 @@ module DataMemory(
 		end
 		else begin
 			if(memWrite) begin
-				data_memory[address + 3] <= writeData[31:24];
-				data_memory[address + 2] <= writeData[23:16];
-				data_memory[address + 1] <= writeData[15:8];
-				data_memory[address]     <= writeData[7:0];
+				// funct3[1:0]: 00=sb, 01=sh, 10=sw (funct3[2] unused for stores)
+				case(funct3[1:0])
+					2'b00: begin // sb
+						data_memory[address] <= writeData[7:0];
+					end
+					2'b01: begin // sh
+						data_memory[address + 1] <= writeData[15:8];
+						data_memory[address]     <= writeData[7:0];
+					end
+					default: begin // sw
+						data_memory[address + 3] <= writeData[31:24];
+						data_memory[address + 2] <= writeData[23:16];
+						data_memory[address + 1] <= writeData[15:8];
+						data_memory[address]     <= writeData[7:0];
+					end
+				endcase
 			end
 
 			end
-	end       
+	end
 
 	always @(*) begin
 		if(memRead) begin
-			readData[31:24]   = data_memory[address + 3];
-			readData[23:16]   = data_memory[address + 2];
-			readData[15:8]    = data_memory[address + 1];
-			readData[7:0]     = data_memory[address];
+			// funct3: 000=lb 001=lh 010=lw 100=lbu 101=lhu
+			case(funct3)
+				3'b000: readData = {{24{data_memory[address][7]}}, data_memory[address]};                      //lb
+				3'b100: readData = {24'b0, data_memory[address]};                                               //lbu
+				3'b001: readData = {{16{data_memory[address+1][7]}}, data_memory[address+1], data_memory[address]}; //lh
+				3'b101: readData = {16'b0, data_memory[address+1], data_memory[address]};                       //lhu
+				default: readData = {data_memory[address+3], data_memory[address+2], data_memory[address+1], data_memory[address]}; //lw
+			endcase
 		end
 		else begin
 			readData          = 32'b0;
