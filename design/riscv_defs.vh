@@ -24,6 +24,7 @@
 `define OPCODE_LUI    7'b0110111
 `define OPCODE_AUIPC  7'b0010111
 `define OPCODE_CUSTOM 7'b0101010  // ctz (see design/ALUCtrl.v ALUCtl=10101)
+`define OPCODE_SYSTEM 7'b1110011  // CSR instructions, ecall, ebreak, mret (docs/adr/0011-csr-and-exceptions.md)
 
 // ---- ALUOp (Control.v output -> ALUCtrl.v input) ----
 `define ALUOP_LOAD_STORE 2'b00  // lw/sw/jal: ALU always adds
@@ -69,5 +70,38 @@
 `define FUNCT7_BASE   7'b0000000  // add/sll/slt/sltu/xor/srl/or/and
 `define FUNCT7_ALT    7'b0100000  // sub/sra, and this core's custom ctz
 `define FUNCT7_MULDIV 7'b0000001  // RV32M
+
+// ---- CSR / exceptions (docs/adr/0011-csr-and-exceptions.md) ----
+// M-mode only: no S-mode/U-mode, no PMP, no real interrupts (this design
+// has no interrupt lines) -- synchronous exceptions (illegal instruction,
+// ecall, ebreak) and the 5 CSRs needed to handle and return from them.
+
+// SYSTEM opcode funct3 (inst[14:12]): which CSR op, or "not a CSR read/
+// write at all" (000 -- ecall/ebreak/mret, distinguished by inst[31:20]).
+`define CSR_F3_NONE   3'b000
+`define CSR_F3_RW     3'b001
+`define CSR_F3_RS     3'b010
+`define CSR_F3_RC     3'b011
+`define CSR_F3_RWI    3'b101
+`define CSR_F3_RSI    3'b110
+`define CSR_F3_RCI    3'b111
+
+// inst[31:20] (the "csr" field position) for funct3=000's three defined instructions.
+`define CSR_IMM12_ECALL  12'h000
+`define CSR_IMM12_EBREAK 12'h001
+`define CSR_IMM12_MRET   12'h302
+
+// CSR addresses (standard RISC-V machine-mode assignments)
+`define CSR_ADDR_MSTATUS  12'h300
+`define CSR_ADDR_MTVEC    12'h305
+`define CSR_ADDR_MSCRATCH 12'h340
+`define CSR_ADDR_MEPC     12'h341
+`define CSR_ADDR_MCAUSE   12'h342
+
+// mcause values this core can actually raise (exceptions only -- interrupt
+// bit, mcause[31], is always 0 here since nothing generates interrupts)
+`define MCAUSE_ILLEGAL_INSTRUCTION 32'd2
+`define MCAUSE_BREAKPOINT          32'd3
+`define MCAUSE_ECALL_FROM_M        32'd11
 
 `endif

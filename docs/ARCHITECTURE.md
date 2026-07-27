@@ -34,6 +34,14 @@ verification as the highest-leverage next investment rather than a nice-to-have:
    directed test (none happened to use a shift-amount register holding
    >=32); found by constrained-random cross-checking against an independent
    reference model. See `docs/adr/0010-random-testing-and-coverage.md`.
+6. **`riscvpipeline.v` declared `funct3_regde` with a source-bit-position-
+   shaped range (`[14:12]`) instead of a plain 3-bit width (`[2:0]`)** --
+   every prior use connected or indexed the whole vector (position/value
+   based, so the mismatched index labels never mattered), but CSR wiring's
+   `funct3_regde[2]`/`funct3_regde[1:0]` bit-selects fell outside the
+   declared `[12:14]` range and silently read as `x`. Found immediately by
+   the CSR directed tests (a consecutive-cycle CSR read-after-write
+   corrupted with X). See `docs/adr/0011-csr-and-exceptions.md`.
 
 Also implemented in this pass: `jal` (previously decoded but functionally
 inert, §11) is now fully wired -- target, link value, and forwarding
@@ -209,15 +217,15 @@ However: the signal is called `rst` throughout the design but is literally wired
 | Jumps | `jal jalr` (both fully wired: target, PC+4 link, forwarding correction) | — |
 | Upper-immediate | `lui auipc` (both reuse the ALU's `ADD` via an A-operand override, no new writeback path) | — |
 | Custom | `ctz`-like instruction, opcode `0101010`, `ALUOp=10`, funct7=`1`/funct3=`111` pattern | — |
-| Fence/system | none | `fence ecall ebreak` and CSR absent (expected — no exception/privilege support yet; tracked as its own Phase 5 item, deliberately not bundled into ISA completeness) |
+| Fence/system | `ecall ebreak mret` (M-mode synchronous exceptions) and `csrrw csrrs csrrc csrrwi csrrsi csrrci` against `mstatus mtvec mscratch mepc mcause` — see `docs/adr/0011-csr-and-exceptions.md` | `fence` (a no-op on this in-order, single-hart, no-cache design — nothing for it to order); real interrupts (no timer/external IRQ line exists to drive them); S-mode/U-mode/PMP |
 
-**Bottom line**: RV32I base ISA is complete except `fence`/`ecall`/`ebreak`/CSR, which need real exception/privilege-mode infrastructure and are scoped as their own milestone rather than an "ISA completeness" checkbox item. The README's claim of "all the R I L S B type instructions" is now accurate.
+**Bottom line**: RV32I base ISA plus RV32M (`docs/adr/0006`) is complete. M-mode synchronous exceptions and the CSRs needed to handle/return from them (`docs/adr/0011`) close the last ISA-completeness gap named in Phase 5; only `fence` (structurally a no-op here) and real interrupt support (no hardware interrupt source exists) remain unimplemented, both by design rather than oversight. The README's claim of "all the R I L S B type instructions" is now accurate and understates what's actually implemented.
 
 ## 12. Coding style / synthesis-friendliness observations
 
 - No `` `default_nettype none`` in any file — an accidentally-undeclared wire becomes an implicit 1-bit net instead of a compile error. Cheap, high-value fix, still open.
 - ~~No shared constants/parameters package~~ **Done**: `design/riscv_defs.vh` centralizes opcodes/ALUOp/ALUCtl encodings, migrated into `Control.v`/`ALUCtrl.v`/`ALU.v` (`ImmGen.v` left as literals — already clearly commented per-case, migrating it was judged not worth the churn). `sim/tools/asm.py` still keeps an independent Python copy of the same encodings (can't `` `include`` a Verilog header) — noted as a known sync-by-hand gap in `docs/ROADMAP.md`.
-- `wire [14:12] funct3_regde;` in `riscvpipeline.v` — a 3-bit wire declared with the *instruction-field* bit range `[14:12]` instead of a normal `[2:0]`. Functionally identical (3 bits either way) but stylistically inconsistent with every other 3-bit signal in the file and likely copy-pasted from an instruction-slicing line. Cosmetic, but the kind of thing a linter (Verible) would flag.
+- ~~`wire [14:12] funct3_regde;` in `riscvpipeline.v`~~ **Fixed** (`docs/adr/0011`): this was flagged here as merely cosmetic, but turned out to be a real latent bug — every use up to that point connected/indexed the *whole* vector (position/value based, so the mismatched index labels never mattered), but `docs/adr/0011`'s CSR wiring was the first code to bit-select *into* it (`funct3_regde[2]`, `funct3_regde[1:0]`), and those indices fall outside the declared `[12:14]` range, silently reading as `x`. Now `[2:0]`. Worth remembering as a general lesson: an index-range mismatch that only ever appears in whole-vector connections is invisible until something finally slices it.
 - `ImmGen.v`'s `case` statement has no `default` arm — for any opcode not in {`0010011`,`1100011`,`0000011`,`0100011`,`1101111`}, `imm` is left unassigned in that evaluation of the `always @*` block, which in a real synthesis tool infers a **level-sensitive latch**, not a wire. Not a functional bug today (every consumer of `imm` gates it behind `ALUSrc`, which is 0 for opcodes ImmGen doesn't cover), but it will show up as a "latch inferred" warning the moment anyone runs a real lint pass, and is exactly the kind of thing Phase 3 (verification) should catch with an assertion or lint gate before it's allowed to merge again.
 - ~~`reg1.v`/`reg2.v` repeat their entire reset-value field list~~ **Done** (`docs/adr/0008`): `reg2.v` now uses text macros (`` `ZERO_CONTROL_FIELDS`` etc.) instead of repeating ~90 lines across 4 arms; `reg1.v` needed no change (already minimal).
 - Every register file, memory, and pipeline register in the design is sized as literal `32`/`128`/`5` rather than a `localparam`. Fine for a fixed RV32I core; blocking for the "compare pipeline depths / memory sizes" research-platform goal in Phase 6, which needs these to be `parameter`s threaded from a top-level config.
@@ -248,13 +256,13 @@ This is the correct **starting point** for Phase 3, not a criticism of what exis
 |---|---|
 | 1. Audit | This document. Done. |
 | 2. Code quality | Latch risk, hardcoded instruction-memory path, defs package, `default_nettype none` (which found 3 genuinely undeclared wires, `docs/adr/0008`), dead-field removal, and `reg1`/`reg2` dedup are all done. Real Verible lint config (CQ-5) is the only item still open. |
-| 3. Verification | Substantially complete. Self-checking directed suite (`sim/run_tests.sh`, 16 programs / 87 checks), 4 embedded assertions (`docs/adr/0007`), an independent reference-model ISS (`sim/tools/iss.py`) cross-checked against 110 constrained-random programs (`docs/adr/0010`), and functional coverage (`sim/tools/coverage_report.py`). Found and fixed 7 real bugs total (see errata above plus the shift-mask bug from V-4). Remaining gap: `blt`/`bge`/`ble`/`bgt`/`bltu`/`bgeu` each still missing directed coverage of one branch direction (documented, lower priority). |
+| 3. Verification | Substantially complete. Self-checking directed suite (`sim/run_tests.sh`, 21 programs / 114 checks, including 5 new CSR/exception tests), 4 embedded assertions (`docs/adr/0007`), an independent reference-model ISS (`sim/tools/iss.py`, now covering CSR/`ecall`/`ebreak`/`mret`) cross-checked against constrained-random programs (`docs/adr/0010`), and functional coverage (`sim/tools/coverage_report.py`). Found and fixed 8 real bugs total (see errata above plus the shift-mask bug from V-4). Remaining gaps: `blt`/`bge`/`ble`/`bgt`/`bltu`/`bgeu` each still missing directed coverage of one branch direction; `ALUCTL_ILLEGAL` (a recognized opcode with an unrecognized funct7/funct3, as opposed to `illegalOpcode`'s unrecognized-opcode case) has no directed test yet (both documented, lower priority). |
 | 4. Visualization | First version done: `sim/tb/gen_trace.v` + `sim/tools/gen_trace.py`/`build_viewer.py` produce an interactive, playable pipeline-occupancy viewer from a real execution trace (`make viewer`). Multi-program comparison and VCD export still open. |
-| 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1, `docs/adr/0005`) and RV32M (5.2, `docs/adr/0006` + `0009`) done, including a real multi-cycle divider (`design/Divider.v`) with a genuine pipeline interlock — the project's first multi-cycle-execute mechanism. CSR/privilege/caches/prediction not started. |
+| 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1, `docs/adr/0005`), RV32M (5.2, `docs/adr/0006` + `0009`), and CSR/M-mode synchronous exceptions (5.3, `docs/adr/0011`) all done. RV32M includes a real multi-cycle divider (`design/Divider.v`) with a genuine pipeline interlock — the project's first multi-cycle-execute mechanism, whose stall/redirect shape CSR/exceptions reused directly. Caches/branch prediction/interrupts not started (the last needs a hardware interrupt source this design doesn't have — see `docs/adr/0011`'s Future improvements). |
 | 6. Research platform (pluggable subsystems) | Not started; requires the parameterization work in §12 first. |
 | 7. FPGA support | Not started; `DataMemory`'s async-read model (§9) needs a BRAM-friendly variant first. |
-| 8. Tooling | `sim/tools/asm.py` (assembler) and `sim/tb/trace_debug.v` (ad hoc cycle trace) exist as early building blocks; not yet the dedicated profiler/debugger/trace-explorer tooling Phase 8 describes. |
-| 9. Documentation | This document, `docs/ROADMAP.md`, and 5 ADRs (`docs/adr/`) as of this update. |
+| 8. Tooling | `sim/tools/asm.py` (assembler, now with CSR/`ecall`/`ebreak`/`mret` encoding and a raw `word` directive) and `sim/tb/trace_debug.v` (ad hoc cycle trace) exist as early building blocks; not yet the dedicated profiler/debugger/trace-explorer tooling Phase 8 describes. |
+| 9. Documentation | This document, `docs/ROADMAP.md`, and 11 ADRs (`docs/adr/`) as of this update. |
 | 10. Benchmarking | Not started; ISA is now complete enough to be a meaningful benchmarking target, but no benchmark suite exists yet. |
 
 Git repository initialized and committed as of this update (see commit history).

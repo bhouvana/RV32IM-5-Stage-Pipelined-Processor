@@ -18,6 +18,7 @@
 `include "Hazard.v"
 `include "Forward.v"
 `include "Divider.v"
+`include "CSR.v"
 
 module tb_jal;
     `include "check_tasks.vh"

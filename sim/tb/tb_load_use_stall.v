@@ -18,6 +18,7 @@
 `include "Hazard.v"
 `include "Forward.v"
 `include "Divider.v"
+`include "CSR.v"
 
 module tb_load_use_stall;
     `include "check_tasks.vh"

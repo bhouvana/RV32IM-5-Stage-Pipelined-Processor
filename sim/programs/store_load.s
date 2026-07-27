@@ -7,8 +7,9 @@ addi x5, x0, 16
 addi x6, x0, 1234
 sw   x6, 0(x5)
 lw   x7, 0(x5)
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

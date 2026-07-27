@@ -52,6 +52,14 @@ OP_JALR = 0b1100111
 OP_LUI = 0b0110111
 OP_AUIPC = 0b0010111
 OP_CUSTOM = 0b0101010
+OP_SYSTEM = 0b1110011
+
+CSR_ADDR = {  # standard RISC-V machine-mode addresses (docs/adr/0011-csr-and-exceptions.md)
+    "mstatus": 0x300, "mtvec": 0x305, "mscratch": 0x340, "mepc": 0x341, "mcause": 0x342,
+}
+CSR_OP = {"csrrw": 0b001, "csrrs": 0b010, "csrrc": 0b011,
+          "csrrwi": 0b101, "csrrsi": 0b110, "csrrci": 0b111}
+SYSTEM_IMM12 = {"ecall": 0x000, "ebreak": 0x001, "mret": 0x302}
 
 FUNCT7_BASE = 0b0000000
 FUNCT7_ALT = 0b0100000    # sub/sra, and this core's custom ctz
@@ -148,6 +156,30 @@ def ctz(rd, rs1):
     return (FUNCT7_ALT << 25) | (0 << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_CUSTOM
 
 
+def csr_lookup(csr):
+    # dict.get(key, default) evaluates `default` eagerly even on a hit, so a
+    # plain-name lookup like `.get(csr, int(csr, 0))` would try to int()
+    # "mscratch" every time -- an explicit membership check avoids that.
+    if csr in CSR_ADDR:
+        return CSR_ADDR[csr]
+    return csr if isinstance(csr, int) else int(csr, 0)
+
+
+def csr_reg(mn, rd, csr, rs1):
+    csr_addr = csr_lookup(csr)
+    return (u(csr_addr, 12) << 20) | (rs1 << 15) | (CSR_OP[mn] << 12) | (rd << 7) | OP_SYSTEM
+
+
+def csr_imm(mn, rd, csr, uimm):
+    csr_addr = csr_lookup(csr)
+    uimm5 = imm(uimm, 5, signed=False)
+    return (u(csr_addr, 12) << 20) | (uimm5 << 15) | (CSR_OP[mn] << 12) | (rd << 7) | OP_SYSTEM
+
+
+def system_noarg(mn):
+    return (SYSTEM_IMM12[mn] << 20) | OP_SYSTEM
+
+
 def assemble(lines):
     # pass 1: strip comments/whitespace, record label addresses
     stmts = []
@@ -210,6 +242,19 @@ def assemble(lines):
         elif mn == "auipc":
             rd = reg(args[0])
             words.append(u_type(OP_AUIPC, rd, args[1]))
+        elif mn in ("csrrw", "csrrs", "csrrc"):
+            rd, csr, rs1 = reg(args[0]), args[1], reg(args[2])
+            words.append(csr_reg(mn, rd, csr, rs1))
+        elif mn in ("csrrwi", "csrrsi", "csrrci"):
+            rd, csr, uimm = reg(args[0]), args[1], args[2]
+            words.append(csr_imm(mn, rd, csr, uimm))
+        elif mn in ("ecall", "ebreak", "mret"):
+            words.append(system_noarg(mn))
+        elif mn == "word":
+            # Raw 32-bit word, for encodings this assembler has no mnemonic
+            # for -- e.g. an opcode this core doesn't implement, to exercise
+            # the illegal-instruction trap (docs/adr/0011-csr-and-exceptions.md).
+            words.append(u(int(args[0], 0), 32))
         else:
             raise ValueError(f"unknown mnemonic {mn!r} in line: {line!r}")
     return words

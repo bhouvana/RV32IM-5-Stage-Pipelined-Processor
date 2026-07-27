@@ -39,6 +39,10 @@ def sext(v, bits):
     return v
 
 
+CSR_MSTATUS, CSR_MTVEC, CSR_MSCRATCH, CSR_MEPC, CSR_MCAUSE = 0x300, 0x305, 0x340, 0x341, 0x342
+MCAUSE_ILLEGAL_INSTRUCTION, MCAUSE_BREAKPOINT, MCAUSE_ECALL_FROM_M = 2, 3, 11
+
+
 class ISS:
     def __init__(self, mem_size=128):
         self.regs = [0] * 32
@@ -46,10 +50,40 @@ class ISS:
         self.mem = bytearray(mem_size)
         self.pc = 0
         self.halted = False
+        # CSR state (docs/adr/0011-csr-and-exceptions.md) -- only the 5
+        # machine-mode CSRs design/CSR.v implements. mstatus models just the
+        # MIE (bit3) / MPIE (bit7) trap-enable stack, matching that module.
+        self.csr = {CSR_MSTATUS: 0, CSR_MTVEC: 0, CSR_MSCRATCH: 0, CSR_MEPC: 0, CSR_MCAUSE: 0}
 
     def wr(self, rd, val):
         if rd != 0:
             self.regs[rd] = u32(val)
+
+    def csr_read(self, addr):
+        return self.csr.get(addr, 0)
+
+    def csr_write(self, addr, val):
+        if addr == CSR_MSTATUS:  # only bits 3 (MIE) and 7 (MPIE) are real, see design/CSR.v
+            val &= (1 << 3) | (1 << 7)
+        if addr in self.csr:
+            self.csr[addr] = u32(val)
+
+    def trap(self, cause):
+        # Matches design/CSR.v's trap_taken path exactly: mepc <- the
+        # trapping instruction's own PC (not next_pc), mcause <- cause,
+        # mstatus.MPIE <- mstatus.MIE, mstatus.MIE <- 0, pc <- mtvec.
+        mie = (self.csr[CSR_MSTATUS] >> 3) & 1
+        self.csr[CSR_MSTATUS] = (mie << 7)
+        self.csr[CSR_MEPC] = self.pc
+        self.csr[CSR_MCAUSE] = u32(cause)
+        self.pc = self.csr[CSR_MTVEC]
+
+    def mret(self):
+        # Matches design/CSR.v's mret_taken path: mstatus.MIE <- mstatus.MPIE,
+        # mstatus.MPIE <- 1, pc <- mepc.
+        mpie = (self.csr[CSR_MSTATUS] >> 7) & 1
+        self.csr[CSR_MSTATUS] = (mpie << 3) | (1 << 7)
+        self.pc = self.csr[CSR_MEPC]
 
     def load_mem_byte(self, addr):
         return self.mem[addr & 0x7F]
@@ -253,15 +287,65 @@ class ISS:
             self.wr(rd, u32(self.pc + (word & 0xFFFFF000)))
             self.pc = next_pc
 
+        elif op == 0b1110011:  # SYSTEM: csrrw/rs/rc(+i), ecall, ebreak, mret
+            csr_addr = (word >> 20) & 0xFFF
+            if f3 == 0b000:
+                if csr_addr == 0x000:
+                    self.trap(MCAUSE_ECALL_FROM_M)
+                elif csr_addr == 0x001:
+                    self.trap(MCAUSE_BREAKPOINT)
+                elif csr_addr == 0x302:
+                    self.mret()
+                else:
+                    self.trap(MCAUSE_ILLEGAL_INSTRUCTION)  # SYSTEM/f3=0, not ecall/ebreak/mret
+            else:
+                # rs1's raw 5-bit field doubles as the zero-extended uimm for
+                # the *i variants -- matches design/riscvpipeline.v's
+                # csr_wdata = funct3[2] ? {27'b0, inst[19:15]} : readData1.
+                old = self.csr_read(csr_addr)
+                src = rs1 if (f3 & 0b100) else A
+                csr_op = f3 & 0b011  # 01=write, 10=set, 11=clear -- matches design/CSR.v
+                if csr_op == 0b01:
+                    new_val = src
+                elif csr_op == 0b10:
+                    new_val = old | src
+                else:
+                    new_val = old & ~src
+                self.csr_write(csr_addr, new_val)
+                self.wr(rd, old)
+                self.pc = next_pc
+
         else:
-            raise ValueError(f"unknown opcode {op:07b}")
+            # Matches design/Control.v's outer default case (docs/adr/0011):
+            # any opcode this core doesn't implement traps as an illegal
+            # instruction rather than being a simulator-level error.
+            self.trap(MCAUSE_ILLEGAL_INSTRUCTION)
 
     def run(self, words, max_steps=20000):
+        # Every generated/hand-written test program (docs/adr/0011) now ends
+        # in a deliberate `jal x0, <self>` rather than running off the end
+        # into instruction memory's zero-filled remainder (opcode 0000000 is
+        # not a valid instruction and correctly traps as of that ADR) --
+        # detect that specific self-loop and stop cleanly there instead of
+        # spinning for the full step budget. Reaching max_steps *without*
+        # hitting a self-loop is still treated as a genuine runaway: nothing
+        # else should be able to loop, since sim/tools/random_gen.py only
+        # ever generates forward-only branches/jumps.
         byte_len = len(words) * 4
         steps = 0
         while self.pc < byte_len and steps < max_steps:
-            self.step(words[self.pc // 4])
+            word = words[self.pc // 4]
+            if word & 0x7F == 0b1101111:  # jal
+                b20 = (word >> 31) & 1
+                b19_12 = (word >> 12) & 0xFF
+                b11 = (word >> 20) & 1
+                b10_1 = (word >> 21) & 0x3FF
+                off = sext((b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1), 21)
+                if off == 0:
+                    break  # self-loop halt, see comment above
+            self.step(word)
             steps += 1
-        if steps >= max_steps:
-            raise RuntimeError(f"exceeded {max_steps} steps -- program likely loops forever")
+        else:
+            if steps >= max_steps:
+                raise RuntimeError(f"exceeded {max_steps} steps without reaching a self-loop -- program likely loops forever unexpectedly")
         return steps

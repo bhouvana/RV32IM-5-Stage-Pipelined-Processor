@@ -9,8 +9,9 @@ addi x1, x0, 17
 addi x2, x0, 5
 div  x3, x1, x2       # x3 = 3, takes ~33 cycles (pipeline stalls throughout)
 add  x4, x3, x3        # immediately dependent -- must forward div's real result, not garbage
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

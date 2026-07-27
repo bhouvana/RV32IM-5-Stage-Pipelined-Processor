@@ -12,8 +12,9 @@ target:               # address 16
 add  x3, x1, x1       # depends on jalr's link register immediately -- exercises
                        # the same EX/MEM forwarding correction jal needed (jalr
                        # also sets `jump`, so it's covered by the same fix)
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

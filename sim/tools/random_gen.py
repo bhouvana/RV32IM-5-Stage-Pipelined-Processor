@@ -106,8 +106,11 @@ def gen_program(seed, n_instrs=16, base_addr=32):
 
     if len(instrs) in labels_at:
         out.append(labels_at[len(instrs)] + ":")
-    out.append("nop")
-    out.append("nop")
+    # Spin here instead of running off the end into instruction memory's
+    # zero-filled remainder -- opcode 0000000 is not a valid instruction and
+    # (correctly, after docs/adr/0011-csr-and-exceptions.md) now traps.
+    out.append("__halt:")
+    out.append("jal x0, __halt")
     return "\n".join(out) + "\n"
 
 

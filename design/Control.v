@@ -10,6 +10,9 @@ module Control (
                           // funct7=0000001 distinguished from add/sub's 0/0100000,
                           // which the single-bit version couldn't represent.
     input [2:0] funt3,
+    input [11:0] csr_imm12,  // inst[31:20]: a CSR address for real csrrX ops,
+                              // or the funct12 that distinguishes ecall/ebreak/mret
+                              // when opcode=SYSTEM and funt3=000 (docs/adr/0011)
     //
     output reg branch,
     output reg memRead,
@@ -23,7 +26,14 @@ module Control (
     output reg jump,   // unconditional control transfer (jal/jalr); target computed in EX, link = PC+4
     output reg jalr,   // target = rs1+imm (vs. jal's PC+imm) -- see riscvpipeline.v's target-address mux
     output reg lui,    // ALU A operand forced to 0 (result = imm)
-    output reg auipc   // ALU A operand forced to PC (result = PC+imm)
+    output reg auipc,  // ALU A operand forced to PC (result = PC+imm)
+    output reg isCsr,      // genuine csrrw/csrrs/csrrc(+i variants) -- rd gets the CSR's old value
+    output reg isEcall,
+    output reg isEbreak,
+    output reg isMret,
+    output reg illegalOpcode  // opcode itself unrecognized -- see riscvpipeline.v for the
+                               // other exception source (ALUCtl==ILLEGAL, a recognized
+                               // opcode with an unrecognized funct7/funct3)
     );
 
 always@(*)begin
@@ -39,6 +49,11 @@ always@(*)begin
     jalr      = 0;
     lui       = 0;
     auipc     = 0;
+    isCsr     = 0;
+    isEcall   = 0;
+    isEbreak  = 0;
+    isMret    = 0;
+    illegalOpcode = 0;
 
 
 case(opcode)
@@ -123,6 +138,29 @@ case(opcode)
 
     end
 
+    `OPCODE_SYSTEM:
+    begin
+        if (funt3 == `CSR_F3_NONE)
+        begin
+            // Not a csrrX read/write at all -- inst[31:20] (csr_imm12 here)
+            // picks which of the three funct3=000 instructions this is.
+            // Anything else in this position is a reserved/unallocated
+            // SYSTEM encoding -- illegalOpcode below, same exception
+            // riscvpipeline.v raises for any other unrecognized instruction.
+            case (csr_imm12)
+                `CSR_IMM12_ECALL:  isEcall  = 1;
+                `CSR_IMM12_EBREAK: isEbreak = 1;
+                `CSR_IMM12_MRET:   isMret   = 1;
+                default: illegalOpcode = 1;  // SYSTEM/funct3=0 but not ecall/ebreak/mret
+            endcase
+        end
+        else
+        begin
+            isCsr = 1;
+            regWrite = 1;  // rd <- CSR's old value (see riscvpipeline.v's ex_result override)
+        end
+    end
+
     default:
     begin
 
@@ -137,6 +175,7 @@ case(opcode)
     jalr      = 0;
     lui       = 0;
     auipc     = 0;
+    illegalOpcode = 1;
 
     end
 endcase

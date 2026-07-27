@@ -18,6 +18,7 @@
 `include "Hazard.v"
 `include "Forward.v"
 `include "Divider.v"
+`include "CSR.v"
 
 // Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__
 // and __MAX_TIME__ are substituted per run. Dumps final architectural

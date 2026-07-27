@@ -18,6 +18,7 @@
 `include "Hazard.v"
 `include "Forward.v"
 `include "Divider.v"
+`include "CSR.v"
 
 // Emits one CSV row per cycle to trace.csv -- every field here is read
 // directly off a real DUT signal, nothing is inferred/reconstructed. Used

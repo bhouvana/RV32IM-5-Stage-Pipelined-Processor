@@ -18,7 +18,12 @@
     jump_regde <= 0; \
     jalr_regde <= 0; \
     lui_regde <= 0; \
-    auipc_regde <= 0;
+    auipc_regde <= 0; \
+    isCsr_regde <= 0; \
+    isEcall_regde <= 0; \
+    isEbreak_regde <= 0; \
+    isMret_regde <= 0; \
+    illegalOpcode_regde <= 0;
 
 `define ZERO_DECODE_CONTEXT \
     pc_o_regde <= 0; \
@@ -72,6 +77,11 @@ module reg2(
     input jalr,
     input lui,
     input auipc,
+    input isCsr,
+    input isEcall,
+    input isEbreak,
+    input isMret,
+    input illegalOpcode,
 
     output reg branch_regde,
     output reg memRead_regde,
@@ -93,7 +103,12 @@ module reg2(
     output reg jump_regde,
     output reg jalr_regde,
     output reg lui_regde,
-    output reg auipc_regde
+    output reg auipc_regde,
+    output reg isCsr_regde,
+    output reg isEcall_regde,
+    output reg isEbreak_regde,
+    output reg isMret_regde,
+    output reg illegalOpcode_regde
 
 );
 
@@ -157,6 +172,11 @@ begin
         jalr_regde <= jalr;
         lui_regde <= lui;
         auipc_regde <= auipc;
+        isCsr_regde <= isCsr;
+        isEcall_regde <= isEcall;
+        isEbreak_regde <= isEbreak;
+        isMret_regde <= isMret;
+        illegalOpcode_regde <= illegalOpcode;
         `PASS_DECODE_CONTEXT
         inst_regde <= inst_regfd;
     end

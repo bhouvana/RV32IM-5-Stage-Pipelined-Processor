@@ -44,6 +44,25 @@ task check_mem_word;
     end
 endtask
 
+task check_val;
+    // Generic form of check_reg/check_mem_word for anything else worth
+    // asserting on directly -- e.g. a CSR module's internal register
+    // (docs/adr/0011-csr-and-exceptions.md), passed in by the caller since
+    // Verilog-2005 has no dynamic hierarchical-path-by-string lookup.
+    input [31:0] actual;
+    input [31:0] expected;
+    input [511:0] label;
+    begin
+        total_checks = total_checks + 1;
+        if (actual !== expected) begin
+            total_fails = total_fails + 1;
+            $display("  FAIL  %0s: 0x%08h, expected 0x%08h", label, actual, expected);
+        end else begin
+            $display("  pass  %0s: 0x%08h", label, actual);
+        end
+    end
+endtask
+
 task report;
     input [255:0] test_name;
     begin

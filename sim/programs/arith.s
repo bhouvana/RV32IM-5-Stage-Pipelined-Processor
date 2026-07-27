@@ -30,8 +30,9 @@ andi  x21, x1, 3       # 5&3=1
 ctz   x22, x23         # x23 was never written (=0): loop scans bits[0:30],
                         # all zero, `done` never sets -> count=31 (documented
                         # off-by-one in ALU.v; a true ctz(0) would be 32).
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

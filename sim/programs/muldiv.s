@@ -36,5 +36,9 @@ addi x26, x0, -1
 div  x27, x25, x26       # signed overflow (INT_MIN/-1) -> INT_MIN, per spec
 rem  x28, x25, x26        # signed overflow -> 0, per spec
 
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

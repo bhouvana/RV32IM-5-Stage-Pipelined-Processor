@@ -11,8 +11,9 @@ sll  x3, x2, x1          # 1<<3=8, NOT 1<<35 (which would be 0)
 addi x4, x0, -8           # 0xFFFFFFF8
 srl  x5, x4, x1             # logical: 0xFFFFFFF8>>3 = 0x1FFFFFFF
 sra  x6, x4, x1              # arithmetic: -8>>>3 = -1 (0xFFFFFFFF), sign preserved
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

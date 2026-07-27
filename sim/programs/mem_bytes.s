@@ -15,8 +15,9 @@ lw   x12, 8(x5)                  # full-word readback: must be 0x0000E000, NOT
                                   # 0xABCDE000 -- if sh had wrongly written all 4
                                   # bytes (like the original word-only sw), the
                                   # upper half would leak 0xABCD in here.
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

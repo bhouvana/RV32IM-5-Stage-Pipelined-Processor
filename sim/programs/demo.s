@@ -14,8 +14,9 @@ addi x8, x0, 999      # poison (squashed)
 addi x8, x0, 888      # poison (squashed)
 target:
 addi x8, x0, 42
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

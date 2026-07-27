@@ -12,8 +12,9 @@ nop
 nop                 # let the setup store fully drain before the timed part begins
 lw   x7, 0(x5)      # load-use hazard starts here
 add  x8, x7, x7     # must stall one cycle to get the correct (post-load) x7
-nop
-nop
-nop
-nop
-nop
+
+halt:
+jal x0, halt   # spin here forever instead of running off the end of the
+               # program into instruction memory's zero-filled remainder --
+               # opcode 0000000 is not a valid instruction and (correctly,
+               # after docs/adr/0011) now traps. See docs/adr/0011-csr-and-exceptions.md.

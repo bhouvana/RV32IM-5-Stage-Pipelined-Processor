@@ -20,11 +20,11 @@
 `include "Divider.v"
 `include "CSR.v"
 
-module tb_div_forward;
+module tb_ebreak_trap;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/div_forward.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/ebreak_trap.mem")) dut(clk, start);
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;
@@ -32,12 +32,15 @@ module tb_div_forward;
     initial begin
         start = 0;
         #10 start = 1;
-        #900;  // ~1 division (~33 cycles) plus setup/drain -- generous margin
+        #300;
 
-        check_reg(3, 32'd3, "div(17,5) = 3");
-        check_reg(4, 32'd6, "EX/MEM forward of multi-cycle div result: x4=x3+x3=6");
+        check_reg(9, 32'd0,   "x9 never written: both addi's after the trap were redirected away");
+        check_reg(10, 32'd77, "x10=77: the handler at mtvec ran");
+        check_val(dut.m_CSR.mepc, 32'd8,   "mepc = ebreak's own address");
+        check_val(dut.m_CSR.mcause, 32'd3, "mcause = 3 (BREAKPOINT)");
+        check_val(dut.m_CSR.mtvec, 32'd20, "mtvec unchanged from setup");
 
-        report("div_forward");
+        report("ebreak_trap");
 `ifdef COVERAGE
         dut.dump_coverage;
 `endif

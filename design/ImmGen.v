@@ -73,6 +73,13 @@ module ImmGen#(parameter Width = 32) (
                 imm = {inst[31:12], 12'b0};
             end
 
+            7'b1110011: //SYSTEM (csrrw/csrrs/csrrc+i, ecall, ebreak, mret) --
+                        //inst[31:20] is the CSR address for real csrrX ops
+            begin      //(riscvpipeline.v takes imm[11:0] as csr_addr); zero-
+                       //extended since a CSR address isn't sign-extended
+                imm = {20'b0, inst[31:20]};
+            end
+
 	endcase
     end
             

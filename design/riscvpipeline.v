@@ -45,6 +45,12 @@ wire stall;         // load-use hazard (Hazard.v); freezes PC/IF-ID
 wire flush;         // load-use hazard (Hazard.v); bubbles ID/EX
 wire branch_zero;   // ALU's raw branch-condition output, registered into `zero`
 wire pc_stall;      // stall | div_stall (docs/adr/0009) -- what PC/reg1 actually freeze on
+wire isCsr;         // CSR/exceptions (docs/adr/0011-csr-and-exceptions.md)
+wire isEcall;
+wire isEbreak;
+wire isMret;
+wire illegalOpcode;
+wire [31:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a trap/mret
 
 // rst is active-low and synchronous: while low, every pipeline register
 // and the architectural register file hold their reset values; once
@@ -60,9 +66,9 @@ wire pc_stall;      // stall | div_stall (docs/adr/0009) -- what PC/reg1 actuall
     );
     //
     Mux2to1 #(.size(32)) m_Mux_PC(
-        .sel(branch_taken),   // fires on a taken branch OR an unconditional jal, both resolved in EX
+        .sel(branch_taken),   // fires on a taken branch, jal/jalr, a trap, or mret -- all resolved in EX
         .s0(pc_new),
-        .s1(imm_sum),
+        .s1(redirect_target),
         .out(pc_final)
 
     );
@@ -92,7 +98,7 @@ reg1 m_reg1(
     .pc_o(pc_o),
     .branch_regde(branch_regde),
     .zero(zero),
-    .jump(jump_regde),
+    .jump(unconditional_redirect),  // jal/jalr, or a trap/mret (docs/adr/0011) -- see branch_taken's definition
     .inst_regfd(inst_regfd),
     .pc_o_regfd(pc_o_regfd)
 );
@@ -106,6 +112,7 @@ wire [6:0] funct7_control;
         .opcode(inst_regfd[6:0]),
         .funt7(inst_regfd[31:25]),
         .funt3(inst_regfd[14:12]),
+        .csr_imm12(inst_regfd[31:20]),
         .branch(branch),
         .memRead(memRead),
         .memtoReg(memtoReg),
@@ -118,7 +125,12 @@ wire [6:0] funct7_control;
         .jump(jump),
         .jalr(jalr),
         .lui(lui),
-        .auipc(auipc)
+        .auipc(auipc),
+        .isCsr(isCsr),
+        .isEcall(isEcall),
+        .isEbreak(isEbreak),
+        .isMret(isMret),
+        .illegalOpcode(illegalOpcode)
     );
 //
     ImmGen #(.Width(32)) m_ImmGen(
@@ -168,6 +180,11 @@ wire [6:0] funct7_control;
     wire jalr_regde;
     wire lui_regde;
     wire auipc_regde;
+    wire isCsr_regde;
+    wire isEcall_regde;
+    wire isEbreak_regde;
+    wire isMret_regde;
+    wire illegalOpcode_regde;
     //
 reg2 m_reg2(
     .clk(clk),
@@ -196,6 +213,11 @@ reg2 m_reg2(
     .jalr(jalr),
     .lui(lui),
     .auipc(auipc),
+    .isCsr(isCsr),
+    .isEcall(isEcall),
+    .isEbreak(isEbreak),
+    .isMret(isMret),
+    .illegalOpcode(illegalOpcode),
 
     .branch_regde(branch_regde),
     .memRead_regde(memRead_regde),
@@ -217,17 +239,24 @@ reg2 m_reg2(
     .jump_regde(jump_regde),
     .jalr_regde(jalr_regde),
     .lui_regde(lui_regde),
-    .auipc_regde(auipc_regde)
+    .auipc_regde(auipc_regde),
+    .isCsr_regde(isCsr_regde),
+    .isEcall_regde(isEcall_regde),
+    .isEbreak_regde(isEbreak_regde),
+    .isMret_regde(isMret_regde),
+    .illegalOpcode_regde(illegalOpcode_regde)
 );
 
 wire [6:0] funct7_regde;
-wire [14:12] funct3_regde;
+wire [2:0] funct3_regde;
 wire [31:0] readData1_final;
 wire [31:0] readData2_final;
 wire branch_taken;
-// Fires on a taken branch or an unconditional jal -- both resolved here in EX,
-// both squash the two younger in-flight instructions (see reg1.jump / reg2.branch_taken).
-assign branch_taken = (branch_regde & zero) | jump_regde;
+wire unconditional_redirect;  // jal/jalr | trap | mret -- see the assign below, and docs/adr/0011
+// Fires on a taken branch, an unconditional jal/jalr, a synchronous
+// exception, or mret -- all resolved here in EX, all squash the two
+// younger in-flight instructions (see reg1.jump / reg2.branch_taken).
+assign branch_taken = (branch_regde & zero) | unconditional_redirect;
 
 // forwarding unit
 Forward m_Forward(
@@ -375,10 +404,57 @@ Forward m_Forward(
     assign pc_stall = stall | div_stall;
 
     wire [31:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
-    // What EX "produces" this cycle: the divider's result on div/rem
-    // (valid only when div_done, but only consumed downstream on that exact
-    // cycle -- see reg3_bubble below), the ALU's result otherwise.
-    wire [31:0] ex_result = isDivRem ? div_result : ALUOut;
+
+    // CSR / synchronous exceptions (docs/adr/0011-csr-and-exceptions.md).
+    // M-mode only, no real interrupts -- illegal instruction, ecall, ebreak,
+    // and the csrrw/csrrs/csrrc(+i) instructions plus mret to act on them.
+    // Both exception sources resolve in EX, same stage as branch/jal/jalr:
+    // illegalOpcode_regde came from Control.v at decode time (an
+    // unrecognized opcode, or SYSTEM/funct3=0 with an unrecognized
+    // funct12), while ALUCtl==ILLEGAL is only known now, after ALUCtrl has
+    // decoded a *recognized* opcode's funct7/funct3 and found no valid op.
+    wire exception_taken = illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) | isEcall_regde | isEbreak_regde;
+    wire [31:0] trap_cause = (illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL)) ? `MCAUSE_ILLEGAL_INSTRUCTION :
+                              isEbreak_regde ? `MCAUSE_BREAKPOINT :
+                              isEcall_regde  ? `MCAUSE_ECALL_FROM_M :
+                              32'b0;
+
+    // csrrwi/csrrsi/csrrci (funct3[2]=1) source their write data from a
+    // zero-extended 5-bit immediate sitting in rs1's *field position*
+    // (inst[19:15]) rather than a real register read; csrrw/csrrs/csrrc
+    // (funct3[2]=0) use the actual (forwarded) rs1 value.
+    wire [31:0] csr_wdata = funct3_regde[2] ? {27'b0, inst_regde[19:15]} : readData1_final;
+    wire [31:0] csr_old_val;
+    wire [31:0] mtvec_val, mepc_val;
+
+    CSR m_CSR(
+    .clk(clk),
+    .rst(start),
+    .csr_write_en(isCsr_regde),
+    .csr_addr(imm_regde[11:0]),   // ImmGen.v zero-extends inst[31:20] into imm for OPCODE_SYSTEM
+    .csr_op(funct3_regde[1:0]),
+    .csr_wdata(csr_wdata),
+    .csr_rdata(csr_old_val),
+    .trap_taken(exception_taken),
+    .trap_pc(pc_o_regde),
+    .trap_cause(trap_cause),
+    .mret_taken(isMret_regde),
+    .mtvec_val(mtvec_val),
+    .mepc_val(mepc_val)
+    );
+
+    // What EX "produces" this cycle: the CSR's old value on a real csrrX op,
+    // the divider's result on div/rem (valid only when div_done, but only
+    // consumed downstream on that exact cycle -- see reg3_bubble below),
+    // the ALU's result otherwise. No forwarding correction needed for CSR
+    // reads either (same reasoning as lui/auipc, docs/adr/0009): ex_result
+    // is already correct by the time reg3 latches it.
+    wire [31:0] ex_result = isCsr_regde ? csr_old_val : (isDivRem ? div_result : ALUOut);
+
+    assign unconditional_redirect = jump_regde | exception_taken | isMret_regde;
+    assign redirect_target = exception_taken ? mtvec_val :
+                              isMret_regde    ? mepc_val :
+                                                 imm_sum;  // existing branch/jal/jalr target path
 
     // Compiled in only with -DCOVERAGE (see sim/tools/coverage_report.py,
     // docs/ROADMAP.md V-5). Not a real statement/branch coverage tool (none
