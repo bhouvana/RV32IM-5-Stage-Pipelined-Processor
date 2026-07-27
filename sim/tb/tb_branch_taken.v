@@ -25,7 +25,7 @@ module tb_branch_taken;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/branch_taken.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/branch_taken.mem")) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 

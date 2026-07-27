@@ -24,7 +24,7 @@ module tb_csr_ops;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/csr_ops.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/csr_ops.mem")) dut(.clk(clk), .start(start));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;

@@ -32,7 +32,7 @@ module dump_regs;
     integer i;
     integer fd;
 
-    PIPELINED #(.INIT_FILE("__INIT_FILE__")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("__INIT_FILE__")) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 

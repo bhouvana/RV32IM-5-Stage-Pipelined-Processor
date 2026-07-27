@@ -24,7 +24,7 @@ module tb_lui_auipc;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/lui_auipc.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/lui_auipc.mem")) dut(.clk(clk), .start(start));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;

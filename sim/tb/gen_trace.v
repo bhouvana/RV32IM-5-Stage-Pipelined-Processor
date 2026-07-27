@@ -36,7 +36,7 @@ module gen_trace;
     integer fd;
     integer cycle;
 
-    PIPELINED #(.INIT_FILE("sim/programs/demo.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/demo.mem")) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 

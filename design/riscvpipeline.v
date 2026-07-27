@@ -3,10 +3,22 @@
 `include "riscv_defs.vh"
 
 module PIPELINED #(
-    parameter INIT_FILE = "sim/programs/arith.mem"
+    parameter INIT_FILE = "sim/programs/arith.mem",
+    parameter MEM_SIZE_BYTES = 128   // threaded to both memories (docs/ROADMAP.md
+                                       // Phase 6/7) -- default matches every
+                                       // existing test program's assumptions,
+                                       // so this is a no-op unless overridden.
 )(
     input clk,
-    input start
+    input start,
+    output [31:0] debug_x10   // read-only tap on x10/a0 (docs/adr/0012-fpga-
+                                // readiness.md) -- a bare-metal test program's
+                                // natural "write your result here" register
+                                // under the standard RISC-V calling
+                                // convention. Unused by every existing
+                                // testbench (an unconnected output changes
+                                // nothing about existing behavior); fpga/top.v
+                                // is the first consumer.
 );
 wire branch;
 wire memRead;
@@ -60,7 +72,7 @@ wire [31:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a t
 
  //FETCH
 
-    InstructionMemory #(.INIT_FILE(INIT_FILE)) m_InstMem(
+    InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES)) m_InstMem(
     .readAddr(pc_o),
     .inst(inst)
     );
@@ -605,7 +617,7 @@ end
 `endif
 
 //MEMORY
-    DataMemory m_DataMemory(
+    DataMemory #(.SIZE_BYTES(MEM_SIZE_BYTES)) m_DataMemory(
     .rst(start),
     .clk(clk),
     .memWrite(memWrite_regem),
@@ -662,6 +674,8 @@ reg4 m_reg4(
     .s1(pc_plus4_regwb),
     .out(writeData_regwb)
     );
+
+    assign debug_x10 = m_Register.regs[10];
 
 endmodule
 

@@ -24,7 +24,7 @@ module tb_ebreak_trap;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/ebreak_trap.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/ebreak_trap.mem")) dut(.clk(clk), .start(start));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;

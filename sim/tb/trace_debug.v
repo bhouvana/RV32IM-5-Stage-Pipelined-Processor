@@ -29,7 +29,7 @@ module trace_debug;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/store_load.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/store_load.mem")) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 

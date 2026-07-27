@@ -25,7 +25,7 @@ module tb_forward_exmem;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/forward_exmem.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/forward_exmem.mem")) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 

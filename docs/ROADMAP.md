@@ -62,11 +62,11 @@ Ordered by how much they build on each other:
 
 ## Phase 6 — Research platform (pluggable subsystems)
 
-Requires CQ-1 (defs) and the parameterization cleanup noted in §12 (widths/depths as `parameter`, not literals) before "compare hazard strategies" or "compare pipeline depths" is even mechanically possible. Realistic entry point: parameterize `DataMemory`/`InstructionMemory` size first (low risk, immediately useful for larger test programs), then revisit.
+Requires CQ-1 (defs) and the parameterization cleanup noted in §12 (widths/depths as `parameter`, not literals) before "compare hazard strategies" or "compare pipeline depths" is even mechanically possible. `DataMemory`/`InstructionMemory` size parameterization is done (`docs/adr/0012`, done alongside FPGA readiness since both needed it); the architectural register file and pipeline register widths are still fixed literals and are the realistic next entry point.
 
 ## Phase 7 — FPGA support
 
-Blocked on `DataMemory.v`'s combinational-read model (§9) — needs a synchronous-read variant to infer BRAM cleanly on Xilinx/Intel/Lattice toolchains. Do this after ISA completeness, not before, so the FPGA target isn't chasing a moving ISA.
+Scaffolding done (`docs/adr/0012-fpga-readiness.md`): `DataMemory`/`InstructionMemory` sizes are now `parameter`s, a standalone synchronous-read memory (`design/DataMemoryBRAM.v`) exists and is unit-tested but not yet wired into the live pipeline, `PIPELINED` has a `debug_x10` observability port, and `fpga/top.v` + `fpga/constraints_template.xdc` give a vendor-neutral bring-up target. Still blocked on the real remaining item: retiming the MEM stage (`Forward.v`/`Hazard.v`) to actually integrate synchronous-read memory, and first real hardware validation — both deliberately deferred as their own scoped work rather than attempted alongside CSR/exceptions and code-quality changes in the same pass. This was done after ISA completeness (Phase 5) as planned, so the FPGA target wasn't chasing a moving ISA.
 
 ## Phase 8 — Tooling
 
@@ -90,4 +90,6 @@ Not meaningful until the core is ISA-complete (Phase 5.1) and verified (Phase 3)
 
 **Status update**: CSR/exceptions (Phase 5 item 3) is done (`docs/adr/0011-csr-and-exceptions.md`) — `ecall`/`ebreak`/illegal-instruction traps, `mret` return, and all six `csrrX` forms against `mstatus`/`mtvec`/`mscratch`/`mepc`/`mcause`. Found and fixed a real X-propagation bug along the way: `funct3_regde` was declared with a source-bit-position-shaped range (`[14:12]`) instead of a plain width (`[2:0]`), invisible until CSR wiring became the first code to bit-select into it. **21/21 directed tests, 114/114 checks passing**, plus 60/60 random programs matching the independent ISS reference (now also modeling CSR/exception semantics, `sim/tools/iss.py`).
 
-**Recommended next milestone**: FPGA readiness (Phase 7) is the largest remaining item — blocked on `DataMemory`'s combinational-read model needing a synchronous-read variant, plus a constraints template and top-level wrapper.
+**Status update**: FPGA readiness (Phase 7) scaffolding is done (`docs/adr/0012-fpga-readiness.md`) — memory sizes parameterized, a standalone unit-tested synchronous-read memory, a `debug_x10` observability port, a vendor-neutral bring-up top level, and a generic XDC constraints template. Also removed the long-unused `simulation/` directory (the pre-verification-harness waveform-dump testbench `sim/` fully superseded back in Phase 3). **22/22 directed tests, 122/122 checks passing**, plus 30/30 random cross-check programs. The real remaining Phase 7 work — retiming the MEM stage to integrate synchronous-read memory, and actual hardware validation — is deliberately scoped as its own future milestone (see the ADR's Future improvements) rather than attempted as a drive-by change.
+
+**Recommended next milestone**: the MEM-stage retiming to finish Phase 7 (integrate `design/DataMemoryBRAM.v`, verified on real hardware) is the largest remaining item with a concrete starting point. Research platform (Phase 6) and benchmarking (Phase 10) are the other open phases with no blocking dependency left standing in their way.

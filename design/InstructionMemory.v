@@ -5,25 +5,28 @@ module InstructionMemory #(
     // (Icarus resolves $readmemb paths against the invoking process's CWD,
     // not the source file's location) -- the provided Makefile always
     // invokes vvp from the repository root, so paths here are repo-root-relative.
-    parameter INIT_FILE = "sim/programs/arith.mem"
+    parameter INIT_FILE = "sim/programs/arith.mem",
+    parameter SIZE_BYTES = 128   // was a hardcoded 128 throughout; now threaded
+                                   // from PIPELINED, matching DataMemory.v
+                                   // (docs/ROADMAP.md Phase 6/7).
 ) (
     input [31:0] readAddr,
     output [31:0] inst
 );
 
-    reg [7:0] insts [127:0];
+    reg [7:0] insts [0:SIZE_BYTES-1];
 
-    assign inst = (readAddr >= 128) ? 32'b0 : {insts[readAddr], insts[readAddr + 1], insts[readAddr + 2], insts[readAddr + 3]};
+    assign inst = (readAddr >= SIZE_BYTES) ? 32'b0 : {insts[readAddr], insts[readAddr + 1], insts[readAddr + 2], insts[readAddr + 3]};
 
     integer i;
     initial begin
-        for (i = 0; i < 128; i = i + 1)
+        for (i = 0; i < SIZE_BYTES; i = i + 1)
             insts[i] = 8'b0;
         // Explicit start/stop avoids relying on simulator-specific default
         // behavior for which end of a descending-range array $readmemb fills
         // first (Icarus warns about exactly this ambiguity otherwise).
         if (INIT_FILE != "")
-            $readmemb(INIT_FILE, insts, 0, 127);
+            $readmemb(INIT_FILE, insts, 0, SIZE_BYTES-1);
     end
 
 endmodule

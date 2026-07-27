@@ -25,7 +25,7 @@ module tb_jal;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/jal_test.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/jal_test.mem")) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 
