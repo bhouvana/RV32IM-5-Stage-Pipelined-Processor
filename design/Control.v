@@ -1,3 +1,5 @@
+`default_nettype none
+
 `include "riscv_defs.vh"
 
 module Control (
@@ -145,3 +147,5 @@ endcase
 
 end
 endmodule
+
+`default_nettype wire

@@ -1,3 +1,5 @@
+`default_nettype none
+
 module reg4(
     input clk,
     input rst,
@@ -42,3 +44,5 @@ begin
     end
 end
 endmodule
+
+`default_nettype wire

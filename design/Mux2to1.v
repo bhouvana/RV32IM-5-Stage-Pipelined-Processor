@@ -1,3 +1,5 @@
+`default_nettype none
+
 module Mux2to1 #(
     parameter size = 32
 ) 
@@ -12,3 +14,4 @@ assign out = sel ? s1 : s0;
     
 endmodule
 
+`default_nettype wire

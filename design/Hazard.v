@@ -1,3 +1,5 @@
+`default_nettype none
+
 module Hazard (
 
     input [4:0] readReg1_fd,
@@ -24,3 +26,5 @@ end
 endmodule
 
 //"C:\Users\samar\Downloads\TEST_INSTRUCTIONS_2.txt"
+
+`default_nettype wire

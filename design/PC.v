@@ -1,3 +1,5 @@
+`default_nettype none
+
 module PC (
     input clk,
     input rst,
@@ -17,3 +19,4 @@ always @(posedge clk ) begin
 end
 endmodule
 
+`default_nettype wire

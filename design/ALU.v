@@ -1,3 +1,5 @@
+`default_nettype none
+
 `include "riscv_defs.vh"
 
 module ALU (
@@ -153,3 +155,5 @@ end
     // `zero` (really "branch condition true") feeds the fetch-stage redirect mux.
 
 endmodule
+
+`default_nettype wire

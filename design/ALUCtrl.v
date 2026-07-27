@@ -1,3 +1,5 @@
+`default_nettype none
+
 `include "riscv_defs.vh"
 
 module ALUCtrl (
@@ -103,3 +105,5 @@ else if(ALUOp == `ALUOP_ITYPE)
 
 end
 endmodule
+
+`default_nettype wire

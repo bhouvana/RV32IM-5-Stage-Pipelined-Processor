@@ -1,3 +1,5 @@
+`default_nettype none
+
 module DataMemory(
 	input rst,
 	input clk,
@@ -183,3 +185,4 @@ module DataMemory(
 
 endmodule
 
+`default_nettype wire

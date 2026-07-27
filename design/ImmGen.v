@@ -1,3 +1,5 @@
+`default_nettype none
+
 module ImmGen#(parameter Width = 32) (
     input [Width-1:0] inst,
     output reg signed [Width-1:0] imm
@@ -75,3 +77,5 @@ module ImmGen#(parameter Width = 32) (
     end
             
 endmodule
+
+`default_nettype wire

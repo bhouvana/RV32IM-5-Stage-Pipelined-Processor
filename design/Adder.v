@@ -1,3 +1,5 @@
+`default_nettype none
+
 module Adder (
     input signed [31:0] a,
     input signed [31:0] b,
@@ -10,3 +12,4 @@ module Adder (
 
 endmodule
 
+`default_nettype wire

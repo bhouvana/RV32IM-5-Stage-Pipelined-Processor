@@ -1,3 +1,5 @@
+`default_nettype none
+
 module Forward (
 
     input [4:0] readReg1_regde,
@@ -45,3 +47,5 @@ end
 `endif
 
 endmodule
+
+`default_nettype wire

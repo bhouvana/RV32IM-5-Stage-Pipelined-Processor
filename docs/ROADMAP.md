@@ -32,9 +32,9 @@ Three more bugs surfaced *while building the verification harness* (P0-adjacent,
 ## Phase 2 — Code quality (foundation for everything else)
 
 - **CQ-1**: ✅ Done. `design/riscv_defs.vh` centralizes opcodes/ALUOp/ALUCtl encodings; migrated into `Control.v`, `ALUCtrl.v`, `ALU.v` (`ImmGen.v` left as literals — already clearly per-case commented, not worth the churn). `sim/tools/asm.py` keeps an independent Python copy (can't `` `include`` a Verilog header) — still a known hand-sync gap.
-- **CQ-2**: Add `` `default_nettype none`` to every file. Fix whatever implicit-net warnings surface.
-- **CQ-3**: Refactor `reg1.v`/`reg2.v` to eliminate the 3x-duplicated field-assignment arms (§12) — likely via a packed struct/typedef (requires moving to SystemVerilog, or a disciplined macro in plain Verilog).
-- **CQ-4**: Remove dead fields `branch_regem`/`zero_regem`/`imm_sum_regem` from `reg3.v` (confirmed unused downstream, §3).
+- **CQ-2**: ✅ Done (`docs/adr/0008-code-quality-cleanup.md`). Added `` `default_nettype none`` to every design file. This wasn't a no-op: `stall`, `flush`, and `branch_zero` in `riscvpipeline.v` were genuinely undeclared, relying on implicit net declaration -- harmless in practice (always used consistently) but exactly the class of thing this guards against for the next typo. Fixed with explicit `wire` declarations.
+- **CQ-3**: ✅ Done. `reg1.v` turned out not to need it (already minimal, 2 fields). `reg2.v`'s ~90 lines of repeated field-assignment arms reduced via Verilog-2001 text macros (`` `ZERO_CONTROL_FIELDS``/`` `ZERO_DECODE_CONTEXT``/`` `PASS_DECODE_CONTEXT``) rather than a SystemVerilog struct -- avoids a toolchain language-mode change for one file.
+- **CQ-4**: ✅ Done. Removed `branch_regem`/`zero_regem`/`imm_sum_regem` from `reg3.v` (confirmed unused downstream) plus a second dead wire (`readData1_regem` in `riscvpipeline.v`, declared but never connected, predating this session) found during the same pass.
 - **CQ-5**: Set up Verible (lint + format) and a `Makefile`/`justfile` with `make sim`, `make lint`, `make wave` targets. No CI without a git repo — see P0-adjacent infra item below.
 - **Infra**: initialize git (`git init`), commit the current state as a baseline before any of the above land, so every subsequent change has a reviewable diff.
 

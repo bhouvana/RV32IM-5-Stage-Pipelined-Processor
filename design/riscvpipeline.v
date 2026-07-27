@@ -1,3 +1,5 @@
+`default_nettype none
+
 module PIPELINED #(
     parameter INIT_FILE = "sim/programs/arith.mem"
 )(
@@ -37,6 +39,9 @@ wire jump;
 wire jalr;
 wire lui;
 wire auipc;
+wire stall;         // load-use hazard (Hazard.v); freezes PC/IF-ID
+wire flush;         // load-use hazard (Hazard.v); bubbles ID/EX
+wire branch_zero;   // ALU's raw branch-condition output, registered into `zero`
 
 // rst is active-low and synchronous: while low, every pipeline register
 // and the architectural register file hold their reset values; once
@@ -335,13 +340,9 @@ Forward m_Forward(
 wire [4:0] write_to_Reg_regde;
 wire memtoReg_regem;
 wire regWrite_regem;
-wire branch_regem;
 wire memRead_regem;
 wire memWrite_regem;
-wire [31:0] imm_sum_regem;
-wire zero_regem;
 wire [31:0] ALUOut_regem;
-wire [31:0] readData1_regem;
 wire [31:0] readData2_regem;
 wire [4:0] write_to_Reg_regem;
 wire jump_regem;
@@ -353,11 +354,8 @@ reg3 m_reg3(
     .rst(start),
     .memtoReg_regde(memtoReg_regde),
     .regWrite_regde(regWrite_regde),
-    .branch_regde(branch_regde),
     .memRead_regde(memRead_regde),
     .memWrite_regde(memWrite_regde),
-    .imm_sum(imm_sum),
-    .zero(zero),
     .ALUOut(ALUOut),
     // Store data must come from the forwarded value (readData2_final), not
     // the raw decode-stage readData2_regde: Forward.v/Mux4to1 already
@@ -373,11 +371,8 @@ reg3 m_reg3(
 
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
-    .branch_regem(branch_regem),
     .memRead_regem(memRead_regem),
     .memWrite_regem(memWrite_regem),
-    .imm_sum_regem(imm_sum_regem),
-    .zero_regem(zero_regem),
     .ALUOut_regem(ALUOut_regem),
     .readData2_regem(readData2_regem),
     .write_to_Reg_regem(write_to_Reg_regem),
@@ -467,3 +462,5 @@ reg4 m_reg4(
     );
 
 endmodule
+
+`default_nettype wire

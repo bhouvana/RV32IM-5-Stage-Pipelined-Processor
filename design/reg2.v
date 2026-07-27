@@ -1,3 +1,45 @@
+`default_nettype none
+
+// Field-assignment macros factor out what was previously ~90 lines of
+// near-identical repetition across the four arms below (docs/ARCHITECTURE.md
+// sec 12 flagged this as the most duplicative code in the repository).
+// Verilog-2001 has no struct/typedef to reach for here, so this uses plain
+// `` `define`` text macros -- a portable, toolchain-agnostic way to get the
+// same "assign this named group of fields" effect.
+`define ZERO_CONTROL_FIELDS \
+    branch_regde <= 0; \
+    memRead_regde <= 0; \
+    memtoReg_regde <= 0; \
+    memWrite_regde <= 0; \
+    ALUSrc_regde <= 0; \
+    regWrite_regde <= 0; \
+    ALUOp_regde <= 0; \
+    write_to_Reg_regde <= 0; \
+    jump_regde <= 0; \
+    jalr_regde <= 0; \
+    lui_regde <= 0; \
+    auipc_regde <= 0;
+
+`define ZERO_DECODE_CONTEXT \
+    pc_o_regde <= 0; \
+    readData1_regde <= 0; \
+    readData2_regde <= 0; \
+    imm_regde <= 0; \
+    funct7_regde <= 0; \
+    funct3_regde <= 0; \
+    readReg1_regde <= 0; \
+    readReg2_regde <= 0;
+
+`define PASS_DECODE_CONTEXT \
+    pc_o_regde <= pc_o_regfd; \
+    readData1_regde <= readData1; \
+    readData2_regde <= readData2; \
+    imm_regde <= imm; \
+    funct7_regde <= funct7; \
+    funct3_regde <= funct3; \
+    readReg1_regde <= readReg1; \
+    readReg2_regde <= readReg2;
+
 module reg2(
     input clk,
     input rst,
@@ -17,7 +59,7 @@ module reg2(
     input [31:0] imm,
     input [31:0] inst_regfd,
     input flush,
-    input branch_taken, 
+    input branch_taken,
     input [4:0] readReg1,
     input [4:0] readReg2,
     input jump,
@@ -53,115 +95,61 @@ always@(posedge clk)
 begin
     if(~rst)
     begin
-        branch_regde <= 0;
-        memRead_regde <= 0;
-        memtoReg_regde <= 0;
-        memWrite_regde <= 0;
-        ALUSrc_regde <=0 ;
-        regWrite_regde <= 0;
-        ALUOp_regde <= 0;
-        write_to_Reg_regde <= 0 ;
-        pc_o_regde <= 0;
-        readData1_regde <= 0;
-        readData2_regde <= 0;
-        imm_regde <= 0;
-        inst_regde <= 0 ;
-        funct7_regde <= 0;
-        funct3_regde <= 0;
-        readData1_regde <= 0;
-        readData2_regde <= 0;
-        jump_regde <= 0;
-        jalr_regde <= 0;
-        lui_regde <= 0;
-        auipc_regde <= 0;
-
+        // Power-on reset: every field, including decode context, starts at 0.
+        `ZERO_CONTROL_FIELDS
+        `ZERO_DECODE_CONTEXT
+        inst_regde <= 0;
     end
 
     else if(branch_taken)
     begin
-    branch_regde       <= 0;
-    memRead_regde      <= 0;
-    memtoReg_regde     <= 0;
-    memWrite_regde     <= 0;
-    ALUSrc_regde       <= 0;
-    regWrite_regde     <= 0;
-    ALUOp_regde        <= 0;
-    write_to_Reg_regde <= 5'b0;
-    readData1_regde    <= 0;
-    readData2_regde    <= 0;
-    imm_regde          <= 0;
-    pc_o_regde         <= 0;
-    inst_regde         <= 32'h00000013;
-    funct7_regde       <= 0;
-    funct3_regde       <= 0;
-    readReg1_regde     <= 0;
-    readReg2_regde     <= 0;
-    jump_regde         <= 0;
-    jalr_regde         <= 0;
-    lui_regde          <= 0;
-    auipc_regde        <= 0;
-end
+        // Taken branch/jal resolved in EX: squash to a bubble. Decode
+        // context is discarded (there's no real instruction here anymore),
+        // same as reset, except inst_regde becomes an explicit nop rather
+        // than 0 -- downstream stages (e.g. Control) decode 0 as a
+        // (harmless) R-type op, but an explicit nop is clearer to read in
+        // a trace/waveform and matches reg1.v's own squash value.
+        `ZERO_CONTROL_FIELDS
+        `ZERO_DECODE_CONTEXT
+        inst_regde <= 32'h00000013;
+    end
 
     else if(flush)
-    begin 
-        branch_regde <= 0;
-        memRead_regde <= 0;
-        memtoReg_regde <= 0;
-        memWrite_regde <= 0;
-        ALUSrc_regde <=0 ;
-        regWrite_regde <= 0;
-        ALUOp_regde <= 0;
-        write_to_Reg_regde <= 5'b00000 ;
-        pc_o_regde <= pc_o_regfd;
-        readData1_regde <= readData1;
-        readData2_regde <= readData2;
-        imm_regde <= imm;
-        inst_regde <= inst_regfd ;
-        funct7_regde <= funct7;
-        funct3_regde <= funct3;
-        readReg1_regde <= readReg1;
-        readReg2_regde <= readReg2;
-        jump_regde <= 0;
-        jalr_regde <= 0;
-        lui_regde <= 0;
-        auipc_regde <= 0;
+    begin
+        // Load-use stall bubble: control fields squash (this cycle does
+        // nothing architecturally), but decode context passes through --
+        // unlike branch_taken, there's a real (stalled) instruction sitting
+        // in IF/ID that will re-enter next cycle once the stall clears.
+        `ZERO_CONTROL_FIELDS
+        `PASS_DECODE_CONTEXT
+        inst_regde <= inst_regfd;
     end
 
     else
     begin
+        // Normal cycle: control fields take their real decoded values;
+        // decode context passes straight through same as the flush arm.
         branch_regde <= branch;
         memRead_regde <= memRead;
         memtoReg_regde <= memtoReg;
         memWrite_regde <= memWrite;
-        ALUSrc_regde <= ALUSrc ;
+        ALUSrc_regde <= ALUSrc;
         regWrite_regde <= regWrite;
         ALUOp_regde <= ALUOp;
-        write_to_Reg_regde <= writeReg ;
-        pc_o_regde <= pc_o_regfd;
-        readData1_regde <= readData1;
-        readData2_regde <= readData2;
-        imm_regde <= imm;
-        inst_regde <= inst_regfd ;
-        funct7_regde <= funct7;
-        funct3_regde <= funct3;
-        readReg1_regde <= readReg1;
-        readReg2_regde <= readReg2;
+        write_to_Reg_regde <= writeReg;
         jump_regde <= jump;
         jalr_regde <= jalr;
         lui_regde <= lui;
         auipc_regde <= auipc;
-
+        `PASS_DECODE_CONTEXT
+        inst_regde <= inst_regfd;
     end
 end
 
+`undef ZERO_CONTROL_FIELDS
+`undef ZERO_DECODE_CONTEXT
+`undef PASS_DECODE_CONTEXT
+
 endmodule
 
-
-
-
-
-
-
-
-
- 
+`default_nettype wire

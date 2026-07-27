@@ -1,3 +1,5 @@
+`default_nettype none
+
 module ShiftLeftOne (
     input signed [31:0] i,
     output signed [31:0] o
@@ -7,3 +9,4 @@ module ShiftLeftOne (
 
 endmodule
 
+`default_nettype wire

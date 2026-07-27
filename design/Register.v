@@ -1,3 +1,5 @@
+`default_nettype none
+
 // Do not modify this file!
 
 module Register (
@@ -59,3 +61,4 @@ end
 
 endmodule
 
+`default_nettype wire

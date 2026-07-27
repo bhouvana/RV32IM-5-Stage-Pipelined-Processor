@@ -1,3 +1,5 @@
+`default_nettype none
+
 module InstructionMemory #(
     // Resolved relative to the simulator's working directory at run time
     // (Icarus resolves $readmemb paths against the invoking process's CWD,
@@ -26,3 +28,4 @@ module InstructionMemory #(
 
 endmodule
 
+`default_nettype wire
