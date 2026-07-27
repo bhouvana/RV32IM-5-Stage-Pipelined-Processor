@@ -10,11 +10,7 @@ module Forward (
     input regWrite_regem,
     output reg [1:0] forwardA,
     output reg [1:0] forwardB
-    //output flush,
-    //output stall
 );
-//assign flush = ( regWrite_regde && ((write_to_Reg_regde ==readReg1_fd) || (write_to_Reg_regde == readReg2_fd))) ? 1'b1 : 1'b0;
-//assign stall = flush;
 always@(*)
 begin
 if( regWrite_regem &&( write_to_Reg_regem !=0) && (write_to_Reg_regem == readReg1_regde))

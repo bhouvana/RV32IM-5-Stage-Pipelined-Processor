@@ -25,6 +25,4 @@ end
 
 endmodule
 
-//"C:\Users\samar\Downloads\TEST_INSTRUCTIONS_2.txt"
-
 `default_nettype wire
