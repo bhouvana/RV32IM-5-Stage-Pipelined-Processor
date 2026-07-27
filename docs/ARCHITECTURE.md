@@ -243,7 +243,7 @@ This is the correct **starting point** for Phase 3, not a criticism of what exis
 | 1. Audit | This document. Done. |
 | 2. Code quality | Latch risk, hardcoded instruction-memory path, and the defs package (§12) are fixed. Lint config and the `reg1`/`reg2` duplication cleanup are still open. |
 | 3. Verification | Underway. Self-checking directed suite (`sim/run_tests.sh`, `sim/tools/asm.py`, 12 programs / 50 checks, all passing) covering ISA coverage (now the *complete* RV32I base, §11), EX/MEM and MEM/WB forwarding, load-use stall, store/load round-trip (word and byte/halfword), taken/not-taken branches, signed/unsigned branch comparisons, `jal`, and `jalr`. Found and fixed 4 real bugs (see errata above). Still open: constrained-random testing (V-4), coverage collection (V-5), assertions (V-3). |
-| 4. Visualization | Not started. Needs a machine-readable execution trace first (a byproduct of Phase 3's self-checking testbench). |
+| 4. Visualization | First version done: `sim/tb/gen_trace.v` + `sim/tools/gen_trace.py`/`build_viewer.py` produce an interactive, playable pipeline-occupancy viewer from a real execution trace (`make viewer`). Multi-program comparison and VCD export still open. |
 | 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1) done — `docs/adr/0005`. RV32M/CSR/privilege/caches/prediction not started. |
 | 6. Research platform (pluggable subsystems) | Not started; requires the parameterization work in §12 first. |
 | 7. FPGA support | Not started; `DataMemory`'s async-read model (§9) needs a BRAM-friendly variant first. |

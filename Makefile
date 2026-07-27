@@ -5,7 +5,7 @@
 PROGRAMS := $(wildcard sim/programs/*.s)
 MEMS     := $(PROGRAMS:.s=.mem)
 
-.PHONY: test lint clean
+.PHONY: test lint clean viewer
 
 test: $(MEMS)
 	@bash sim/run_tests.sh
@@ -19,5 +19,14 @@ sim/programs/%.mem: sim/programs/%.s sim/tools/asm.py
 lint:
 	iverilog -Wall -g2005 -I design -tnull design/*.v
 
+# Cycle-accurate pipeline viewer (docs/ROADMAP.md Phase 4) -- traces
+# sim/programs/demo.s by default; edit sim/tb/gen_trace.v's INIT_FILE to
+# trace a different program.
+viewer: sim/programs/demo.mem
+	iverilog -g2005 -I design -o /tmp/gen_trace.vvp sim/tb/gen_trace.v
+	vvp /tmp/gen_trace.vvp
+	python sim/tools/build_viewer.py trace.csv -o pipeline-viewer.html
+	rm -f trace.csv /tmp/gen_trace.vvp
+
 clean:
-	rm -f sim/programs/*.mem
+	rm -f sim/programs/*.mem trace.csv pipeline-viewer.html

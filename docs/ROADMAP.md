@@ -48,9 +48,9 @@ Three more bugs surfaced *while building the verification harness* (P0-adjacent,
 
 ## Phase 4 — Visualization
 
-Depends on V-1's execution trace format existing first. Once it does:
-- **Viz-1**: Cycle-by-cycle pipeline occupancy table (which instruction is in which stage, stalls/bubbles marked) — a static HTML table generator is a half-day task and immediately useful for debugging V-2's directed tests.
-- **Viz-2**: Interactive replay (scrub through cycles, see forwarding paths light up) — genuinely valuable but substantial front-end work; scope as its own project once Viz-1 proves the trace format is right.
+- **Viz-1**: ✅ Done. `sim/tb/gen_trace.v` emits a per-cycle CSV straight off real DUT signals (PC/instruction per stage, stall/flush, branch resolution, forwarding selects, memory/writeback activity — nothing inferred). `sim/tools/gen_trace.py` disassembles the raw instruction words into real mnemonics and converts to JSON.
+- **Viz-2**: ✅ Done (first version). `sim/tools/build_viewer.py` + `sim/tools/viewer_template.html` produce a self-contained interactive HTML pipeline viewer: play/step/scrub transport, a stage-occupancy timeline color-coded for stalls/squashes/branches/forwarding, a per-cycle stage-detail panel, and a 32-register heatmap reconstructed by replaying real WB-stage write events. `make viewer` (or the equivalent manual `iverilog`/`vvp`/`build_viewer.py` steps) regenerates it from any `sim/programs/*.s`.
+- **Next**: multi-program comparison (run two programs side by side to compare e.g. hazard-heavy vs. hazard-free code), a full waveform/VCD export path for use in GTKWave alongside this tool, and wiring the viewer into `sim/run_tests.sh` so a failing directed test can auto-generate its own trace for debugging.
 
 ## Phase 5 — ISA/architectural extensions
 
@@ -82,6 +82,6 @@ Not meaningful until the core is ISA-complete (Phase 5.1) and verified (Phase 3)
 
 ---
 
-**Status**: P0, CQ-1, V-1/V-2, and Phase 5.1 (ISA completeness) are done. Icarus Verilog is installed on this machine, the suite runs via `sim/run_tests.sh` or `make test`, and it found and fixed 5 real RTL bugs (`docs/adr/0002-0004`) plus completed `jal`/`jalr`/`lui`/`auipc`/`bltu`/`bgeu`/byte-halfword memory (`docs/adr/0001`, `0005`). **12/12 tests, 50/50 checks passing** as of this update. RV32I base ISA is complete except fence/ecall/ebreak/CSR.
+**Status**: P0, CQ-1, V-1/V-2, Phase 5.1 (ISA completeness), and a first version of Phase 4 (visualization) are done. Icarus Verilog is installed on this machine, the suite runs via `sim/run_tests.sh` or `make test`, and it found and fixed 5 real RTL bugs (`docs/adr/0002-0004`) plus completed `jal`/`jalr`/`lui`/`auipc`/`bltu`/`bgeu`/byte-halfword memory (`docs/adr/0001`, `0005`). **12/12 tests, 50/50 checks passing** as of this update. RV32I base ISA is complete except fence/ecall/ebreak/CSR. An interactive pipeline viewer (`make viewer`) replays a real execution trace with stalls/squashes/forwarding/branches color-coded.
 
-**Recommended next milestone**: RV32M (Phase 5 item 2) is the natural next step now that ISA completeness is done and would otherwise be the next thing layered on top — or Phase 4 (visualization), which is now unblocked since a real execution trace format exists via the directed-test infrastructure. Both are reasonable; RV32M keeps momentum on the ISA/verification side, visualization is a good place to make the project's current state legible to someone browsing it for the first time.
+**Recommended next milestone**: RV32M (Phase 5 item 2) — the natural next step now that ISA completeness is done, and the project's first real excuse to design a multi-cycle-execute mechanism. V-3 (assertions) is the other strong candidate: cheap to add now, and would have caught at least one of this session's bugs (the store-forwarding wiring mistake, `docs/adr/0003`) structurally rather than needing a directed test to stumble into it.
