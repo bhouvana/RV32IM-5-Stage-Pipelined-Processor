@@ -60,6 +60,12 @@ module reg2(
     input [31:0] inst_regfd,
     input flush,
     input branch_taken,
+    input hold,   // multi-cycle divide interlock (docs/adr/0009): freeze every
+                  // field exactly as-is while a div/rem's result isn't ready
+                  // yet. Distinct from `flush`: flush *bubbles* (zeros
+                  // control, keeps decode context); hold changes nothing at
+                  // all, because the div/rem instruction itself must stay
+                  // put in EX until the divider finishes with it.
     input [4:0] readReg1,
     input [4:0] readReg2,
     input jump,
@@ -99,6 +105,16 @@ begin
         `ZERO_CONTROL_FIELDS
         `ZERO_DECODE_CONTEXT
         inst_regde <= 0;
+    end
+
+    else if(hold)
+    begin
+        // Deliberately empty: assigning nothing to a `reg` in one branch of
+        // a clocked if-else chain means it keeps its current value -- an
+        // enable-gated flip-flop, synthesizable as-is, not a fall-through
+        // bug. Checked before branch_taken/flush on the (today, unreachable
+        // in practice) grounds that a held div/rem instruction can't also
+        // be a branch/load -- see the `hold` port comment above.
     end
 
     else if(branch_taken)

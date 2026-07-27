@@ -17,6 +17,7 @@
 `include "reg4.v"
 `include "Hazard.v"
 `include "Forward.v"
+`include "Divider.v"
 
 module tb_forward_memwb;
     `include "check_tasks.vh"

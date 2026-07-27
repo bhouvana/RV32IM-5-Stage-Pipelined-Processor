@@ -17,6 +17,7 @@
 `include "reg4.v"
 `include "Hazard.v"
 `include "Forward.v"
+`include "Divider.v"
 
 module tb_muldiv;
     reg clk = 0;
@@ -30,7 +31,11 @@ module tb_muldiv;
     initial begin
         start = 0;
         #10 start = 1;
-        #900;
+        // 6 real (non-shortcut) divisions in this program at ~33 cycles each
+        // (docs/adr/0009-multicycle-divider.md) plus the surrounding setup
+        // instructions -- division is no longer single-cycle, so this needs
+        // far more margin than the other directed tests.
+        #5000;
 
         check_reg(3,  32'd42,        "mul x3,x1,x2 = 6*7");
         check_reg(5,  32'd1,         "mul(-1,-1) low32");

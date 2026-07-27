@@ -17,6 +17,7 @@
 `include "reg4.v"
 `include "Hazard.v"
 `include "Forward.v"
+`include "Divider.v"
 
 // Ad hoc cycle-by-cycle trace tool, not a directed test (excluded from
 // sim/run_tests.sh's tb_*.v glob on purpose). Point INIT_FILE and the

@@ -1,5 +1,7 @@
 `default_nettype none
 
+`include "riscv_defs.vh"
+
 module PIPELINED #(
     parameter INIT_FILE = "sim/programs/arith.mem"
 )(
@@ -42,6 +44,7 @@ wire auipc;
 wire stall;         // load-use hazard (Hazard.v); freezes PC/IF-ID
 wire flush;         // load-use hazard (Hazard.v); bubbles ID/EX
 wire branch_zero;   // ALU's raw branch-condition output, registered into `zero`
+wire pc_stall;      // stall | div_stall (docs/adr/0009) -- what PC/reg1 actually freeze on
 
 // rst is active-low and synchronous: while low, every pipeline register
 // and the architectural register file hold their reset values; once
@@ -67,7 +70,7 @@ wire branch_zero;   // ALU's raw branch-condition output, registered into `zero`
     PC m_PC(
         .clk(clk),
         .rst(start),
-        .stall(stall),
+        .stall(pc_stall),   // Hazard.v's load-use stall OR the multi-cycle divide interlock (docs/adr/0009)
         .pc_i(pc_final),
         .pc_o(pc_o)
     );
@@ -84,7 +87,7 @@ wire [31:0] pc_o_regfd;
 reg1 m_reg1(
     .clk(clk),
     .rst(start),
-    .stall(stall),
+    .stall(pc_stall),
     .inst(inst),
     .pc_o(pc_o),
     .branch_regde(branch_regde),
@@ -186,6 +189,7 @@ reg2 m_reg2(
     .inst_regfd(inst_regfd),
     .flush(flush),
     .branch_taken(branch_taken),
+    .hold(div_stall),   // multi-cycle divide interlock, see docs/adr/0009-multicycle-divider.md
     .readReg1(inst_regfd[19:15]),
     .readReg2(inst_regfd[24:20]),
     .jump(jump),
@@ -336,6 +340,46 @@ Forward m_Forward(
     .branch_zero(branch_zero)
     );
 
+    // Multi-cycle division interlock (docs/adr/0009-multicycle-divider.md).
+    // Unlike mul (single-cycle via the ALU above), div/rem route through a
+    // dedicated iterative unit and are NOT ready the same cycle they enter
+    // EX. `start` is tied to `isDivRem` at the *level* (not a pulse) --
+    // Divider.v's own `start && !busy` guard means it only actually latches
+    // new operands once, on the first cycle, and naturally ignores `start`
+    // staying asserted for the rest of the (many-cycle) computation.
+    wire isDivRem = (ALUCtl == `ALUCTL_DIV) || (ALUCtl == `ALUCTL_DIVU) ||
+                    (ALUCtl == `ALUCTL_REM) || (ALUCtl == `ALUCTL_REMU);
+    wire isDivSigned = (ALUCtl == `ALUCTL_DIV) || (ALUCtl == `ALUCTL_REM);
+    wire div_busy, div_done;
+    wire [31:0] div_quotient, div_remainder;
+
+    Divider m_Divider(
+    .clk(clk),
+    .rst(start),
+    .start(isDivRem),
+    .isSigned(isDivSigned),
+    .dividend(aluA),
+    .divisor(imm_reg_val),
+    .busy(div_busy),
+    .done(div_done),
+    .quotient(div_quotient),
+    .remainder(div_remainder)
+    );
+
+    // True from the cycle a div/rem enters EX until (not including) the
+    // cycle its result becomes valid -- freezes PC/IF-ID (via pc_stall) and
+    // holds ID/EX (reg2.hold) for exactly that span. False the rest of the
+    // time, including every cycle occupied by a non-div/rem instruction, so
+    // it never affects normal single-cycle execution.
+    wire div_stall = isDivRem && !div_done;
+    assign pc_stall = stall | div_stall;
+
+    wire [31:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
+    // What EX "produces" this cycle: the divider's result on div/rem
+    // (valid only when div_done, but only consumed downstream on that exact
+    // cycle -- see reg3_bubble below), the ALU's result otherwise.
+    wire [31:0] ex_result = isDivRem ? div_result : ALUOut;
+
 //
 wire [4:0] write_to_Reg_regde;
 wire memtoReg_regem;
@@ -349,14 +393,32 @@ wire jump_regem;
 wire [31:0] pc_plus4_regem;
 wire [2:0] funct3_regem;
 //
+    // While a div/rem is still computing (div_stall), reg2/EX keeps
+    // presenting the *same* div/rem instruction cycle after cycle (that's
+    // the whole point of `hold`) -- without this mux, reg3 would latch that
+    // instruction's control signals (regWrite=1 for any R-type op) every
+    // one of those cycles, i.e. ~32 spurious register-file writes of a
+    // not-yet-valid result before the real one. Bubbling the control
+    // signals (not the data signals -- harmless once their gating control
+    // bit is 0) makes this show up correctly everywhere downstream expects
+    // "one instruction, one completion": the register file, forwarding,
+    // and the pipeline viewer's trace. See docs/adr/0009-multicycle-divider.md.
+    wire reg3_bubble = div_stall;
+    wire memtoReg_to_reg3      = reg3_bubble ? 1'b0 : memtoReg_regde;
+    wire regWrite_to_reg3      = reg3_bubble ? 1'b0 : regWrite_regde;
+    wire memRead_to_reg3       = reg3_bubble ? 1'b0 : memRead_regde;
+    wire memWrite_to_reg3      = reg3_bubble ? 1'b0 : memWrite_regde;
+    wire jump_to_reg3          = reg3_bubble ? 1'b0 : jump_regde;
+    wire [4:0] destReg_to_reg3 = reg3_bubble ? 5'b0  : write_to_Reg_regde;
+
 reg3 m_reg3(
     .clk(clk),
     .rst(start),
-    .memtoReg_regde(memtoReg_regde),
-    .regWrite_regde(regWrite_regde),
-    .memRead_regde(memRead_regde),
-    .memWrite_regde(memWrite_regde),
-    .ALUOut(ALUOut),
+    .memtoReg_regde(memtoReg_to_reg3),
+    .regWrite_regde(regWrite_to_reg3),
+    .memRead_regde(memRead_to_reg3),
+    .memWrite_regde(memWrite_to_reg3),
+    .ALUOut(ex_result),
     // Store data must come from the forwarded value (readData2_final), not
     // the raw decode-stage readData2_regde: Forward.v/Mux4to1 already
     // compute the correct EX/MEM- or MEM/WB-forwarded rs2 value for the ALU
@@ -364,8 +426,8 @@ reg3 m_reg3(
     // bypassing it entirely -- a `sw` whose data register was written 1-2
     // instructions earlier stored stale data. See docs/adr/0003-store-data-forwarding.md.
     .readData2_regde(readData2_final),
-    .write_to_Reg_regde(write_to_Reg_regde),
-    .jump_regde(jump_regde),
+    .write_to_Reg_regde(destReg_to_reg3),
+    .jump_regde(jump_to_reg3),
     .pc_plus4_regde(pc_plus4_regde),
     .funct3_regde(funct3_regde),
 

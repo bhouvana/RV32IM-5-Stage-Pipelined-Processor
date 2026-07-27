@@ -19,23 +19,24 @@
 `include "Forward.v"
 `include "Divider.v"
 
-module tb_forward_exmem;
-    `include "check_tasks.vh"
+module tb_div_forward;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/forward_exmem.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/div_forward.mem")) dut(clk, start);
+    `include "check_tasks.vh"
 
     always #5 clk = ~clk;
 
     initial begin
         start = 0;
         #10 start = 1;
-        #800;
+        #900;  // ~1 division (~33 cycles) plus setup/drain -- generous margin
 
-        check_reg(1, 32'd32, "EX/MEM forwarding chain: 1 -> 32");
+        check_reg(3, 32'd3, "div(17,5) = 3");
+        check_reg(4, 32'd6, "EX/MEM forward of multi-cycle div result: x4=x3+x3=6");
 
-        report("forward_exmem");
+        report("div_forward");
         $finish;
     end
 endmodule

@@ -108,12 +108,15 @@ case(ALUCtl)
 
         end
 
-    // RV32M -- deliberately single-cycle using Verilog's native *//%
-    // operators rather than a synthesizable iterative multi-cycle
-    // multiplier/divider. Bit-exact correct per the RV32M spec (including
-    // divide-by-zero and signed-overflow semantics below), but not how real
-    // hardware would implement division; see docs/adr/0006-rv32m.md for why
-    // that's an explicit, tracked simplification rather than an oversight.
+    // RV32M multiply -- single-cycle is a reasonable simplification for
+    // multiply (real FPGA/ASIC flows commonly do support single- or
+    // few-cycle pipelined multipliers). Division is NOT single-cycle-
+    // friendly in real hardware and is handled by the dedicated multi-cycle
+    // Divider.v unit + pipeline interlock in riscvpipeline.v instead --
+    // ALUCtl never actually reaches this case block for div/rem (see
+    // riscvpipeline.v's isDivRem), so there is deliberately no
+    // `ALUCTL_DIV`/`ALUCTL_DIVU`/`ALUCTL_REM`/`ALUCTL_REMU` case here. See
+    // docs/adr/0009-multicycle-divider.md.
     `ALUCTL_MUL:
         ALUOut = A * B;  // low 32 bits of the true product -- correct
                           // regardless of signedness, so no cast needed
@@ -132,20 +135,6 @@ case(ALUCtl)
             mul_uu = {32'b0, A} * {32'b0, B};
             ALUOut = mul_uu[63:32];
         end
-    `ALUCTL_DIV:
-        if (B == 0) ALUOut = 32'hFFFFFFFF;                              // div by zero, per spec
-        else if ($signed(A) == -32'sd2147483648 && $signed(B) == -1) ALUOut = A; // signed overflow, per spec
-        else ALUOut = $signed(A) / $signed(B);
-    `ALUCTL_DIVU:
-        if (B == 0) ALUOut = 32'hFFFFFFFF;
-        else ALUOut = A / B;
-    `ALUCTL_REM:
-        if (B == 0) ALUOut = A;                                          // div by zero, per spec
-        else if ($signed(A) == -32'sd2147483648 && $signed(B) == -1) ALUOut = 0; // signed overflow, per spec
-        else ALUOut = $signed(A) % $signed(B);
-    `ALUCTL_REMU:
-        if (B == 0) ALUOut = A;
-        else ALUOut = A % B;
 
 endcase
             zero = branch_zero;
