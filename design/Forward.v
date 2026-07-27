@@ -30,4 +30,18 @@ else
     forwardB =2'b00; // same thing as above but instead of readReg1 its readReg2
 
 end
+
+// Compiled in only with -DASSERT_ON (see sim/run_tests.sh) -- has no effect
+// on synthesis or normal simulation. forwardA/forwardB only ever have 3 live
+// values (00/01/10, see Mux4to1's s0/s1/s2); this checks that invariant
+// holds rather than assuming it from the logic above never producing 2'b11.
+`ifdef ASSERT_ON
+always @(*) begin
+    if (forwardA === 2'b11)
+        begin $display("ASSERTION FAILED @t=%0t: Forward.v forwardA=2'b11 (no defined meaning -- Mux4to1 has only s0/s1/s2)", $time); $finish; end
+    if (forwardB === 2'b11)
+        begin $display("ASSERTION FAILED @t=%0t: Forward.v forwardB=2'b11 (no defined meaning -- Mux4to1 has only s0/s1/s2)", $time); $finish; end
+end
+`endif
+
 endmodule

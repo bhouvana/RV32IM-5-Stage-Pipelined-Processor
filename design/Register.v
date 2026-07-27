@@ -45,5 +45,17 @@ module Register (
             regs[writeReg] <= (writeReg == 0) ? 0 : writeData;
     end
 
+// Compiled in only with -DASSERT_ON (see sim/run_tests.sh). x0 is hardwired
+// to 0 in two independent places above (the write path and the write-first
+// bypass reads) -- this checks the invariant the whole ISA depends on
+// (x0 reads as 0, always) rather than trusting those two sites never drift
+// out of sync with each other.
+`ifdef ASSERT_ON
+always @(posedge clk) begin
+    if (rst && regs[0] !== 32'b0)
+        begin $display("ASSERTION FAILED @t=%0t: regs[0] = %0d, x0 must always read 0", $time, regs[0]); $finish; end
+end
+`endif
+
 endmodule
 

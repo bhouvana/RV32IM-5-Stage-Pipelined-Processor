@@ -386,6 +386,27 @@ reg3 m_reg3(
     .funct3_regem(funct3_regem)
 );
 
+// Compiled in only with -DASSERT_ON (see sim/run_tests.sh). reg3 is a plain
+// one-cycle pipeline register (readData2_regem <= readData2_regde every
+// cycle, no stall/flush handling of its own), so readData2_regem this cycle
+// must equal readData2_final as it was one cycle ago. This is exactly the
+// property docs/adr/0003-store-data-forwarding.md's bug violated (reg3 was
+// wired to the raw readData2_regde instead of the forwarded value) --
+// this assertion would have caught that wiring mistake immediately instead
+// of needing a directed test (store_load.s) to stumble into it.
+`ifdef ASSERT_ON
+reg [31:0] expected_store_data;
+always @(posedge clk) begin
+    expected_store_data <= readData2_final;
+    if (start && memWrite_regem && (readData2_regem !== expected_store_data))
+        begin
+            $display("ASSERTION FAILED @t=%0t: reg3 store-data mismatch: readData2_regem=%0d, expected (last cycle's forwarded readData2_final)=%0d",
+                      $time, readData2_regem, expected_store_data);
+            $finish;
+        end
+end
+`endif
+
 //MEMORY
     DataMemory m_DataMemory(
     .rst(start),
