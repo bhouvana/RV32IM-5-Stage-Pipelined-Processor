@@ -38,6 +38,9 @@ module tb_jalr;
         check_reg(3, 32'd16, "EX/MEM forward of jalr result: x3=x1+x1=16");
 
         report("jalr");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

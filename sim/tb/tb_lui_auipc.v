@@ -38,6 +38,9 @@ module tb_lui_auipc;
         check_reg(3, 32'h00001008, "auipc x3,1 -> PC(8)+0x1000");
 
         report("lui_auipc");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

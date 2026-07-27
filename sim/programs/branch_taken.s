@@ -9,6 +9,18 @@ addi x3, x0, 999    # poison #1 (must be squashed)
 addi x3, x0, 888    # poison #2 (must be squashed)
 target:
 addi x3, x0, 42
+
+# bne taken: coverage_report.py (docs/ROADMAP.md V-5) flagged bne as never
+# exercised anywhere in the directed suite -- every other branch type had a
+# directed test, this one didn't, purely by omission.
+addi x4, x0, 5
+addi x5, x0, 9
+bne  x4, x5, target2
+addi x6, x0, 999    # poison #1 (must be squashed)
+addi x6, x0, 888    # poison #2 (must be squashed)
+target2:
+addi x6, x0, 42
+
 nop
 nop
 nop

@@ -40,6 +40,9 @@ module tb_mem_bytes;
         check_reg(12, 32'h0000E000, "sh wrote only 2 bytes: lw readback has zero upper half");
 
         report("mem_bytes");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

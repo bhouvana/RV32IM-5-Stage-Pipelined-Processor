@@ -56,6 +56,9 @@ module tb_muldiv;
         check_reg(28, 32'd0,         "rem signed overflow -> 0");
 
         report("muldiv");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

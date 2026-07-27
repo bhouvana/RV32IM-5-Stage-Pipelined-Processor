@@ -37,6 +37,9 @@ module tb_forward_memwb;
         check_reg(3, 32'd2, "MEM/WB forwarding: x3=x1+x1=2");
 
         report("forward_memwb");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

@@ -36,6 +36,9 @@ module tb_forward_exmem;
         check_reg(1, 32'd32, "EX/MEM forwarding chain: 1 -> 32");
 
         report("forward_exmem");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

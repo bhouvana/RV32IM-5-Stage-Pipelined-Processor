@@ -28,6 +28,12 @@ verification as the highest-leverage next investment rather than a nice-to-have:
    cause as the `sra` bug (plain, non-`signed` ALU ports), found while
    implementing `bltu`/`bgeu` and fixed in the same pass. See
    `docs/adr/0004-signed-arithmetic-casts.md`.
+5. **`sll`/`srl`/`sra` used the full 32-bit shift-amount register instead of
+   its low 5 bits** -- per spec, register-register shifts only use `rs2[4:0]`;
+   `A >> B` with `B >= 32` discards every bit in Verilog. Invisible to every
+   directed test (none happened to use a shift-amount register holding
+   >=32); found by constrained-random cross-checking against an independent
+   reference model. See `docs/adr/0010-random-testing-and-coverage.md`.
 
 Also implemented in this pass: `jal` (previously decoded but functionally
 inert, §11) is now fully wired -- target, link value, and forwarding
@@ -242,7 +248,7 @@ This is the correct **starting point** for Phase 3, not a criticism of what exis
 |---|---|
 | 1. Audit | This document. Done. |
 | 2. Code quality | Latch risk, hardcoded instruction-memory path, defs package, `default_nettype none` (which found 3 genuinely undeclared wires, `docs/adr/0008`), dead-field removal, and `reg1`/`reg2` dedup are all done. Real Verible lint config (CQ-5) is the only item still open. |
-| 3. Verification | Underway. Self-checking directed suite (`sim/run_tests.sh`, `sim/tools/asm.py`, 13 programs / 67 checks, all passing) covering ISA coverage (complete RV32I base plus RV32M, §11), EX/MEM and MEM/WB forwarding, load-use stall, store/load round-trip (word and byte/halfword), taken/not-taken branches, signed/unsigned branch comparisons, `jal`, `jalr`, and mul/div (including divide-by-zero and signed-overflow edge cases), plus 4 embedded assertions (`docs/adr/0007`) run by default. Found and fixed 5 real bugs (see errata above). Still open: constrained-random testing (V-4), coverage collection (V-5). |
+| 3. Verification | Substantially complete. Self-checking directed suite (`sim/run_tests.sh`, 16 programs / 87 checks), 4 embedded assertions (`docs/adr/0007`), an independent reference-model ISS (`sim/tools/iss.py`) cross-checked against 110 constrained-random programs (`docs/adr/0010`), and functional coverage (`sim/tools/coverage_report.py`). Found and fixed 7 real bugs total (see errata above plus the shift-mask bug from V-4). Remaining gap: `blt`/`bge`/`ble`/`bgt`/`bltu`/`bgeu` each still missing directed coverage of one branch direction (documented, lower priority). |
 | 4. Visualization | First version done: `sim/tb/gen_trace.v` + `sim/tools/gen_trace.py`/`build_viewer.py` produce an interactive, playable pipeline-occupancy viewer from a real execution trace (`make viewer`). Multi-program comparison and VCD export still open. |
 | 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1, `docs/adr/0005`) and RV32M (5.2, `docs/adr/0006` + `0009`) done, including a real multi-cycle divider (`design/Divider.v`) with a genuine pipeline interlock — the project's first multi-cycle-execute mechanism. CSR/privilege/caches/prediction not started. |
 | 6. Research platform (pluggable subsystems) | Not started; requires the parameterization work in §12 first. |

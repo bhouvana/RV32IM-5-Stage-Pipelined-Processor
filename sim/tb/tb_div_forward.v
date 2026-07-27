@@ -37,6 +37,9 @@ module tb_div_forward;
         check_reg(4, 32'd6, "EX/MEM forward of multi-cycle div result: x4=x3+x3=6");
 
         report("div_forward");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

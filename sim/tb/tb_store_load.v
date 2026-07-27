@@ -37,6 +37,9 @@ module tb_store_load;
         check_mem_word(32'd16, 32'd1234, "mem[16] == 1234");
 
         report("store_load");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

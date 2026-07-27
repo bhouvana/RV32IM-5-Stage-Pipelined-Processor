@@ -31,7 +31,19 @@ case(ALUCtl)
     `ALUCTL_SUB:
     ALUOut = A - B;//just subtracting
     `ALUCTL_SLL:
-    ALUOut = (A << B);//logical shift left
+    // Per spec, register-register shifts only use rs2[4:0] as the shift
+    // amount -- rs2 holds a full 32-bit value, and B here is that whole
+    // register for R-type sll/srl/sra (I-type slli/srli/srai are unaffected:
+    // ImmGen.v already encodes their shamt as a 5-bit zero-extended
+    // immediate, so B is already <=31 by construction on that path). Without
+    // masking, `A << B`/`A >> B` treat B as the *literal* shift count, and
+    // Verilog shifts by >=32 discard every bit -- e.g. `sll rd,rs1,rs2` with
+    // rs2 holding any value >=32 (utterly ordinary, rs2 is just a register)
+    // silently produced 0 instead of a real shift. Found by constrained-
+    // random testing (docs/ROADMAP.md V-4) hitting `srl x5,x25,x25`, not by
+    // any directed test -- every hand-written shift test happened to use a
+    // shift-amount register already holding a small value.
+    ALUOut = (A << B[4:0]);//logical shift left
     `ALUCTL_SLT:
     // A/B are plain (unsigned) ports -- $signed() is required here, the same
     // way it is for SRA below, or this "signed" comparison would silently
@@ -43,11 +55,12 @@ case(ALUCtl)
     `ALUCTL_XOR:
     ALUOut = A ^ B;//xor
     `ALUCTL_SRL:
-    ALUOut = (A >> B);//shift right logical
+    ALUOut = (A >> B[4:0]);//shift right logical -- see SLL's comment on B[4:0]
     `ALUCTL_SRA:
     // See docs/adr/0004-signed-arithmetic-casts.md -- >>> only sign-extends
     // when the operand's *type* is signed, which A/B are not by default.
-    ALUOut = ($signed(A) >>> B);//shift right arithmetic
+    // See SLL's comment above on B[4:0].
+    ALUOut = ($signed(A) >>> B[4:0]);//shift right arithmetic
     `ALUCTL_OR:
     ALUOut = ( A | B ) ;//OR
     `ALUCTL_AND:

@@ -19,12 +19,12 @@
 `include "Forward.v"
 `include "Divider.v"
 
-module tb_load_use_stall;
-    `include "check_tasks.vh"
+module tb_shift_mask;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/load_use_stall.mem")) dut(clk, start);
+    PIPELINED #(.INIT_FILE("sim/programs/shift_mask.mem")) dut(clk, start);
+    `include "check_tasks.vh"
 
     always #5 clk = ~clk;
 
@@ -33,10 +33,11 @@ module tb_load_use_stall;
         #10 start = 1;
         #800;
 
-        check_reg(7, 32'd77,  "lw x7 <- mem[32] == 77");
-        check_reg(8, 32'd154, "load-use stall: x8=x7+x7=154 (would be 0 if stall were broken)");
+        check_reg(3, 32'd8,         "sll with shift-amount register=35: masked to 35&0x1F=3 -> 1<<3=8");
+        check_reg(5, 32'h1FFFFFFF,  "srl with shift-amount register=35: logical, masked to 3");
+        check_reg(6, 32'hFFFFFFFF,  "sra with shift-amount register=35: arithmetic, masked to 3, sign preserved");
 
-        report("load_use_stall");
+        report("shift_mask");
 `ifdef COVERAGE
         dut.dump_coverage;
 `endif

@@ -57,6 +57,9 @@ module tb_arith;
         check_reg(22, 32'd31,         "ctz x22,x23 (x23=0, capped at 31 -- documented off-by-one)");
 
         report("arith");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

@@ -11,6 +11,18 @@ jal  x0, end        # skip over the target block (sequential fetch would
 target:
 addi x3, x0, 999    # must NOT execute
 end:
+
+# bne not taken: coverage_report.py (docs/ROADMAP.md V-5) flagged bne as
+# never exercised anywhere in the directed suite.
+addi x4, x0, 5
+addi x5, x0, 5
+bne  x4, x5, target2
+addi x6, x0, 42     # fallthrough -- must execute
+jal  x0, end2
+target2:
+addi x6, x0, 999    # must NOT execute
+end2:
+
 nop
 nop
 nop

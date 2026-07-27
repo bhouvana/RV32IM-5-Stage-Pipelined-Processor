@@ -380,6 +380,70 @@ Forward m_Forward(
     // cycle -- see reg3_bubble below), the ALU's result otherwise.
     wire [31:0] ex_result = isDivRem ? div_result : ALUOut;
 
+    // Compiled in only with -DCOVERAGE (see sim/tools/coverage_report.py,
+    // docs/ROADMAP.md V-5). Not a real statement/branch coverage tool (none
+    // was available in this environment) -- functional coverage: how many
+    // times each ALUCtl operation and each hazard/stall/branch-outcome class
+    // was actually exercised, dumped to a fixed file per run and aggregated
+    // across the whole suite by the Python driver. Zero synthesis/simulation
+    // impact when the macro isn't defined.
+    `ifdef COVERAGE
+    integer cov_alu_ctl [0:31];
+    integer cov_branch_taken [0:7];
+    integer cov_branch_not_taken [0:7];
+    integer cov_stall_cycles;
+    integer cov_flush_cycles;
+    integer cov_div_cycles;
+    integer cov_jump_cycles;
+    integer cov_i;
+    integer cov_fd;
+    initial begin
+        for (cov_i = 0; cov_i < 32; cov_i = cov_i + 1) cov_alu_ctl[cov_i] = 0;
+        for (cov_i = 0; cov_i < 8; cov_i = cov_i + 1) begin
+            cov_branch_taken[cov_i] = 0;
+            cov_branch_not_taken[cov_i] = 0;
+        end
+        cov_stall_cycles = 0;
+        cov_flush_cycles = 0;
+        cov_div_cycles = 0;
+        cov_jump_cycles = 0;
+    end
+    always @(posedge clk) begin
+        if (start) begin
+            cov_alu_ctl[ALUCtl] = cov_alu_ctl[ALUCtl] + 1;
+            if (stall) cov_stall_cycles = cov_stall_cycles + 1;
+            if (flush) cov_flush_cycles = cov_flush_cycles + 1;
+            if (div_stall) cov_div_cycles = cov_div_cycles + 1;
+            if (jump_regde) cov_jump_cycles = cov_jump_cycles + 1;
+            if (ALUOp_regde == `ALUOP_BRANCH) begin
+                if (branch_zero) cov_branch_taken[funct3_regde] = cov_branch_taken[funct3_regde] + 1;
+                else cov_branch_not_taken[funct3_regde] = cov_branch_not_taken[funct3_regde] + 1;
+            end
+        end
+    end
+    // Verilog-2005 (this project's language mode, see docs/ROADMAP.md CQ-5)
+    // has no `final` block -- that's SystemVerilog. Exposed as a task
+    // instead; each testbench calls `dut.dump_coverage;` immediately before
+    // its own $finish (sim/run_tests.sh passes -DCOVERAGE and every tb_*.v
+    // was updated to include the call, guarded the same way).
+    task dump_coverage;
+        begin
+            cov_fd = $fopen("coverage.txt", "w");
+            for (cov_i = 0; cov_i < 32; cov_i = cov_i + 1)
+                $fdisplay(cov_fd, "alu_ctl %0d %0d", cov_i, cov_alu_ctl[cov_i]);
+            for (cov_i = 0; cov_i < 8; cov_i = cov_i + 1) begin
+                $fdisplay(cov_fd, "branch_taken %0d %0d", cov_i, cov_branch_taken[cov_i]);
+                $fdisplay(cov_fd, "branch_not_taken %0d %0d", cov_i, cov_branch_not_taken[cov_i]);
+            end
+            $fdisplay(cov_fd, "stall_cycles %0d", cov_stall_cycles);
+            $fdisplay(cov_fd, "flush_cycles %0d", cov_flush_cycles);
+            $fdisplay(cov_fd, "div_cycles %0d", cov_div_cycles);
+            $fdisplay(cov_fd, "jump_cycles %0d", cov_jump_cycles);
+            $fclose(cov_fd);
+        end
+    endtask
+    `endif
+
 //
 wire [4:0] write_to_Reg_regde;
 wire memtoReg_regem;

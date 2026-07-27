@@ -5,7 +5,7 @@
 PROGRAMS := $(wildcard sim/programs/*.s)
 MEMS     := $(PROGRAMS:.s=.mem)
 
-.PHONY: test lint clean viewer
+.PHONY: test lint clean viewer random-test coverage
 
 test: $(MEMS)
 	@bash sim/run_tests.sh
@@ -29,4 +29,13 @@ viewer: sim/programs/demo.mem
 	rm -f trace.csv /tmp/gen_trace.vvp
 
 clean:
-	rm -f sim/programs/*.mem trace.csv pipeline-viewer.html
+	rm -f sim/programs/*.mem trace.csv pipeline-viewer.html coverage.txt
+
+# Constrained-random cross-check against the independent ISS reference model
+# (docs/ROADMAP.md V-4, docs/adr/0010). Pass ARGS="--count 100" etc. to override.
+random-test:
+	python sim/tools/run_random_tests.py --count 30 $(ARGS)
+
+# Functional coverage across the directed suite (docs/ROADMAP.md V-5, docs/adr/0010).
+coverage:
+	python sim/tools/coverage_report.py

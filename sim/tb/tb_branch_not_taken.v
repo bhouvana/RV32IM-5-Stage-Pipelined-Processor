@@ -34,8 +34,12 @@ module tb_branch_not_taken;
         #800;
 
         check_reg(3, 32'd42, "beq not taken: fallthrough x3=42 (target's 999 must not execute)");
+        check_reg(6, 32'd42, "bne not taken: fallthrough x6=42 (target2's 999 must not execute)");
 
         report("branch_not_taken");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

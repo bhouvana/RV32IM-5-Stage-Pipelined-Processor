@@ -34,8 +34,12 @@ module tb_branch_taken;
         #800;
 
         check_reg(3, 32'd42, "beq taken: x3=42 from target (poisons 999/888 must be squashed)");
+        check_reg(6, 32'd42, "bne taken: x6=42 from target2 (poisons 999/888 must be squashed)");
 
         report("branch_taken");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule

@@ -41,6 +41,9 @@ module tb_bltu_bgeu;
         check_reg(10, 32'd1, "bgt not taken (-1 signed is not > 1, custom op) -- docs/adr/0004 regression");
 
         report("bltu_bgeu");
+`ifdef COVERAGE
+        dut.dump_coverage;
+`endif
         $finish;
     end
 endmodule
