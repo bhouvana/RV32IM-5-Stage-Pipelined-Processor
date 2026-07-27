@@ -12,6 +12,13 @@ integer i;
 integer count;
 integer done;
 
+// RV32M scratch (docs/adr/0006-rv32m.md). Widened to 64 bits *before*
+// multiplying (not after) so the product is computed at full precision
+// regardless of how a given tool self-determines `*`'s result width.
+reg signed [63:0] mul_ss;  // signed x signed  (mul, mulh)
+reg signed [63:0] mul_su;  // signed x unsigned (mulhsu)
+reg        [63:0] mul_uu;  // unsigned x unsigned (mulhu)
+
 always@(*)
 begin
     ALUOut = 0;
@@ -98,6 +105,45 @@ case(ALUCtl)
             ALUOut = count;
 
         end
+
+    // RV32M -- deliberately single-cycle using Verilog's native *//%
+    // operators rather than a synthesizable iterative multi-cycle
+    // multiplier/divider. Bit-exact correct per the RV32M spec (including
+    // divide-by-zero and signed-overflow semantics below), but not how real
+    // hardware would implement division; see docs/adr/0006-rv32m.md for why
+    // that's an explicit, tracked simplification rather than an oversight.
+    `ALUCTL_MUL:
+        ALUOut = A * B;  // low 32 bits of the true product -- correct
+                          // regardless of signedness, so no cast needed
+    `ALUCTL_MULH:
+        begin
+            mul_ss = $signed({{32{A[31]}}, A}) * $signed({{32{B[31]}}, B});
+            ALUOut = mul_ss[63:32];
+        end
+    `ALUCTL_MULHSU:
+        begin
+            mul_su = $signed({{32{A[31]}}, A}) * $signed({32'b0, B});
+            ALUOut = mul_su[63:32];
+        end
+    `ALUCTL_MULHU:
+        begin
+            mul_uu = {32'b0, A} * {32'b0, B};
+            ALUOut = mul_uu[63:32];
+        end
+    `ALUCTL_DIV:
+        if (B == 0) ALUOut = 32'hFFFFFFFF;                              // div by zero, per spec
+        else if ($signed(A) == -32'sd2147483648 && $signed(B) == -1) ALUOut = A; // signed overflow, per spec
+        else ALUOut = $signed(A) / $signed(B);
+    `ALUCTL_DIVU:
+        if (B == 0) ALUOut = 32'hFFFFFFFF;
+        else ALUOut = A / B;
+    `ALUCTL_REM:
+        if (B == 0) ALUOut = A;                                          // div by zero, per spec
+        else if ($signed(A) == -32'sd2147483648 && $signed(B) == -1) ALUOut = 0; // signed overflow, per spec
+        else ALUOut = $signed(A) % $signed(B);
+    `ALUCTL_REMU:
+        if (B == 0) ALUOut = A;
+        else ALUOut = A % B;
 
 endcase
             zero = branch_zero;

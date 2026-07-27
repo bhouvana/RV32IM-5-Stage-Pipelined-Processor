@@ -90,13 +90,13 @@ reg1 m_reg1(
 );
 
 wire [2:0] funct3_control;
-wire funct7_control;
+wire [6:0] funct7_control;
 
 
  //DECODE
     Control m_Control(
         .opcode(inst_regfd[6:0]),
-        .funt7(inst_regfd[30]),
+        .funt7(inst_regfd[31:25]),
         .funt3(inst_regfd[14:12]),
         .branch(branch),
         .memRead(memRead),
@@ -211,7 +211,7 @@ reg2 m_reg2(
     .auipc_regde(auipc_regde)
 );
 
-wire funct7_regde;
+wire [6:0] funct7_regde;
 wire [14:12] funct3_regde;
 wire [31:0] readData1_final;
 wire [31:0] readData2_final;

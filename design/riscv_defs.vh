@@ -53,4 +53,21 @@
 `define ALUCTL_CTZ  5'b10101  // custom
 `define ALUCTL_ILLEGAL 5'b11111
 
+// ---- RV32M (docs/adr/0006-rv32m.md) ----
+`define ALUCTL_MUL    5'b10011
+`define ALUCTL_MULH   5'b10100
+`define ALUCTL_MULHSU 5'b10110
+`define ALUCTL_MULHU  5'b10111
+`define ALUCTL_DIV    5'b11000
+`define ALUCTL_DIVU   5'b11001
+`define ALUCTL_REM    5'b11010
+`define ALUCTL_REMU   5'b11011
+
+// funct7 values used to distinguish R-type sub-ops now that ALUCtrl sees the
+// full 7-bit field (previously only inst[30] was threaded through, enough
+// for add/sub but not enough to add a whole new funct7=0000001 group).
+`define FUNCT7_BASE   7'b0000000  // add/sll/slt/sltu/xor/srl/or/and
+`define FUNCT7_ALT    7'b0100000  // sub/sra, and this core's custom ctz
+`define FUNCT7_MULDIV 7'b0000001  // RV32M
+
 `endif

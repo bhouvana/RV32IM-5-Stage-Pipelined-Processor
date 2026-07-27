@@ -3,7 +3,10 @@
 module Control (
     input [6:0] opcode,
     //
-    input funt7,
+    input [6:0] funt7,   // full funct7 field (inst[31:25]) -- was 1 bit (inst[30]
+                          // only), just enough to tell add from sub. RV32M needs
+                          // funct7=0000001 distinguished from add/sub's 0/0100000,
+                          // which the single-bit version couldn't represent.
     input [2:0] funt3,
     //
     output reg branch,
@@ -14,7 +17,7 @@ module Control (
     output reg ALUSrc,
     output reg regWrite,
     output reg [2:0] funct3,
-    output reg funct7,
+    output reg [6:0] funct7,
     output reg jump,   // unconditional control transfer (jal/jalr); target computed in EX, link = PC+4
     output reg jalr,   // target = rs1+imm (vs. jal's PC+imm) -- see riscvpipeline.v's target-address mux
     output reg lui,    // ALU A operand forced to 0 (result = imm)

@@ -53,10 +53,19 @@ OP_LUI = 0b0110111
 OP_AUIPC = 0b0010111
 OP_CUSTOM = 0b0101010
 
-R_TYPE = {  # mnemonic: (funct7[5], funct3)
-    "add": (0, 0b000), "sub": (1, 0b000), "sll": (0, 0b001),
-    "slt": (0, 0b010), "sltu": (0, 0b011), "xor": (0, 0b100),
-    "srl": (0, 0b101), "sra": (1, 0b101), "or": (0, 0b110), "and": (0, 0b111),
+FUNCT7_BASE = 0b0000000
+FUNCT7_ALT = 0b0100000    # sub/sra, and this core's custom ctz
+FUNCT7_MULDIV = 0b0000001  # RV32M
+
+R_TYPE = {  # mnemonic: (full funct7, funct3)
+    "add": (FUNCT7_BASE, 0b000), "sub": (FUNCT7_ALT, 0b000), "sll": (FUNCT7_BASE, 0b001),
+    "slt": (FUNCT7_BASE, 0b010), "sltu": (FUNCT7_BASE, 0b011), "xor": (FUNCT7_BASE, 0b100),
+    "srl": (FUNCT7_BASE, 0b101), "sra": (FUNCT7_ALT, 0b101), "or": (FUNCT7_BASE, 0b110), "and": (FUNCT7_BASE, 0b111),
+    # RV32M (docs/adr/0006-rv32m.md) -- shares the R-type opcode, distinguished by funct7=0000001
+    "mul": (FUNCT7_MULDIV, 0b000), "mulh": (FUNCT7_MULDIV, 0b001),
+    "mulhsu": (FUNCT7_MULDIV, 0b010), "mulhu": (FUNCT7_MULDIV, 0b011),
+    "div": (FUNCT7_MULDIV, 0b100), "divu": (FUNCT7_MULDIV, 0b101),
+    "rem": (FUNCT7_MULDIV, 0b110), "remu": (FUNCT7_MULDIV, 0b111),
 }
 I_TYPE = {  # mnemonic: funct3 (funct7[5] used only by srli/srai)
     "addi": 0b000, "slli": 0b001, "slti": 0b010, "sltiu": 0b011,
@@ -71,20 +80,17 @@ STORE = {"sb": 0b000, "sh": 0b001, "sw": 0b010}
 
 
 def r_type(mn, rd, rs1, rs2):
-    # This core only wires up funct7[5] (Control.v reads inst[30] as "funt7"),
-    # so real RV32I funct7=0100000 (sub/sra) needs bit30 set, not bit31.
     f7, f3 = R_TYPE[mn]
-    return (f7 << 30) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_R
+    return (f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_R
 
 
 def i_type(mn, rd, rs1, immv):
     f3 = I_TYPE[mn]
     if mn in ("slli", "srli", "srai"):
         shamt = imm(immv, 5, signed=False)
-        f7 = 1 if mn == "srai" else 0
-        # imm12 covers inst[31:20]; funct7[5] (the srli/srai distinguisher,
-        # inst[30]) is imm12 bit 10, not bit 5 -- see r_type()'s comment.
-        imm12 = (f7 << 10) | shamt
+        f7 = FUNCT7_ALT if mn == "srai" else FUNCT7_BASE
+        # imm12 covers inst[31:20] == funct7(7 bits) ++ shamt(5 bits).
+        imm12 = (f7 << 5) | shamt
     else:
         imm12 = imm(immv, 12, signed=True)
     return (u(imm12, 12) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_I
@@ -138,8 +144,8 @@ def jal(rd, offset_bytes):
 
 
 def ctz(rd, rs1):
-    # custom op: opcode 0101010, funct7[5]=1 (inst[30]), funct3=111 (see design/ALUCtrl.v ALUCtl=10101)
-    return (1 << 30) | (0 << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_CUSTOM
+    # custom op: opcode 0101010, funct7=0100000 (FUNCT7_ALT), funct3=111 (see design/ALUCtrl.v ALUCtl=10101)
+    return (FUNCT7_ALT << 25) | (0 << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_CUSTOM
 
 
 def assemble(lines):
