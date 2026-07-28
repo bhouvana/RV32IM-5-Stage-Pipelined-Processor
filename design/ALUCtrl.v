@@ -2,6 +2,10 @@
 
 `include "riscv_defs.vh"
 
+// Second-level ALU decoder: turns Control.v's coarse ALUOp (which
+// instruction class this is: load/store, R-type, I-type, or branch) plus
+// the instruction's own funct3/funct7 fields into the specific ALUCtl code
+// ALU.v's case statement switches on.
 module ALUCtrl (
     input [1:0] ALUOp,
 
@@ -46,7 +50,7 @@ else if(ALUOp == `ALUOP_RTYPE)
         {`FUNCT7_MULDIV, 3'b110}: ALUCtl = `ALUCTL_REM;
         {`FUNCT7_MULDIV, 3'b111}: ALUCtl = `ALUCTL_REMU;
         default:
-        ALUCtl = `ALUCTL_ILLEGAL;//jaathre
+        ALUCtl = `ALUCTL_ILLEGAL;  // unrecognized funct7/funct3 combination for this ALUOp
     endcase
     end
 
@@ -71,7 +75,7 @@ else if(ALUOp == `ALUOP_BRANCH)
         5'b01111: //bgeu
         ALUCtl = `ALUCTL_BGEU;
         default:
-        ALUCtl = `ALUCTL_ILLEGAL;//jaathre
+        ALUCtl = `ALUCTL_ILLEGAL;  // unrecognized funct7/funct3 combination for this ALUOp
     endcase
     end
 else if(ALUOp == `ALUOP_ITYPE)
@@ -99,7 +103,7 @@ else if(ALUOp == `ALUOP_ITYPE)
         5'b11111:
         ALUCtl = `ALUCTL_AND;//AND imm
         default:
-        ALUCtl = `ALUCTL_ILLEGAL;//jaathre
+        ALUCtl = `ALUCTL_ILLEGAL;  // unrecognized funct7/funct3 combination for this ALUOp
     endcase
     end
 

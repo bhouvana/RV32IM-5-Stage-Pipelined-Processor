@@ -1,5 +1,13 @@
 `default_nettype none
 
+// ID/EX pipeline register: latches every control signal and operand
+// Control.v/ImmGen.v/Register.v produced in ID for EX/MEM/WB to consume
+// downstream. Squashes to nop-equivalent control fields on a redirect or a
+// load-use bubble (docs/adr/0009's convention -- bubble the *control*
+// signals, not the data); `hold` freezes it during a multi-cycle EX
+// operation or the MEM-stage load-latency interlock (docs/adr/0009,
+// docs/adr/0013).
+//
 // Field-assignment macros factor out what was previously ~90 lines of
 // near-identical repetition across the four arms below (docs/ARCHITECTURE.md
 // sec 12 flagged this as the most duplicative code in the repository).

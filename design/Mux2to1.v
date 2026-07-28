@@ -1,8 +1,10 @@
 `default_nettype none
 
+// Generic parameterized 2:1 mux, reused wherever the pipeline needs a plain
+// binary select (PC source, ALU-B operand, writeback source).
 module Mux2to1 #(
     parameter size = 32
-) 
+)
 (
     input sel,
     input signed [size-1:0] s0,

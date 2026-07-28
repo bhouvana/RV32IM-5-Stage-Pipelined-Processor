@@ -2,6 +2,11 @@
 
 `include "riscv_defs.vh"
 
+// Single-cycle execute unit: ALU arithmetic/logic ops, RV32M single-cycle
+// multiply (mul/mulh/mulhsu/mulhu -- div/rem are NOT handled here, see
+// Divider.v's dedicated multi-cycle unit), and branch-condition evaluation
+// (`branch_zero`, which feeds `zero` and from there the fetch-stage
+// redirect mux).
 module ALU #(
     parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
 )(

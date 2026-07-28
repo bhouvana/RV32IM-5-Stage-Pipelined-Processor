@@ -2,6 +2,11 @@
 
 `include "riscv_defs.vh"
 
+// Main decoder: opcode (+funct3/funct7 pass-through, +the CSR/SYSTEM
+// funct12 field) -> every control signal the rest of the pipeline
+// conditions on. One `case` arm per opcode; an opcode with no arm here
+// falls to `default`, asserting illegalOpcode -- a real trap
+// (docs/adr/0011), not a silent no-op.
 module Control (
     input [6:0] opcode,
     //
@@ -58,7 +63,7 @@ always@(*)begin
 
 case(opcode)
     `OPCODE_CUSTOM:
-    begin// the new instruction that u people asked for
+    begin// custom R-type opcode (currently just ctz, see ALUCtrl.v's FUNCT7_ALT/111 arm)
 
         ALUOp =`ALUOP_RTYPE;
         regWrite =1;

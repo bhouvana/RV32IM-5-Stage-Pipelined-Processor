@@ -1,5 +1,12 @@
 `default_nettype none
 
+// MEM/WB pipeline register: latches the final writeback value and its
+// destination register. `hold` freezes it during the MEM-stage
+// load-latency interlock (docs/adr/0013's `mem_stall`) -- unlike reg3,
+// this register is also the sole source of MEM/WB forwarding, so it must
+// never be *bubbled* by a stall that doesn't concern its own occupant (see
+// docs/adr/0013's Lessons: bubbling reg4 the same way reg3 is bubbled
+// evicts a still-needed forwardable result one cycle early).
 module reg4 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
     parameter NUM_REGS = 32

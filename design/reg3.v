@@ -1,5 +1,8 @@
 `default_nettype none
 
+// EX/MEM pipeline register: latches the ALU/branch/CSR result and
+// memory-access control signals for MEM/WB. `hold` freezes it during the
+// MEM-stage load-latency interlock (docs/adr/0013's `mem_stall`).
 module reg3 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
     parameter NUM_REGS = 32

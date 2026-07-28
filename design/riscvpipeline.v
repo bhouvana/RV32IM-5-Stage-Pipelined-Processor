@@ -2,6 +2,16 @@
 
 `include "riscv_defs.vh"
 
+// Top-level integration for the 5-stage (or, under PROFILE_6STAGE_SPLIT_FETCH,
+// 6-stage) RV32I+M pipeline: IF -> ID -> EX -> MEM -> WB, connected by
+// reg1/reg2/reg3/reg4 (plus reg1a under the split-fetch profile). Forwarding
+// (Forward.v) and load-use hazard detection (Hazard.v, or HazardNoForward.v
+// under the alternate strategy) resolve RAW hazards; EX-stage branch/jump
+// resolution, CSR/exception traps, and mret all redirect through the same
+// `unconditional_redirect`/`branch_taken` squash machinery. See
+// docs/ARCHITECTURE.md sec 1 for the block diagram this module implements,
+// and the module inventory table (sec 2) for what each instantiated module
+// below does.
 module PIPELINED #(
     parameter INIT_FILE = "sim/programs/arith.mem",
     parameter MEM_SIZE_BYTES = 128,  // threaded to both memories (docs/ROADMAP.md
@@ -116,7 +126,9 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
 // this file began as a single-cycle CPU template.)
 
 
- //FETCH
+ // ==========================================================================
+ // IF -- Instruction Fetch
+ // ==========================================================================
 
     // Under PROFILE_6STAGE_SPLIT_FETCH (docs/adr/0018-variable-pipeline-
     // depth.md), instruction memory reads reg1a's registered PC instead of
@@ -238,7 +250,9 @@ wire [2:0] funct3_control;
 wire [6:0] funct7_control;
 
 
- //DECODE
+ // ==========================================================================
+ // ID -- Instruction Decode
+ // ==========================================================================
     Control m_Control(
         .opcode(inst_regfd[6:0]),
         .funt7(inst_regfd[31:25]),
@@ -436,7 +450,9 @@ end else begin : gen_no_forward
 end
 endgenerate
 
-//EXCECUTE
+// ==========================================================================
+// EX -- Execute
+// ==========================================================================
     ShiftLeftOne m_ShiftLeftOne(
     .i(imm_regde),
     .o(imm_s)
@@ -835,7 +851,9 @@ always @(posedge clk) begin
 end
 `endif
 
-//MEMORY
+// ==========================================================================
+// MEM -- Memory Access
+// ==========================================================================
     // Synchronous-read BRAM (docs/adr/0013-mem-stage-retiming.md), replacing
     // the old combinational-read DataMemory.v -- readData is only valid the
     // cycle *after* a load's address/memRead are presented, which is exactly
@@ -892,7 +910,9 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .pc_plus4_regwb(pc_plus4_regwb)
 );
 
-//WRITEBACK
+// ==========================================================================
+// WB -- Writeback
+// ==========================================================================
     wire [XLEN-1:0] writeData_regwb_mem_alu;
     Mux2to1 #(.size(XLEN)) m_Mux_WriteData(
     .sel(memtoReg_regwb),

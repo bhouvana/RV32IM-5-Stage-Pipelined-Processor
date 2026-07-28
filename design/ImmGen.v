@@ -1,10 +1,13 @@
 `default_nettype none
 
+// Immediate extraction: RV32I's five immediate encodings (I/S/B/U/J-type,
+// plus the CSR/SYSTEM zero-extended case) decoded from the raw instruction
+// word and sign-extended (or, for CSR addresses, zero-extended) per RV32I's
+// spec.
 module ImmGen#(parameter Width = 32) (
     input [Width-1:0] inst,
     output reg signed [Width-1:0] imm
 );
-    // ImmGen generate imm value based on opcode
 
     wire [6:0] opcode = inst[6:0];
     always @(*)

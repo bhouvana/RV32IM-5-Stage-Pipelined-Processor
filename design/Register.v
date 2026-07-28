@@ -1,5 +1,9 @@
 `default_nettype none
 
+// Architectural register file (x0-x31): x0 hardwired to 0 on both the write
+// and read paths, write-first bypass on a same-cycle write/read to the same
+// register (see the assign block below for exactly which hazard this covers
+// and which it doesn't -- it is not redundant with Forward.v).
 module Register #(
     // docs/adr/0015-xlen-and-regcount-parameterization.md -- named, not truly
     // variable: RV32I's rs1/rs2/rd instruction-encoding fields are a fixed

@@ -1,5 +1,11 @@
 `default_nettype none
 
+// IF/ID pipeline register: latches the fetched instruction and its PC.
+// Squashes to a real nop (not a literal 0, see the reset comment below) on
+// a taken branch or unconditional jump/redirect; holds on a stall. Under
+// PROFILE_6STAGE_SPLIT_FETCH (docs/adr/0018), this register's own squash
+// window is extended one extra cycle (riscvpipeline.v's
+// redirect_squash_extend_r) instead of reg1a squashing itself.
 module reg1 #(
     parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md --
                             // applies to inst/inst_regfd too, same simplification

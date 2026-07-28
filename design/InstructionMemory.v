@@ -1,5 +1,13 @@
 `default_nettype none
 
+// Instruction ROM: a flat byte array, word-read combinationally at
+// `readAddr` (no synchronous retiming yet -- see docs/adr/0013's Future
+// improvements, which retimed DataMemoryBRAM.v this way but left this
+// module as future work). Reads past `SIZE_BYTES` return 0, which
+// Control.v decodes as opcode 0000000, a real illegal-instruction trap
+// (docs/adr/0011) -- every test program relies on this to catch a runaway
+// PC (see the "jal x0, self" halt-loop convention documented in
+// docs/ROADMAP.md).
 module InstructionMemory #(
     // Resolved relative to the simulator's working directory at run time
     // (Icarus resolves $readmemb paths against the invoking process's CWD,
