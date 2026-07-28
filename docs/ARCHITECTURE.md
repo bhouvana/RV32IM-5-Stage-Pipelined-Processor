@@ -66,6 +66,16 @@ verification as the highest-leverage next investment rather than a nice-to-have:
    every prior test because none read those CSRs before deliberately
    triggering their own real trap first. See
    `docs/adr/0014-verification-gaps-and-csr-hold-bugs.md`.
+9. **A stall could silently swallow a `jal`/`jalr` redirect**, found
+   building the new alternate hazard strategy (`HazardNoForward.v`,
+   `docs/adr/0016-swappable-hazard-strategy.md`): `jal`/`jalr` write a
+   register *and* redirect the same cycle, so a hazard check against that
+   register could assert `stall` on the exact cycle the redirect needed to
+   apply -- and `PC.v` gives `stall` priority over accepting a new `pc_i`,
+   silently dropping the jump. The fourth occurrence of "a new interlock
+   signal needs checking against everything else sharing its consumer"
+   (`docs/adr/0009`, `0013`, `0014`, now this). Found by constrained-random
+   cross-checking, not any directed test.
 
 Also implemented in this pass: `jal` (previously decoded but functionally
 inert, §11) is now fully wired -- target, link value, and forwarding
@@ -129,7 +139,8 @@ This matches the diagram in [README.md](../README.md) but adds the two feedback 
 | `Control` | `Control.v` | No (operates on fixed instruction-encoding field widths, not XLEN — see `docs/adr/0015`) | Main decoder (opcode → control signals) |
 | `ImmGen` | `ImmGen.v` | `Width` (now genuinely driven by `XLEN`, `docs/adr/0015`) | Immediate extraction |
 | `Register` | `Register.v` | `XLEN`, `NUM_REGS`, `SP_INIT` (`docs/adr/0015`) | Register file (default 32×32), `x0` hardwired, `sp` reset now wired to `MEM_SIZE_BYTES` |
-| `Hazard` | `Hazard.v` | `NUM_REGS` (`docs/adr/0015`) | Load-use RAW hazard → stall/flush |
+| `Hazard` | `Hazard.v` | `NUM_REGS` (`docs/adr/0015`) | Load-use RAW hazard → stall/flush. Default strategy (`HAZARD_STRATEGY=0`, `docs/adr/0016`) |
+| `HazardNoForward` | `HazardNoForward.v` | `NUM_REGS` (`docs/adr/0015`) | Alternate strategy (`HAZARD_STRATEGY=1`, `docs/adr/0016`): stalls on every RAW hazard instead of forwarding |
 | `reg2` | `reg2.v` | `XLEN`, `NUM_REGS` (`docs/adr/0015`) | ID/EX register; also does branch-squash and load-use bubble |
 | `Forward` | `Forward.v` | `NUM_REGS` (`docs/adr/0015`) | EX/MEM & MEM/WB forwarding priority logic |
 | `ShiftLeftOne` | `ShiftLeftOne.v` | No | `imm << 1` for branch target |
@@ -282,7 +293,7 @@ That was the correct **starting point** for Phase 3, not a criticism of what exi
 | 3. Verification | Substantially complete. Self-checking directed suite (`sim/run_tests.sh`, 25 programs / 136 checks, including 6 CSR/exception tests and 2 standalone unit tests), 4 embedded assertions (`docs/adr/0007`), an independent reference-model ISS (`sim/tools/iss.py`, covering CSR/`ecall`/`ebreak`/`mret`) cross-checked against constrained-random programs including CSR ops (`docs/adr/0010`, `docs/adr/0014`), and functional coverage (`sim/tools/coverage_report.py`, confirms every branch direction and `ALUCTL_ILLEGAL` are now exercised). Found and fixed 10 real bugs total (see errata above). Remaining gap: `random_gen.py` still doesn't generate `ecall`/`ebreak`/`mret`/illegal-instruction control flow (deliberately scoped out, see `docs/adr/0014`). |
 | 4. Visualization | First version done: `sim/tb/gen_trace.v` + `sim/tools/gen_trace.py`/`build_viewer.py` produce an interactive, playable pipeline-occupancy viewer from a real execution trace (`make viewer`). Multi-program comparison and VCD export still open. |
 | 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1, `docs/adr/0005`), RV32M (5.2, `docs/adr/0006` + `0009`), and CSR/M-mode synchronous exceptions (5.3, `docs/adr/0011`) all done. RV32M includes a real multi-cycle divider (`design/Divider.v`) with a genuine pipeline interlock — the project's first multi-cycle-execute mechanism, whose stall/redirect shape CSR/exceptions reused directly. Caches/branch prediction/interrupts not started (the last needs a hardware interrupt source this design doesn't have — see `docs/adr/0011`'s Future improvements). |
-| 6. Research platform (pluggable subsystems) | The named-parameterization prerequisite is done: memory sizes (`docs/adr/0012`), and now the architectural register file/every pipeline register's data and register-address widths too (`XLEN`/`NUM_REGS`, `docs/adr/0015`) — not truly variable at other values for this ISA, but a single source of truth. The actual "pluggable subsystems" vision this phase describes (swappable hazard strategies, variable pipeline depth) has not been started. |
+| 6. Research platform (pluggable subsystems) | Parameterization prerequisite done: memory sizes (`docs/adr/0012`), register file/pipeline register widths (`XLEN`/`NUM_REGS`, `docs/adr/0015`). "Compare hazard strategies" done (`docs/adr/0016`): a swappable `HazardNoForward.v` alternate (stall-only, no forwarding), selected via `HAZARD_STRATEGY` at elaboration time, verified against 450+ random programs plus every hazard-pattern directed test, benchmarked at 30-43% more cycles than the default forwarding strategy. "Compare pipeline depths" remains explicitly not attempted — a genuinely larger redesign, deliberately scoped out rather than dropped silently. |
 | 7. FPGA support | Memory sizes parameterized, a `debug_x10` observability port, a vendor-neutral bring-up top level (`fpga/top.v`), and a generic XDC constraints template (`docs/adr/0012`). `design/DataMemoryBRAM.v` (synchronous read) is now wired into the live pipeline (`docs/adr/0013`), replacing the old combinational-read `DataMemory.v` (deleted). The one remaining item is real hardware validation -- nothing has touched an actual board yet. |
 | 8. Tooling | `sim/tools/asm.py` (assembler, now with CSR/`ecall`/`ebreak`/`mret` encoding and a raw `word` directive), `sim/tb/trace_debug.v` (ad hoc cycle trace), and now `sim/tools/debugger.py` (interactive ISS-based step debugger — `step`/`continue`/`break`/`regs`/`mem`/`csr`/`disas`, `make debug PROGRAM=...`) plus a shared `sim/tools/disasm.py` extracted for it (also fixed a real RV32M/CSR misdisassembly bug in the pipeline viewer). A dedicated profiler and benchmark runner are still open. |
 | 9. Documentation | This document, `docs/ROADMAP.md`, and 15 ADRs (`docs/adr/`) as of this update — grown incrementally alongside each phase rather than as a standalone effort, per this phase's own guidance. |

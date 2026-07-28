@@ -10,7 +10,7 @@ A synthesizable RV32I+M RISC-V 5-stage pipeline in Verilog
 a basic student pipeline project into a verified, documented core with a
 real verification harness, machine-mode CSRs/exceptions, and FPGA bring-up
 scaffolding. Every non-trivial design decision and every real bug found
-along the way is written up in `docs/adr/0001` through `0015` (15 ADRs) —
+along the way is written up in `docs/adr/0001` through `0016` (16 ADRs) —
 those are the actual source of truth for *why* things are the way they are. This file
 just orients you fast; `docs/ARCHITECTURE.md` (full technical audit,
 updated incrementally) and `docs/ROADMAP.md` (phased backlog + status log)
@@ -52,6 +52,15 @@ are the next things to read after this.
   three hand-written kernels in `sim/benchmarks/` with real cycle/IPC data
   (`make benchmark`) — not CoreMark/Dhrystone (no RISC-V C toolchain in
   this environment, confirmed directly, not assumed).
+- Phase 6's "compare hazard strategies" goal is done (`docs/adr/0016`): a
+  new `design/HazardNoForward.v` (stall on every RAW hazard, no forwarding
+  at all), selected via `riscvpipeline.v`'s `HAZARD_STRATEGY` parameter
+  (0=forwarding default, 1=stall-only; `generate`/`if` at elaboration time,
+  zero cost/changes to any existing test at the default). `make benchmark`
+  with `--compare-strategies` quantifies it: removing forwarding costs
+  30-43% more cycles. "Compare pipeline depths" (Phase 6's other named
+  goal) is deliberately still not attempted — see "Lessons" and the ADR for
+  why.
 - Git repo, all on `master`, no remote — run `git log --oneline | head -20`
   for the current commit count/truth rather than trusting a number here.
 
@@ -199,6 +208,15 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
     (documentation): no standalone action — it has no independent
     deliverable beyond what every other phase's own doc updates already
     produce, per that phase's own text.
+14. **Phase 6, "compare hazard strategies"** (`0016`) — `HazardNoForward.v`,
+    a stall-only alternate to `Hazard.v`+`Forward.v`, selected via
+    `riscvpipeline.v`'s new `HAZARD_STRATEGY` parameter (`generate`/`if`,
+    zero cost at the default). `bench_runner.py --compare-strategies`
+    quantifies the result (30-43% more cycles without forwarding). Found
+    and fixed a real bug: a stall from the new module could silently
+    swallow a `jal`/`jalr` redirect (see "Lessons"). "Compare pipeline
+    depths" deliberately not attempted — see the ADR's Problem section for
+    why (real, substantially larger future work, not silently dropped).
 
 ## Lessons worth not re-learning
 
@@ -285,6 +303,21 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
   before reusing a "bubble vs. hold vs. freeze" pattern from an earlier ADR,
   check what else the target register is a source of, not just whether it
   looks structurally similar.
+- **A new interlock/hazard signal has to be checked against *everything*
+  that shares its consumer, not just the specific producer that motivated
+  adding it.** `docs/adr/0016`'s new `HazardNoForward.v` module needed two
+  fix attempts: the first gated its `stall` output by `!branch_taken` only
+  for the specific case that motivated it (a `jal`'s own link register
+  causing a hazard against itself); random testing on the *same seed*
+  immediately showed that was too narrow — a completely unrelated hazard
+  check (against `reg3`, nothing to do with the redirecting instruction in
+  `reg2`) could raise `stall` on the same cycle too, which still broke
+  `PC.v`'s redirect (it prioritizes `stall` over accepting a new `pc_i`,
+  regardless of which internal condition raised it). The fix had to gate
+  the *entire* output, not just the specific path that motivated the
+  investigation. Before declaring a fix complete, re-run the exact failing
+  case, don't just reason that the specific mechanism you found is now
+  handled.
 - **`dict.get(key, default)` in Python evaluates `default` eagerly.**
   `sim/tools/asm.py`'s CSR-address lookup originally did
   `CSR_ADDR.get(csr, int(csr, 0))`, which calls `int("mscratch", 0)` and
@@ -303,10 +336,11 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
    deliberately-illegal-instruction control flow (deliberately scoped out
    of `docs/adr/0014` — see that ADR for why: needs real safety machinery
    an already-directed-tested area doesn't currently justify).
-3. Phase 6 (research platform / pluggable subsystems): the named-
-   parameterization prerequisite is done (`docs/adr/0015`), but the actual
-   "pluggable subsystems" vision — swappable hazard strategies, variable
-   pipeline depth — hasn't been started.
+3. Phase 6 (research platform / pluggable subsystems): parameterization
+   (`docs/adr/0015`) and "compare hazard strategies" (`docs/adr/0016`) are
+   both done. "Compare pipeline depths" remains genuinely not started — a
+   real redesign, deliberately out of scope so far (see `0016`'s Problem
+   section for why).
 4. Phase 8 (tooling): interactive debugger done (`sim/tools/debugger.py`);
    a dedicated profiler is still open.
 5. Real Verilog lint (Verible) — CQ-5 in ROADMAP, still open; the closest

@@ -31,7 +31,7 @@ def load_words(mem_path):
     return words
 
 
-def run_one(seed, n_instrs, work_dir, iverilog_bin, template):
+def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
     with open(prog_s, "w") as f:
@@ -57,7 +57,8 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template):
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
     with open(template) as f:
         tpl = f.read()
-    tpl = tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time)).replace("__OUT_FILE__", out_path)
+    tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
+              .replace("__OUT_FILE__", out_path).replace("__HAZARD_STRATEGY__", str(hazard_strategy)))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
@@ -97,6 +98,8 @@ def main():
     ap.add_argument("--seed-start", type=int, default=1)
     ap.add_argument("--iverilog-dir", default=None)
     ap.add_argument("--keep-failures", action="store_true", help="don't delete work dir contents for failing seeds")
+    ap.add_argument("--hazard-strategy", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's HAZARD_STRATEGY (docs/adr/0016): 0=forwarding (default), 1=stall-only")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -107,7 +110,7 @@ def main():
     with tempfile.TemporaryDirectory() as work_dir:
         for i in range(args.count):
             seed = args.seed_start + i
-            ok, msg = run_one(seed, args.n_instrs, work_dir, args.iverilog_dir, template)
+            ok, msg = run_one(seed, args.n_instrs, work_dir, args.iverilog_dir, template, args.hazard_strategy)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")

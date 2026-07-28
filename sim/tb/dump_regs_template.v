@@ -16,23 +16,28 @@
 `include "reg3.v"
 `include "reg4.v"
 `include "Hazard.v"
+`include "HazardNoForward.v"
 `include "Forward.v"
 `include "Divider.v"
 `include "CSR.v"
 
-// Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__
-// and __MAX_TIME__ are substituted per run. Dumps final architectural
-// register state (all 32 registers) as one decimal value per line, for
-// comparison against sim/tools/iss.py's own final state on the same
-// program. Not part of sim/run_tests.sh's tb_*.v glob (different shape --
-// generated per-run, not a fixed named test).
+// Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__,
+// __MAX_TIME__, and __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-
+// strategy.md; 0 or 1, see riscvpipeline.v's HAZARD_STRATEGY parameter) are
+// substituted per run. Dumps final architectural register state (all 32
+// registers) as one decimal value per line, for comparison against
+// sim/tools/iss.py's own final state on the same program -- the ISS itself
+// doesn't model pipeline microarchitecture at all, so it's equally valid as
+// a reference regardless of which hazard strategy the RTL used. Not part of
+// sim/run_tests.sh's tb_*.v glob (different shape -- generated per-run, not
+// a fixed named test).
 module dump_regs;
     reg clk = 0;
     reg start = 0;
     integer i;
     integer fd;
 
-    PIPELINED #(.INIT_FILE("__INIT_FILE__")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__)) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 

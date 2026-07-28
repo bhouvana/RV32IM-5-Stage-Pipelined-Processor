@@ -18,7 +18,16 @@ module PIPELINED #(
     // (same instruction encoding, wider XLEN), not to claim arbitrary-width
     // support exists now.
     parameter XLEN = 32,
-    parameter NUM_REGS = 32
+    parameter NUM_REGS = 32,
+    // docs/adr/0016-swappable-hazard-strategy.md (docs/ROADMAP.md Phase 6:
+    // "compare hazard strategies"). 0 (default): Hazard.v + Forward.v, this
+    // core's original, fully-verified stall-on-load-use-only + forward-
+    // everything-else strategy. 1: HazardNoForward.v, a conservative
+    // alternate that stalls on *every* RAW hazard instead of forwarding
+    // around any of them (Forward.v's muxes are forced to "no forward" in
+    // this mode). Both are independently verified (see the ADR); 0 is what
+    // every pre-existing test/ADR/benchmark result in this repo assumes.
+    parameter HAZARD_STRATEGY = 0
 )(
     input clk,
     input start,
@@ -174,14 +183,34 @@ wire [6:0] funct7_control;
         .readData2(readData2)
     );
 
-    Hazard #(.NUM_REGS(NUM_REGS)) m_Hazard(
-        .readReg1_fd(inst_regfd[19:15]),
-        .readReg2_fd(inst_regfd[24:20]),
-        .write_to_Reg_regde(write_to_Reg_regde),
-        .memRead_regde(memRead_regde),
-        .flush(flush),
-        .stall(stall)
-    );
+    // Hazard strategy select (docs/adr/0016-swappable-hazard-strategy.md) --
+    // elaboration-time choice between the two hazard units; whichever one
+    // is NOT selected isn't even instantiated, so this costs nothing in the
+    // default (HAZARD_STRATEGY=0) build.
+    generate
+    if (HAZARD_STRATEGY == 0) begin : gen_hazard_forwarding
+        Hazard #(.NUM_REGS(NUM_REGS)) m_Hazard(
+            .readReg1_fd(inst_regfd[19:15]),
+            .readReg2_fd(inst_regfd[24:20]),
+            .write_to_Reg_regde(write_to_Reg_regde),
+            .memRead_regde(memRead_regde),
+            .flush(flush),
+            .stall(stall)
+        );
+    end else begin : gen_hazard_no_forward
+        HazardNoForward #(.NUM_REGS(NUM_REGS)) m_HazardNoForward(
+            .readReg1_fd(inst_regfd[19:15]),
+            .readReg2_fd(inst_regfd[24:20]),
+            .regWrite_regde(regWrite_regde),
+            .write_to_Reg_regde(write_to_Reg_regde),
+            .regWrite_regem(regWrite_regem),
+            .write_to_Reg_regem(write_to_Reg_regem),
+            .branch_taken(branch_taken),
+            .flush(flush),
+            .stall(stall)
+        );
+    end
+    endgenerate
 //
     wire branch_regde;
     wire memRead_regde;
@@ -284,17 +313,28 @@ wire unconditional_redirect;  // jal/jalr | trap | mret -- see the assign below,
 // younger in-flight instructions (see reg1.jump / reg2.branch_taken).
 assign branch_taken = (branch_regde & zero) | unconditional_redirect;
 
-// forwarding unit
-Forward #(.NUM_REGS(NUM_REGS)) m_Forward(
-    .readReg1_regde(readReg1_regde),
-    .readReg2_regde(readReg2_regde),
-    .write_to_Reg_regem(write_to_Reg_regem),
-    .write_to_Reg_regwb(write_to_Reg_regwb),
-    .regWrite_regwb(regWrite_regwb),
-    .regWrite_regem(regWrite_regem),
-    .forwardA(forwardA),
-    .forwardB(forwardB)
-);
+// forwarding unit (docs/adr/0016-swappable-hazard-strategy.md: only
+// instantiated under the default forwarding strategy -- the alternate
+// HazardNoForward.v strategy ties forwardA/B to "no forward" directly,
+// relying entirely on stalling plus Register.v's existing write-first
+// bypass instead).
+generate
+if (HAZARD_STRATEGY == 0) begin : gen_forward
+    Forward #(.NUM_REGS(NUM_REGS)) m_Forward(
+        .readReg1_regde(readReg1_regde),
+        .readReg2_regde(readReg2_regde),
+        .write_to_Reg_regem(write_to_Reg_regem),
+        .write_to_Reg_regwb(write_to_Reg_regwb),
+        .regWrite_regwb(regWrite_regwb),
+        .regWrite_regem(regWrite_regem),
+        .forwardA(forwardA),
+        .forwardB(forwardB)
+    );
+end else begin : gen_no_forward
+    assign forwardA = 2'b00;
+    assign forwardB = 2'b00;
+end
+endgenerate
 
 //EXCECUTE
     ShiftLeftOne m_ShiftLeftOne(

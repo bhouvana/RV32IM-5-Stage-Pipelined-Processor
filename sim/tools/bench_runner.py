@@ -21,7 +21,14 @@ Cycle count is measured as the cycle EX first resolves the program's own
 before the pipeline fully drains, but that offset is constant across every
 benchmark, so relative comparisons between them are unaffected.
 
+Also doubles as the "compare hazard strategies" tool docs/ROADMAP.md Phase 6
+named as a research-platform goal (docs/adr/0016-swappable-hazard-strategy.md):
+--compare-strategies runs every benchmark under both riscvpipeline.v's
+HAZARD_STRATEGY=0 (forwarding, the default/original design) and =1
+(stall-only, no forwarding) and reports the cycle-count delta.
+
 Usage: python bench_runner.py --iverilog-dir /c/iverilog/bin
+       python bench_runner.py --compare-strategies --iverilog-dir /c/iverilog/bin
 """
 import argparse
 import glob
@@ -65,7 +72,7 @@ def load_words(mem_path):
     return words
 
 
-def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size):
+def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
@@ -85,20 +92,24 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size):
     if expected is not None and iss.regs[10] != expected:
         return None, f"ISS correctness check failed: x10={iss.regs[10]}, expected {expected}"
 
-    max_time = (instrs * 40 + 500) * 10
-    dump_v = os.path.join(work_dir, f"{name}.v")
-    out_path = os.path.join(work_dir, f"{name}.out").replace("\\", "/")
+    # Strategy 1 (stall-only) can only ever take *more* cycles per
+    # instruction than strategy 0 (forwarding) -- generous margin, not
+    # tuned per-strategy.
+    max_time = (instrs * 60 + 500) * 10
+    dump_v = os.path.join(work_dir, f"{name}_hs{hazard_strategy}.v")
+    out_path = os.path.join(work_dir, f"{name}_hs{hazard_strategy}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
     with open(template) as f:
         tpl = f.read()
     tpl = (tpl.replace("__INIT_FILE__", init_file_rel)
               .replace("__MAX_TIME__", str(max_time))
               .replace("__OUT_FILE__", out_path)
-              .replace("__MEM_SIZE__", str(mem_size)))
+              .replace("__MEM_SIZE__", str(mem_size))
+              .replace("__HAZARD_STRATEGY__", str(hazard_strategy)))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
-    vvp_path = os.path.join(work_dir, f"{name}.vvp")
+    vvp_path = os.path.join(work_dir, f"{name}_hs{hazard_strategy}.vvp")
     iverilog_exe = os.path.join(iverilog_bin, "iverilog.exe") if iverilog_bin else "iverilog"
     vvp_exe = os.path.join(iverilog_bin, "vvp.exe") if iverilog_bin else "vvp"
     r = subprocess.run([iverilog_exe, "-g2005", "-I", "design", "-o", vvp_path, dump_v],
@@ -119,6 +130,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iverilog-dir", default=None)
     ap.add_argument("--programs-dir", default="sim/benchmarks")
+    ap.add_argument("--hazard-strategy", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's HAZARD_STRATEGY (docs/adr/0016): 0=forwarding (default), 1=stall-only")
+    ap.add_argument("--compare-strategies", action="store_true",
+                     help="run every benchmark under both strategies and report the delta")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -129,26 +144,45 @@ def main():
         print(f"No bench_*.s programs found under {args.programs_dir}")
         sys.exit(1)
 
-    results = []
+    strategies = (0, 1) if args.compare_strategies else (args.hazard_strategy,)
+    all_results = {s: [] for s in strategies}
     with tempfile.TemporaryDirectory() as work_dir:
-        for prog_s in progs:
-            name = os.path.splitext(os.path.basename(prog_s))[0]
-            mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
-            result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size)
-            if err:
-                print(f"FAIL  {name}: {err}")
-                results.append((name, None))
-            else:
-                print(f"{name:<20} instructions={result['instructions']:<6} "
-                      f"cycles={result['cycles']:<6} IPC={result['ipc']:.3f}")
-                results.append((name, result))
+        for strategy in strategies:
+            if args.compare_strategies:
+                print(f"--- HAZARD_STRATEGY={strategy} ({'forwarding' if strategy == 0 else 'stall-only'}) ---")
+            for prog_s in progs:
+                name = os.path.splitext(os.path.basename(prog_s))[0]
+                mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
+                result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size, strategy)
+                if err:
+                    print(f"FAIL  {name}: {err}")
+                    all_results[strategy].append((name, None))
+                else:
+                    print(f"{name:<20} instructions={result['instructions']:<6} "
+                          f"cycles={result['cycles']:<6} IPC={result['ipc']:.3f}")
+                    all_results[strategy].append((name, result))
+            print()
 
-    print()
-    failed = [n for n, r in results if r is None]
+    if args.compare_strategies:
+        print("=== comparison: forwarding (HS=0) vs. stall-only (HS=1) ===")
+        by_name_0 = dict(all_results[0])
+        by_name_1 = dict(all_results[1])
+        for name, r0 in all_results[0]:
+            r1 = by_name_1.get(name)
+            if r0 is None or r1 is None:
+                print(f"{name:<20} (incomplete, see FAIL above)")
+                continue
+            delta = r1["cycles"] - r0["cycles"]
+            pct = 100.0 * delta / r0["cycles"]
+            print(f"{name:<20} cycles: {r0['cycles']:<6} -> {r1['cycles']:<6}  "
+                  f"({delta:+d}, {pct:+.1f}%)   IPC: {r0['ipc']:.3f} -> {r1['ipc']:.3f}")
+
+    failed = [n for results in all_results.values() for n, r in results if r is None]
+    total = sum(len(results) for results in all_results.values())
     if failed:
-        print(f"=== {len(failed)}/{len(results)} benchmark(s) FAILED: {', '.join(failed)} ===")
+        print(f"\n=== {len(failed)}/{total} benchmark run(s) FAILED: {', '.join(failed)} ===")
         sys.exit(1)
-    print(f"=== {len(results)}/{len(results)} benchmarks ran cleanly ===")
+    print(f"\n=== {total}/{total} benchmark run(s) completed cleanly ===")
 
 
 if __name__ == "__main__":

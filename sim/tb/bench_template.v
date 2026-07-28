@@ -16,13 +16,17 @@
 `include "reg3.v"
 `include "reg4.v"
 `include "Hazard.v"
+`include "HazardNoForward.v"
 `include "Forward.v"
 `include "Divider.v"
 `include "CSR.v"
 
 // Template for sim/tools/bench_runner.py (docs/ROADMAP.md Phase 10).
-// __INIT_FILE__/__MAX_TIME__/__OUT_FILE__ substituted per run, same idiom
-// dump_regs_template.v (docs/ROADMAP.md V-4) already established.
+// __INIT_FILE__/__MAX_TIME__/__OUT_FILE__/__MEM_SIZE__/__HAZARD_STRATEGY__
+// substituted per run, same idiom dump_regs_template.v (docs/ROADMAP.md V-4)
+// already established. __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-
+// strategy.md) is what makes this runner double as the "compare hazard
+// strategies" tool docs/ROADMAP.md Phase 6 named as a research-platform goal.
 //
 // Detects "program finished" generically, without needing to know any
 // program's specific halt-label address: every benchmark (like every other
@@ -40,7 +44,7 @@ module bench_run;
     integer cycle_count;
     reg done;
 
-    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__)) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__), .HAZARD_STRATEGY(__HAZARD_STRATEGY__)) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 
