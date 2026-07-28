@@ -178,6 +178,14 @@ industry-standard benchmarks (CoreMark/Dhrystone); ports are in progress.
 | `make benchmark` | Runs the hand-written benchmark kernels and reports cycles/IPC |
 | `make lint` | `iverilog -Wall` syntax/width/latch check |
 | `sim/tools/build_c_bench.py` | Compile real C (GCC) → link → convert → run on the RTL, report cycles + return value |
+| `sim/tb/dump_waves.v` | Full `$dumpvars(0, dut)` VCD dump of a program's execution, for any real waveform viewer (GTKWave, etc.) |
+
+`sim/tb/dump_waves.v` replays the same `sim/programs/demo.s` the pipeline viewer above uses, but dumps
+every DUT signal to `build/demo.vcd` instead of a curated CSV — open it in
+[GTKWave](https://gtkwave.sourceforge.net/) (or any VCD viewer) for a full, standard-EDA-tool view of
+the same execution:
+
+![GTKWave showing pc_o, inst, stall, flush, branch_taken, ALUOut, and writeback signals over the demo program's execution](docs/images/gtkwave_demo.png)
 
 ## Getting started
 
