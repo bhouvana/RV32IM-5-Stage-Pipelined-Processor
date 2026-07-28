@@ -20,27 +20,25 @@
 `include "Divider.v"
 `include "CSR.v"
 
-module tb_ecall_trap;
+module tb_mem_stall_forward;
+    `include "check_tasks.vh"
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/ecall_trap.mem")) dut(.clk(clk), .start(start));
-    `include "check_tasks.vh"
+    PIPELINED #(.INIT_FILE("sim/programs/mem_stall_forward.mem")) dut(.clk(clk), .start(start));
 
     always #5 clk = ~clk;
 
     initial begin
         start = 0;
         #10 start = 1;
-        #300;
+        #800;
 
-        check_reg(9, 32'd0,   "x9 never written: both addi's after the trap were redirected away");
-        check_reg(10, 32'd77, "x10=77: the handler at mtvec ran");
-        check_val(dut.m_CSR.mepc, 32'd8,    "mepc = ecall's own address");
-        check_val(dut.m_CSR.mcause, 32'd11, "mcause = 11 (ECALL_FROM_M)");
-        check_val(dut.m_CSR.mtvec, 32'd20,  "mtvec unchanged from setup");
+        check_reg(1, 32'd38, "producer: x1 = 38");
+        check_reg(7, 32'd99,  "unrelated load: x7 <- mem[32] == 99");
+        check_reg(8, 32'd76, "MEM/WB forward across an unrelated load's stall: x8=x1+x1=76 (docs/adr/0013)");
 
-        report("ecall_trap");
+        report("mem_stall_forward");
 `ifdef COVERAGE
         dut.dump_coverage;
 `endif

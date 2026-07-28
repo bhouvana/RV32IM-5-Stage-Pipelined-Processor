@@ -23,17 +23,22 @@ are the next things to read after this.
   `ecall`/`ebreak` traps, `mret`). Only `fence` (a no-op here — no cache,
   no multi-hart) and real interrupts (no hardware IRQ source exists) are
   unimplemented, both intentionally.
-- **22/22 directed tests, 122/122 checks passing** (`sim/run_tests.sh` /
+- **23/23 directed tests, 128/128 checks passing** (`sim/run_tests.sh` /
   `make test`), plus constrained-random cross-checking against an
   independent reference-model ISS (`sim/tools/iss.py`, `make random-test`),
   4 embedded RTL assertions, and functional coverage (`make coverage`).
-- FPGA readiness is *scaffolding only*: parameterized memory sizes, a
-  standalone unit-tested synchronous-read memory
-  (`design/DataMemoryBRAM.v`, **not wired into the live pipeline**), a
-  `debug_x10` observability port, `fpga/top.v`, `fpga/constraints_template.
-  xdc`. Nothing has touched real hardware. See `docs/adr/0012` for exactly
-  what's deferred and why.
-- Git repo, 12 commits as of this writing, all on `master`. No remote.
+- FPGA readiness: memory sizes parameterized, a `debug_x10` observability
+  port, `fpga/top.v`, `fpga/constraints_template.xdc`. The synchronous-read
+  memory (`design/DataMemoryBRAM.v`) is now **wired into the live pipeline**
+  (`docs/adr/0013`), replacing the old combinational-read `DataMemory.v`
+  (deleted) — a new `mem_stall` interlock in `riscvpipeline.v` holds
+  `reg2`/`reg3`/`reg4` for the one extra cycle a load's registered read
+  needs; no changes were needed to `Hazard.v`/`Forward.v`. Nothing has
+  touched real hardware yet — that's the one remaining Phase 7 item. See
+  `docs/adr/0013` for two real interlock bugs found integrating this.
+- Git repo, 13 commits as of this writing, all on `master`, plus the
+  MEM-stage retiming work above staged/uncommitted at the time this was
+  written — check `git log`/`git status` for current truth. No remote.
 
 ## Verify the state yourself (don't take the above on faith)
 
@@ -86,8 +91,9 @@ docs/adr/000N-*.md One ADR per non-trivial decision or bug fix. Numbered,
                    chronological. This is where the actual engineering
                    reasoning lives — ARCHITECTURE.md/ROADMAP.md summarize,
                    ADRs explain.
-fpga/              Bring-up scaffolding, not yet integrated or hardware-
-                   tested. See docs/adr/0012.
+fpga/              Bring-up wrapper/constraints, not yet hardware-tested (the
+                   RTL it targets is fully integrated as of docs/adr/0013).
+                   See docs/adr/0012, 0013.
 ```
 
 ## How the project got here (brief — ADRs have the real detail)
@@ -116,12 +122,19 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
    below).
 7. **FPGA readiness scaffolding** (`0012`) — parameterization, a standalone
    synchronous-read memory building block, a bring-up top level. The actual
-   pipeline retiming to integrate it is explicitly deferred, not done.
+   pipeline retiming to integrate it was deliberately deferred at this point.
 8. **Cruft cleanup**: removed a stale `simulation/` directory (fully
    superseded by `sim/`) and several leftover dead-code fragments across
    `design/*.v` (commented-out code from early drafts, a hardcoded path in
    a comment, unused wire declarations) that had survived every prior pass
    because nothing ever exercised or grepped for them specifically.
+9. **MEM-stage retiming** (`0013`) — the deferred item from step 7. Wired
+   `design/DataMemoryBRAM.v` (synchronous read) into the live pipeline in
+   place of the old combinational-read `DataMemory.v` (deleted, fully
+   superseded), with a new `mem_stall` interlock holding `reg2`/`reg3`/`reg4`
+   for the one extra cycle a load's registered read now needs. Found and
+   fixed two real interlock bugs along the way (see "Lessons" below);
+   `Hazard.v`/`Forward.v` needed no changes at all.
 
 ## Lessons worth not re-learning
 
@@ -165,6 +178,31 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
   looping back to address 0 mid-test — this exact failure mode ate real
   debugging time once already (see `docs/adr/0011`'s "A real bug found
   during verification").
+- **A bare "was X requested last cycle" level signal can't tell a repeated
+  request from a new one that looks the same.** Bit us twice now in the
+  exact same shape: `docs/adr/0009`'s divider re-triggered a bogus second
+  division because `start && !busy` looked identical on the done cycle and
+  the next idle cycle; `docs/adr/0013`'s first MEM-stage interlock attempt
+  derived readiness from `DataMemoryBRAM`'s own registered "read happened"
+  signal, which broke on back-to-back loads for the identical reason (a
+  load held for its stall cycle keeps `memRead` asserted for 2 cycles, so
+  the *next* load's first cycle looks like the previous one's completion).
+  When gating on "did an in-flight operation finish," track it against the
+  *consumer's* occupancy/state, not a raw level from the thing being waited
+  on.
+- **A bubble is not always the right fix for "don't let a stalled register
+  latch bad data" — sometimes it needs a real hold instead.** `docs/adr/0009`
+  established feeding a zeroed bubble into the register just *after* a
+  multi-cycle unit (bubble the control signals, not the data) as the
+  pattern for that problem. `docs/adr/0013` copied that pattern one stage
+  later (bubbling `reg4` during `mem_stall`) and it was wrong: unlike
+  `reg3`, `reg4` is also the sole source of MEM/WB forwarding, and bubbling
+  it evicts a real, still-needed forwardable result one cycle before some
+  *unrelated* instruction riding out the same stall actually needs it. Only
+  caught by constrained-random cross-checking, not any directed test —
+  before reusing a "bubble vs. hold vs. freeze" pattern from an earlier ADR,
+  check what else the target register is a source of, not just whether it
+  looks structurally similar.
 - **`dict.get(key, default)` in Python evaluates `default` eagerly.**
   `sim/tools/asm.py`'s CSR-address lookup originally did
   `CSR_ADDR.get(csr, int(csr, 0))`, which calls `int("mscratch", 0)` and
@@ -175,25 +213,21 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
 
 ## What's genuinely not done (in rough priority order)
 
-1. **MEM-stage retiming** to actually integrate `design/DataMemoryBRAM.v`
-   into the live pipeline (`Forward.v`/`Hazard.v` need a new forwarding
-   source and a load-result stall, the way `docs/adr/0009` added one for
-   div/rem). This is the real remaining Phase 7 (FPGA) work — scaffolding
-   is done, this is not. Deserves its own ADR and dedicated verification
-   pass, not a drive-by change.
-2. **Real hardware validation** — nothing in `fpga/` has touched an actual
-   board. `fpga/constraints_template.xdc` is Xilinx/XDC-syntax only.
-3. Minor verification gaps, all documented in ARCHITECTURE.md §15 / ROADMAP
+1. **Real hardware validation** — nothing in `fpga/` has touched an actual
+   board. `fpga/constraints_template.xdc` is Xilinx/XDC-syntax only. This is
+   the one remaining Phase 7 (FPGA) item; MEM-stage retiming (integrating
+   `design/DataMemoryBRAM.v`) is done as of `docs/adr/0013`.
+2. Minor verification gaps, all documented in ARCHITECTURE.md §15 / ROADMAP
    status log: `blt`/`bge`/`ble`/`bgt`/`bltu`/`bgeu` each missing directed
    coverage of one branch direction; `ALUCTL_ILLEGAL` (recognized opcode,
    unrecognized funct7/funct3) has no directed test; `random_gen.py`
    doesn't generate CSR/exception instructions yet.
-4. Phase 6 (research platform / pluggable subsystems): memory sizes are
+3. Phase 6 (research platform / pluggable subsystems): memory sizes are
    parameterized now, but the architectural register file and pipeline
    register widths are still fixed literals.
-5. Phase 8 (tooling) and Phase 10 (benchmarking): both essentially not
+4. Phase 8 (tooling) and Phase 10 (benchmarking): both essentially not
    started beyond early building blocks (`asm.py`, `trace_debug.v`).
-6. Real Verilog lint (Verible) — CQ-5 in ROADMAP, still open; the closest
+5. Real Verilog lint (Verible) — CQ-5 in ROADMAP, still open; the closest
    thing today is `make lint` (just `iverilog -Wall`, catches syntax/width/
    latch issues, not a real style/lint pass).
 

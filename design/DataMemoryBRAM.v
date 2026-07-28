@@ -1,14 +1,14 @@
 `default_nettype none
 
 // Synchronous-read data memory (docs/ROADMAP.md Phase 7, docs/adr/0012-fpga-
-// readiness.md). NOT wired into PIPELINED -- integrating it would change
-// when a load's result becomes available (one cycle later than today's
-// DataMemory.v, whose read is combinational), which ripples into Forward.v,
-// Hazard.v, and reg4's timing exactly the way docs/adr/0009's divider did
-// for div/rem. That retiming is real, scoped work of its own, deliberately
-// deferred (see the ADR) rather than attempted as a drive-by change to an
-// otherwise fully-verified pipeline. This module exists as a proven,
-// standalone building block for that future integration.
+// readiness.md). Wired into PIPELINED as of docs/adr/0013-mem-stage-retiming.md,
+// which added the MEM-stage interlock (riscvpipeline.v's `mem_stall`) needed
+// to accommodate the one-cycle-later load result this module's registered
+// read produces relative to the old combinational DataMemory.v. That
+// interlock tracks readiness itself (per reg3's occupant, not via a port on
+// this module) -- see the ADR for why a raw "was memRead asserted last
+// cycle" signal from here can't distinguish a fresh load's first cycle from
+// a residual assertion left by an immediately preceding load's own stall.
 //
 // The read idiom below -- indexing the memory array directly into a
 // register on `posedge clk`, with any further combinational logic (here,

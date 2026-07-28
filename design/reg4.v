@@ -10,6 +10,16 @@ module reg4(
     input [4:0] write_to_Reg_regem,
     input jump_regem,
     input [31:0] pc_plus4_regem,
+    input hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
+                  // freeze every field exactly as-is while a load sitting in
+                  // reg3 (this register's own source) hasn't come back from
+                  // DataMemoryBRAM yet. Same empty-branch idiom as reg2/reg3's
+                  // `hold` -- NOT a bubble: whatever reg4 is currently holding
+                  // (e.g. an instruction still within its MEM/WB forwarding
+                  // window) must stay visible to Forward.v for exactly as long
+                  // as reg2/reg3 are also held, or a completely unrelated
+                  // instruction waiting behind the load can lose a forwarding
+                  // match it would otherwise have had (see the ADR).
     output reg memtoReg_regwb,
     output reg regWrite_regwb,
     output reg [31:0] readData_regwb,
@@ -31,6 +41,10 @@ begin
     jump_regwb <= 0;
     pc_plus4_regwb <= 0;
 
+    end
+    else if(hold)
+    begin
+    // Deliberately empty -- see the `hold` port comment above.
     end
     else
     begin

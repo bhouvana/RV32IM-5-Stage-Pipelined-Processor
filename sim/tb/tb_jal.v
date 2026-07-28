@@ -4,7 +4,7 @@
 `include "ALU.v"
 `include "ALUCtrl.v"
 `include "Control.v"
-`include "DataMemory.v"
+`include "DataMemoryBRAM.v"
 `include "ImmGen.v"
 `include "InstructionMemory.v"
 `include "Mux2to1.v"

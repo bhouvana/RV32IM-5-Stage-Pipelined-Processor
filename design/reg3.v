@@ -13,6 +13,12 @@ module reg3(
     input jump_regde,
     input [31:0] pc_plus4_regde,   // rd = PC+4 link value for jal, computed in EX
     input [2:0] funct3_regde,      // load/store access width+signedness, for DataMemory
+    input hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
+                  // freeze every field exactly as-is while a load sitting in
+                  // *this* register's own output hasn't come back from
+                  // DataMemoryBRAM yet. Same empty-branch idiom as reg2's
+                  // `hold` (docs/adr/0009) -- highest priority, no field-
+                  // assignment logic needed.
 
     output reg memtoReg_regem,
     output reg regWrite_regem,
@@ -40,6 +46,10 @@ if(~rst)
     jump_regem <=0;
     pc_plus4_regem <=0;
     funct3_regem <=0;
+    end
+else if(hold)
+    begin
+    // Deliberately empty -- see the `hold` port comment above.
     end
 else
     begin

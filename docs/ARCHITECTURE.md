@@ -42,6 +42,17 @@ verification as the highest-leverage next investment rather than a nice-to-have:
    declared `[12:14]` range and silently read as `x`. Found immediately by
    the CSR directed tests (a consecutive-cycle CSR read-after-write
    corrupted with X). See `docs/adr/0011-csr-and-exceptions.md`.
+7. **Two real interlock bugs surfaced integrating `DataMemoryBRAM.v`'s
+   synchronous read into the live pipeline**: (a) deriving the new MEM-stage
+   stall from the memory's own registered "read happened" signal broke
+   back-to-back loads (a busy/done-style level-vs-edge ambiguity, the same
+   class of bug as errata's div/rem interlock, `docs/adr/0009`); (b) an
+   initial "bubble" applied to the MEM/WB register on every stall cycle
+   evicted an unrelated, already-complete instruction's forwardable result
+   one cycle before an instruction stalled behind an in-flight load actually
+   needed it. Neither was visible in the directed suite -- (a) needed a
+   directed test with two adjacent loads, (b) only showed up via
+   constrained-random cross-checking. See `docs/adr/0013-mem-stage-retiming.md`.
 
 Also implemented in this pass: `jal` (previously decoded but functionally
 inert, §11) is now fully wired -- target, link value, and forwarding
@@ -80,7 +91,7 @@ graph LR
         SLA --> AdderBR[Adder.v branch target]
     end
     subgraph MEM[Memory]
-        reg3[reg3.v EX/MEM] --> DMEM[DataMemory.v]
+        reg3[reg3.v EX/MEM] --> DMEM[DataMemoryBRAM.v]
     end
     subgraph WB[Writeback]
         reg4[reg4.v MEM/WB] --> WBMUX[Mux2to1 WB select]
@@ -113,9 +124,9 @@ This matches the diagram in [README.md](../README.md) but adds the two feedback 
 | `Mux2to1` | `Mux2to1.v` | `size` | Generic 2:1 mux, reused 3× (PC select, ALU-B select, WB select) |
 | `ALUCtrl` | `ALUCtrl.v` | No | ALUOp + funct3/funct7 → 5-bit ALU opcode |
 | `ALU` | `ALU.v` | No | Execute unit; also computes branch conditions |
-| `reg3` | `reg3.v` | No | EX/MEM register |
-| `DataMemory` | `DataMemory.v` | No | 128-byte data RAM, word-only access |
-| `reg4` | `reg4.v` | No | MEM/WB register |
+| `reg3` | `reg3.v` | No | EX/MEM register; `hold` freezes it during `mem_stall` (`docs/adr/0013`) |
+| `DataMemoryBRAM` | `DataMemoryBRAM.v` | `SIZE_BYTES` | Data RAM, byte/halfword/word access; synchronous (registered) read |
+| `reg4` | `reg4.v` | No | MEM/WB register; `hold` freezes it during `mem_stall` (`docs/adr/0013`) |
 
 **Reuse is already present** (`Adder` used twice, `Mux2to1` used three times) — this is a good foundation for the "reusable IP" objective, but the reuse stops at trivial combinational primitives. None of the stage-specific logic (`Control`, `ALUCtrl`, `Hazard`, `Forward`) is written against a shared types/constants package, so there is no single source of truth for opcode values, ALUCtl encodings, or pipeline register field layouts. Every module re-derives bit widths and magic numbers independently.
 
@@ -189,13 +200,13 @@ Branches resolve in **EX**, one stage later than the classic "resolve in ID with
 - **Squash condition is `branch_regde & zero` in both `reg1` and `reg2`** — i.e. squashing (and therefore the fetch penalty) fires only when a branch is resolved **taken**. Not-taken branches fall through with zero penalty, since sequential fetch was already the (correct) guess. This is textbook predict-not-taken behavior: **misprediction penalty = 2 cycles, paid only on taken branches.** This reading should still get a directed testbench case (Roadmap V-2) before being relied on, since it's a static-analysis conclusion, not a simulated one.
 - **The combinational path this creates is long**: `reg2`'s registered branch/funct fields → `ALUCtrl` → `ALU` (comparator) → `zero` → AND with `branch_regde` → `Mux2to1` PC select → `PC` register input — all settling within one clock period, in the same cycle the ALU is also computing `A & B` for the branch's (unused) `ALUOut`. **This is very likely the critical path of the whole processor** and should be the first thing measured once a synthesis flow exists (Roadmap F-1).
 
-## 9. Memory interfaces (updated — see errata items 5-6 and `docs/adr/0005`, `0011`, `0012`)
+## 9. Memory interfaces (updated — see errata items 5-7 and `docs/adr/0005`, `0011`, `0012`, `0013`)
 
 **Instruction memory**: size is now a `parameter` (`SIZE_BYTES`, default 128, threaded from `PIPELINED`'s `MEM_SIZE_BYTES`, `docs/adr/0012`), word-read only; `readAddr >= SIZE_BYTES` still returns 0. Past-end-of-program execution is no longer a silent, harmless NOP stream, though — as of `docs/adr/0011`, opcode `0000000` is not a valid instruction and correctly raises an illegal-instruction trap. Every test program (directed and random-generated) now ends in a deliberate `jal x0, self` spin loop rather than relying on running off the end into zero-filled memory; "program ended" is still not something architectural state exposes directly (there's no `wfi`/halt instruction), but the spin-loop convention makes intent explicit rather than accidental.
 
 **Data memory**: size is likewise now a `parameter` (`docs/adr/0012`). Byte/halfword access width (`lb`/`lh`/`lbu`/`lhu`/`sb`/`sh`) was completed in `docs/adr/0005` — this section's original claim that only `lw`/`sw` worked is no longer accurate; see §11's ISA coverage table for current state.
 
-Synchronous write / combinational (asynchronous) read is a reasonable simulation model but is **not directly BRAM-inferable** on most FPGA toolchains (which want synchronous read for single-cycle timing-closed block RAM). `docs/adr/0012` built and unit-tested a standalone synchronous-read replacement (`design/DataMemoryBRAM.v`) but deliberately did not wire it into the live pipeline — doing so changes when load data becomes available (one cycle later), which needs its own `Forward.v`/`Hazard.v` retiming and verification pass, scoped as the next real Phase 7 milestone rather than attempted as a drive-by change.
+As of `docs/adr/0013`, the live data memory is `DataMemoryBRAM.v` (synchronous write **and** read) — `docs/adr/0012` built and unit-tested this as a standalone, BRAM-inferable replacement for the old combinational-read `DataMemory.v` (since removed, fully superseded) but deliberately deferred wiring it in, since doing so changes when load data becomes available (one cycle later than before). That retiming is now done: `riscvpipeline.v`'s `mem_stall` interlock holds `reg2`/`reg3`/`reg4` for exactly the one extra cycle a fresh load spends in `reg3`, mirroring the shape `docs/adr/0009`'s divider interlock established one stage earlier in the pipe. No changes were needed to `Hazard.v` or `Forward.v` themselves — the existing load-use stall/bubble and MEM/WB forwarding path turned out to already be sufficient once `reg2`/`reg3`/`reg4` correctly held their occupants for the extra cycle (see the ADR for the two real interlock bugs found getting this right).
 
 ## 10. Reset strategy
 
@@ -211,7 +222,7 @@ However: the signal is called `rst` throughout the design but is literally wired
 |---|---|---|
 | R-type ALU | `add sub sll slt sltu xor srl sra or and` (10/10) | — |
 | I-type ALU | `addi slti sltiu xori srli srai ori andi` (8/8, via `ALUOp=11`) | — |
-| Loads | `lw lb lh lbu lhu` (5/5, funct3-selected width in `DataMemory.v`) | — |
+| Loads | `lw lb lh lbu lhu` (5/5, funct3-selected width in `DataMemoryBRAM.v`) | — |
 | Stores | `sw sb sh` (3/3) | — |
 | Branches | `beq bne blt bge bltu bgeu` (6/6 standard) plus custom `ble bgt` (funct3=100/101, using the two funct3 codes standard RV32I leaves for `bltu`/`bgeu` — those got the two *other* free codes, funct3=110/111; see `docs/adr/0005`) | — |
 | Jumps | `jal jalr` (both fully wired: target, PC+4 link, forwarding correction) | — |

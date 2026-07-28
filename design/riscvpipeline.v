@@ -52,7 +52,7 @@ wire auipc;
 wire stall;         // load-use hazard (Hazard.v); freezes PC/IF-ID
 wire flush;         // load-use hazard (Hazard.v); bubbles ID/EX
 wire branch_zero;   // ALU's raw branch-condition output, registered into `zero`
-wire pc_stall;      // stall | div_stall (docs/adr/0009) -- what PC/reg1 actually freeze on
+wire pc_stall;      // stall | div_stall (docs/adr/0009) | mem_stall (docs/adr/0013) -- what PC/reg1 actually freeze on
 wire isCsr;         // CSR/exceptions (docs/adr/0011-csr-and-exceptions.md)
 wire isEcall;
 wire isEbreak;
@@ -84,7 +84,8 @@ wire [31:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a t
     PC m_PC(
         .clk(clk),
         .rst(start),
-        .stall(pc_stall),   // Hazard.v's load-use stall OR the multi-cycle divide interlock (docs/adr/0009)
+        .stall(pc_stall),   // Hazard.v's load-use stall, the multi-cycle divide interlock (docs/adr/0009),
+                            // or the MEM-stage interlock (docs/adr/0013)
         .pc_i(pc_final),
         .pc_o(pc_o)
     );
@@ -214,7 +215,10 @@ reg2 m_reg2(
     .inst_regfd(inst_regfd),
     .flush(flush),
     .branch_taken(branch_taken),
-    .hold(div_stall),   // multi-cycle divide interlock, see docs/adr/0009-multicycle-divider.md
+    .hold(div_stall | mem_stall),   // multi-cycle divide interlock (docs/adr/0009) OR
+                                     // MEM-stage interlock (docs/adr/0013) -- either
+                                     // way, ID/EX must not advance past the instruction
+                                     // reg3 isn't ready to accept yet.
     .readReg1(inst_regfd[19:15]),
     .readReg2(inst_regfd[24:20]),
     .jump(jump),
@@ -409,7 +413,42 @@ Forward m_Forward(
     // time, including every cycle occupied by a non-div/rem instruction, so
     // it never affects normal single-cycle execution.
     wire div_stall = isDivRem && !div_done;
-    assign pc_stall = stall | div_stall;
+
+    // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md). DataMemoryBRAM's
+    // read is registered: a load's `readData` isn't valid until the cycle
+    // *after* its address/memRead are presented, one cycle later than the old
+    // combinational DataMemory.v. `mem_stall` is true for exactly that one
+    // extra cycle a fresh load spends in reg3 (EX/MEM) -- mirrors div_stall's
+    // shape one stage later: freezes PC/reg1/reg2 (via pc_stall/reg2.hold) and
+    // now also reg3 AND reg4 themselves (each a new `hold` input, same
+    // empty-branch idiom docs/adr/0009 used for reg2 -- NOT a bubble for
+    // reg4, see its port comment for why that first attempt was wrong)
+    // instead of either latching not-yet-valid readData or evicting a value
+    // still needed for forwarding.
+    //
+    // mem_stall_done_r tracks "has the load currently latched in reg3 already
+    // had its one stall cycle." A first attempt derived this from
+    // DataMemoryBRAM's own registered "read happened last cycle" signal
+    // instead of tracking it here -- that failed on back-to-back loads
+    // (verified by running mem_bytes.s, not just reasoned about): a load
+    // held in reg3 for its stall cycle keeps memRead asserted for 2 cycles,
+    // so by the time the *next* load freshly arrives, the memory's own
+    // signal is still reporting the *previous* load's read as having just
+    // completed -- exactly the busy/done "re-triggering on the done cycle"
+    // ambiguity docs/adr/0009 hit with the divider, and for the same
+    // underlying reason: a bare level signal can't distinguish "still the
+    // same request" from "a new request that happens to look the same."
+    // Tracking readiness against reg3's own occupancy here (reset to 0
+    // whenever mem_stall was 0 last cycle, which is exactly when reg3 is
+    // about to accept a new occupant) sidesteps that ambiguity entirely.
+    reg mem_stall_done_r;
+    wire mem_stall = memRead_regem && !mem_stall_done_r;
+    always @(posedge clk) begin
+        if (~start) mem_stall_done_r <= 1'b0;
+        else mem_stall_done_r <= mem_stall;
+    end
+
+    assign pc_stall = stall | div_stall | mem_stall;
 
     wire [31:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
 
@@ -578,6 +617,10 @@ reg3 m_reg3(
     .jump_regde(jump_to_reg3),
     .pc_plus4_regde(pc_plus4_regde),
     .funct3_regde(funct3_regde),
+    .hold(mem_stall),   // MEM-stage interlock (docs/adr/0013): freeze reg3 while
+                        // the load it's currently holding hasn't come back from
+                        // DataMemoryBRAM yet -- reg2 must not be allowed to push
+                        // the next instruction in on top of it.
 
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
@@ -591,9 +634,10 @@ reg3 m_reg3(
     .funct3_regem(funct3_regem)
 );
 
-// Compiled in only with -DASSERT_ON (see sim/run_tests.sh). reg3 is a plain
-// one-cycle pipeline register (readData2_regem <= readData2_regde every
-// cycle, no stall/flush handling of its own), so readData2_regem this cycle
+// Compiled in only with -DASSERT_ON (see sim/run_tests.sh). reg3 latches
+// unconditionally every cycle for a store (its docs/adr/0013 `hold` input
+// only ever fires on a load, mem_stall being gated on memRead_regem, which
+// is mutually exclusive with memWrite_regem), so readData2_regem this cycle
 // must equal readData2_final as it was one cycle ago. This is exactly the
 // property docs/adr/0003-store-data-forwarding.md's bug violated (reg3 was
 // wired to the raw readData2_regde instead of the forwarded value) --
@@ -613,7 +657,12 @@ end
 `endif
 
 //MEMORY
-    DataMemory #(.SIZE_BYTES(MEM_SIZE_BYTES)) m_DataMemory(
+    // Synchronous-read BRAM (docs/adr/0013-mem-stage-retiming.md), replacing
+    // the old combinational-read DataMemory.v -- readData is only valid the
+    // cycle *after* a load's address/memRead are presented, which is exactly
+    // what mem_stall (declared above, with the rest of the EX-stage hazard
+    // logic) exists to accommodate.
+    DataMemoryBRAM #(.SIZE_BYTES(MEM_SIZE_BYTES)) m_DataMemory(
     .rst(start),
     .clk(clk),
     .memWrite(memWrite_regem),
@@ -645,6 +694,16 @@ reg4 m_reg4(
     .write_to_Reg_regem(write_to_Reg_regem),
     .jump_regem(jump_regem),
     .pc_plus4_regem(pc_plus4_regem),
+    .hold(mem_stall),   // MEM-stage interlock (docs/adr/0013): freeze reg4 while
+                        // the load reg3 is holding hasn't come back from
+                        // DataMemoryBRAM yet. A hold, not a bubble -- reg4 may
+                        // currently hold an unrelated, already-complete
+                        // instruction still within its MEM/WB forwarding
+                        // window (needed by whatever's parked in reg2 during
+                        // the stall), which must stay visible rather than
+                        // being evicted a cycle early. See the ADR: an
+                        // earlier bubble-based attempt broke exactly this
+                        // case, caught by random cross-checking.
     .memtoReg_regwb(memtoReg_regwb),
     .regWrite_regwb(regWrite_regwb),
     .readData_regwb(readData_regwb),
