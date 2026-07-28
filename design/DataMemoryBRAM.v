@@ -25,7 +25,17 @@ module DataMemoryBRAM #(
     // ld/sd for the 8-byte case) -- that's an ISA-behavior axis, not a
     // width/depth one, so it stays literal here same as Control.v/ALUCtrl.v's
     // opcode/funct3 decoding does.
-    parameter XLEN = 32
+    parameter XLEN = 32,
+    // Optional pre-load of initial data contents (docs/ROADMAP.md Phase 10
+    // -- compiled-C programs' .data section needs its initial values
+    // present before main() runs, unlike every hand-written .s test so
+    // far, which only ever wrote to memory itself at runtime). Empty
+    // string (default) disables this entirely, matching every existing
+    // test's assumption -- mirrors InstructionMemory.v's own INIT_FILE
+    // pattern, just applied on this module's synchronous reset instead of
+    // an `initial` block, since that's where this module's own zero-init
+    // already lives.
+    parameter DATA_INIT_FILE = ""
 )(
     input clk,
     input rst,
@@ -50,8 +60,25 @@ module DataMemoryBRAM #(
 
     always @(posedge clk) begin
         if (~rst) begin
-            for (rst_i = 0; rst_i < SIZE_BYTES; rst_i = rst_i + 1)
-                data_memory[rst_i] <= 8'b0;
+            // These two are deliberately mutually exclusive, not sequenced
+            // one after the other: $readmemb (called synchronously, as part
+            // of this same active region) would otherwise be silently
+            // clobbered by the for-loop's *nonblocking* writes to the same
+            // array, which don't actually commit until the end of this time
+            // step -- i.e. after $readmemb already ran, regardless of their
+            // textual order. Caught by direct verification (a throwaway
+            // testbench pre-loading known bytes and checking they survived
+            // reset), not assumed correct from the code reading right.
+            if (DATA_INIT_FILE != "")
+                // Explicit start/stop avoids relying on simulator-specific
+                // default behavior for which end of a descending-range array
+                // $readmemb fills first (Icarus warns about exactly this
+                // ambiguity otherwise) -- same reasoning InstructionMemory.v's
+                // own $readmemb call already documents.
+                $readmemb(DATA_INIT_FILE, data_memory, 0, SIZE_BYTES-1);
+            else
+                for (rst_i = 0; rst_i < SIZE_BYTES; rst_i = rst_i + 1)
+                    data_memory[rst_i] <= 8'b0;
             raw_word_r <= 32'b0;
             funct3_r   <= 3'b0;
             mem_read_r <= 1'b0;

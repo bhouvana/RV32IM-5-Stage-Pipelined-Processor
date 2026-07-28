@@ -8,6 +8,12 @@ module PIPELINED #(
                                        // Phase 6/7) -- default matches every
                                        // existing test program's assumptions,
                                        // so this is a no-op unless overridden.
+    parameter DATA_INIT_FILE = "",   // docs/ROADMAP.md Phase 10 -- optional
+                                       // pre-load for DataMemoryBRAM.v, e.g. a
+                                       // compiled-C program's .data section.
+                                       // Empty (default): every existing test's
+                                       // assumption, data memory just resets to
+                                       // zero as it always has.
     // docs/adr/0015-xlen-and-regcount-parameterization.md -- named, not truly
     // variable at other values: this core is RV32I+M only, and RV32I's own
     // instruction encoding hardwires a 32-bit instruction word and 5-bit
@@ -740,7 +746,7 @@ end
     // cycle *after* a load's address/memRead are presented, which is exactly
     // what mem_stall (declared above, with the rest of the EX-stage hazard
     // logic) exists to accommodate.
-    DataMemoryBRAM #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_DataMemory(
+    DataMemoryBRAM #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE)) m_DataMemory(
     .rst(start),
     .clk(clk),
     .memWrite(memWrite_regem),
