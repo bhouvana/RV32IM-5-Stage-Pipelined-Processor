@@ -162,6 +162,32 @@ reg1 #(.XLEN(XLEN)) m_reg1(
     .pc_o_regfd(pc_o_regfd)
 );
 
+// IF1/IF2 relay register (docs/adr/0018-variable-pipeline-depth.md). Only
+// instantiated (and only meaningful) under PROFILE_6STAGE_SPLIT_FETCH --
+// same elaboration-time generate/if template docs/adr/0016 established for
+// HAZARD_STRATEGY, so PROFILE_5STAGE's branch costs nothing and isn't even
+// instantiated. Not yet consumed by InstructionMemory or anything else at
+// this commit -- that's the next step, isolated on its own so this step
+// only has to prove the module elaborates and squashes/freezes correctly
+// under both profiles, not that rerouting fetch actually works end to end.
+wire [XLEN-1:0] pc_o_reg1a;
+generate
+if (PIPELINE_PROFILE == PROFILE_5STAGE) begin : gen_fetch_5stage
+    assign pc_o_reg1a = pc_o;  // unused under this profile; tied off for cleanliness, not read anywhere
+end else begin : gen_fetch_6stage_split_fetch
+    reg1a #(.XLEN(XLEN)) m_reg1a(
+        .clk(clk),
+        .rst(start),
+        .stall(pc_stall),
+        .pc_o(pc_o),
+        .branch_regde(branch_regde),
+        .zero(zero),
+        .jump(unconditional_redirect),
+        .pc_o_reg1a(pc_o_reg1a)
+    );
+end
+endgenerate
+
 wire [2:0] funct3_control;
 wire [6:0] funct7_control;
 
