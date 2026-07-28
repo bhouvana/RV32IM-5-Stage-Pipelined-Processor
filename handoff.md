@@ -50,8 +50,22 @@ are the next things to read after this.
 - Phase 8 (tooling): `sim/tools/debugger.py`, an interactive ISS-based step
   debugger (`make debug PROGRAM=path/to/foo.s`). Phase 10 (benchmarking):
   three hand-written kernels in `sim/benchmarks/` with real cycle/IPC data
-  (`make benchmark`) — not CoreMark/Dhrystone (no RISC-V C toolchain in
-  this environment, confirmed directly, not assumed).
+  (`make benchmark`), **plus a real compiled-C toolchain** (`sim/benchmarks/c/`
+  — real `riscv-none-elf-gcc`, a Harvard-aware linker script, `elf2mem.py`).
+  CoreMark and Dhrystone are ported and running on top of it
+  (`sim/benchmarks/c/coremark_port/`, `dhrystone_port/`). Porting them found
+  two real, general toolchain bugs, not RTL bugs (`docs/adr/0017`): RISC-V
+  GCC's `.sdata`/`gp` small-data placement silently zeroing small globals
+  (fixed with `-msmall-data-limit=0`), and `.rodata` needing to live in
+  DMEM rather than IMEM on this Harvard-architecture core (read-only data
+  is read via loads, never instruction-fetched — see the ADR and "Lessons"
+  below before touching `link.ld`/`elf2mem.py` again). **Dhrystone is fully
+  verified correct** (462,126 cycles, all six documented expected final
+  values match exactly). CoreMark completes correctly at reduced size
+  (37,323 cycles, `TOTAL_DATA_SIZE=400`); confirming the standard, citable
+  `TOTAL_DATA_SIZE=2000` configuration against the published known-CRC
+  values is the next concrete step (`docs/ROADMAP.md` has the exact
+  values to check).
 - Phase 6's "compare hazard strategies" goal is done (`docs/adr/0016`): a
   new `design/HazardNoForward.v` (stall on every RAW hazard, no forwarding
   at all), selected via `riscvpipeline.v`'s `HAZARD_STRATEGY` parameter
@@ -61,8 +75,10 @@ are the next things to read after this.
   30-43% more cycles. "Compare pipeline depths" (Phase 6's other named
   goal) is deliberately still not attempted — see "Lessons" and the ADR for
   why.
-- Git repo, all on `master`, no remote — run `git log --oneline | head -20`
-  for the current commit count/truth rather than trusting a number here.
+- Git repo, all on `master`. Remote `origin` points at
+  `https://github.com/bhouvana/RV32IM-5-Stage-Pipelined-Processor.git` —
+  run `git log --oneline | head -20` and `git remote -v` for current
+  truth rather than trusting numbers/URLs in this doc.
 
 ## Verify the state yourself (don't take the above on faith)
 
@@ -325,6 +341,40 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
   argument is a normal function argument, evaluated unconditionally before
   the lookup happens. Fixed with an explicit `if key in dict` check
   (`csr_lookup()` in `asm.py`).
+- **On this Harvard-architecture core, "read-only" doesn't mean "goes with
+  the code."** `.rodata` (string literals, `const` data) is never
+  instruction-fetched — real C code reads it with ordinary load
+  instructions, which this core always routes to `DataMemoryBRAM.v`, never
+  `InstructionMemory.v`. A first version of `sim/benchmarks/c/link.ld` put
+  `.rodata` in `IMEM` alongside `.text` (a reasonable-sounding but wrong
+  "read-only stuff goes with code" assumption); every load from a string
+  literal silently read zeroed DMEM instead. Invisible to a smoke test with
+  no string literals; fatal to Dhrystone's `strcpy()` of its test strings,
+  which sent a data-dependent loop into never terminating. If a future
+  compiled-C program hangs or misbehaves in a way a directed-assembly test
+  never could, check whether it's reading `const`/string-literal data via a
+  load before suspecting the RTL (`docs/adr/0017`).
+- **A toolchain silently placing data somewhere your linker script doesn't
+  account for looks exactly like an infinite-loop RTL bug until you check.**
+  RISC-V GCC's `.sdata`/`gp` small-data optimization put small globals
+  outside `sim/benchmarks/c/link.ld`'s only defined data sections entirely
+  — no link error, no warning, `nm` was needed to notice the address fell
+  past `_data_end`. CoreMark's iteration-count global read back as zero as
+  a result, driving a genuine infinite loop that took a debug testbench
+  (dumping PC/redirect signals periodically) to distinguish from "just
+  needs more simulation time." Fixed with `-msmall-data-limit=0`
+  (`docs/adr/0017`) — if a compiled-C program's globals ever look wrong
+  again, check `nm`'s addresses against the linker script's defined
+  sections before assuming the RTL.
+- **`objcopy -O binary` on multiple sections lays out by absolute LMA, not
+  by the order you list them.** Giving two sections far-apart `AT()`
+  addresses and extracting them together made the "combined" binary span
+  the entire gap between those addresses, zero-padded — a 32KB target
+  region briefly became ~256MB (`docs/adr/0017`). If you need a compact
+  multi-section extraction, either keep the sections' LMAs genuinely
+  contiguous, or extract each section independently and place it at its
+  own real VMA (read via `nm`) yourself, which is what
+  `sim/tools/elf2mem.py` does now.
 
 ## What's genuinely not done (in rough priority order)
 
@@ -346,11 +396,13 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
 5. Real Verilog lint (Verible) — CQ-5 in ROADMAP, still open; the closest
    thing today is `make lint` (just `iverilog -Wall`, catches syntax/width/
    latch issues, not a real style/lint pass).
-6. Real hardware-comparable benchmarking (CoreMark/Dhrystone) — needs a
-   RISC-V C toolchain this environment doesn't have. `sim/benchmarks/` has
-   hand-written kernels with real IPC data instead (`docs/ROADMAP.md`
-   Phase 10), useful for relative comparison, not absolute/standardized
-   scores.
+6. Standard, citable CoreMark score — the real toolchain and port exist now
+   (`sim/benchmarks/c/coremark_port/`) and CoreMark completes correctly at
+   reduced `TOTAL_DATA_SIZE=400`; confirming the standard
+   `TOTAL_DATA_SIZE=2000` `PERFORMANCE_RUN` against the published
+   `list_known_crc[0]`/`matrix_known_crc[0]`/`state_known_crc[0]` values is
+   the remaining step (`docs/ROADMAP.md` Phase 10). Dhrystone is already
+   fully verified correct.
 
 ## If you're picking this up cold
 

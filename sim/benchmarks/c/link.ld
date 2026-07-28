@@ -40,10 +40,27 @@
  * testbench instantiates PIPELINED with (docs/adr/0012, 0015) -- both
  * memories share that single parameter in the current design, so both
  * regions here use the same size for simplicity; sim/tools/elf2mem.py
- * checks neither section actually exceeds it. DMEM_LMA must stay
- * comfortably larger than IMEM_SIZE so the LMA check never genuinely
- * collides regardless of size changes -- it is bookkeeping only, never
- * seen by the compiled code or by design/DataMemoryBRAM.v.
+ * checks neither section actually exceeds it. DMEM_LMA/RODATA_LMA must
+ * stay comfortably larger than IMEM_SIZE, and distinct from each other,
+ * so the LMA checks never genuinely collide regardless of size changes --
+ * it is bookkeeping only, never seen by the compiled code or by
+ * design/DataMemoryBRAM.v.
+ *
+ * .rodata lives in DMEM, not IMEM -- found by actually running Dhrystone
+ * and hitting a real infinite loop, not reasoned out in advance. .rodata
+ * (string literals, const arrays) is never instruction-fetched; it's read
+ * with ordinary load instructions, which this core routes to
+ * design/DataMemoryBRAM.v, never design/InstructionMemory.v. Placing it
+ * in IMEM (this file's first version) meant every load from a string
+ * literal or const array silently read zeroed DMEM instead of the real
+ * bytes -- invisible to smoke_test.c and CoreMark's port (neither reads
+ * a string literal via a load; CoreMark's ee_printf stub never
+ * dereferences its format-string argument), but fatal to Dhrystone's
+ * strcpy() of its string-literal test data, which produced empty strings
+ * and sent Func_2's `while (Int_Loc <= 2) if (...) Int_Loc += 1;` loop
+ * into a genuine infinite loop on the corrupted comparison. Verified via
+ * a debug testbench showing the DUT permanently stuck redirecting into
+ * the same tiny address range.
  */
 
 MEMORY
@@ -52,7 +69,8 @@ MEMORY
     DMEM (rw)  : ORIGIN = 0x00000000, LENGTH = 32K
 }
 
-DMEM_LMA = 0x10000000;
+RODATA_LMA = 0x10000000;
+DMEM_LMA   = 0x10002000;
 
 SECTIONS
 {
@@ -61,9 +79,29 @@ SECTIONS
         *(.text*)
     } > IMEM
 
-    .rodata : {
+    /* .rodata and .data each get their own LMA, both distinct from .text's
+     * and from each other -- sim/tools/elf2mem.py extracts each of them
+     * as an independent, single-section objcopy call (each returning just
+     * that section's own bytes, at whatever size it actually is) and
+     * places them into the output image at their real *VMA* offsets
+     * (read from the _rodata_start/_data_start symbols below via `nm`),
+     * not by relying on objcopy's combined-multi-section-by-LMA layout.
+     * An earlier version gave .data no explicit AT() at all, expecting it
+     * to inherit a contiguous LMA right after .rodata -- that broke for
+     * any program with an *empty* .rodata (section skipped entirely, so
+     * .data fell back to LMA==VMA==0 and collided with .text). A version
+     * before that gave both sections real but far-apart LMAs and asked
+     * objcopy to extract both *together* -- since `-O binary` lays out a
+     * multi-section extraction by absolute LMA, two far-apart LMAs made
+     * the "combined" output span the entire gap between them, zero-padded
+     * (a 32KB region briefly became ~256MB). Extracting each section on
+     * its own sidesteps both failure modes -- the LMA values here only
+     * need to avoid colliding with .text's or each other's, nothing more. */
+    .rodata : AT(RODATA_LMA) {
+        _rodata_start = .;
         *(.rodata*)
-    } > IMEM
+        _rodata_end = .;
+    } > DMEM
 
     .data : AT(DMEM_LMA) {
         _data_start = .;

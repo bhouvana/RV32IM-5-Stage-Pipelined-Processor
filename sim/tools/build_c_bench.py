@@ -46,7 +46,9 @@ def main():
     ap.add_argument("--mem-size", type=int, default=32768, help="bytes; shared by IMEM and DMEM (docs/adr/0012, 0015)")
     ap.add_argument("--hazard-strategy", type=int, default=0, choices=[0, 1])
     ap.add_argument("--max-time", type=int, default=200000000, help="Verilog time units before giving up")
-    ap.add_argument("--extra-cflags", nargs="*", default=[])
+    ap.add_argument("--extra-cflags", default="",
+                     help="space-separated, e.g. --extra-cflags=\"-DITERATIONS=1 -DTOTAL_DATA_SIZE=400\" "
+                          "(argparse can't take multiple -D-style tokens as separate argv words)")
     ap.add_argument("--keep", action="store_true", help="don't delete the work directory; print its path")
     args = ap.parse_args()
 
@@ -57,8 +59,20 @@ def main():
             "-march=rv32im", "-mabi=ilp32",
             "-nostdlib", "-nostartfiles", "-ffreestanding",
             "-Wl,-T," + os.path.join(C_DIR, "link.ld"),
+            # RISC-V GCC places small globals in .sdata/.sbss for gp-relative
+            # addressing by default -- this core's link.ld has no such
+            # section (only .data/.bss), and crt0.S never initializes gp
+            # (x3) at all. Left enabled, small scalar globals (e.g.
+            # CoreMark's seed*_volatile) silently end up outside the
+            # extracted .data range and read back as zero/garbage --
+            # verified directly: nm showed seed4_volatile at an address
+            # past _data_end, and the program looped forever on a
+            # zero-initialized iteration count. -msmall-data-limit=0
+            # forces everything into ordinary .data/.bss, which the
+            # existing linker script and elf2mem.py already handle.
+            "-msmall-data-limit=0",
             "-O2",
-        ] + args.extra_cflags
+        ] + args.extra_cflags.split()
         for d in [C_DIR] + args.include_dirs:
             cflags += ["-I", d]
 

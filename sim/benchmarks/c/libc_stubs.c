@@ -70,3 +70,22 @@ strlen(const char *s)
         n++;
     return n;
 }
+
+char *
+strcpy(char *dst, const char *src)
+{
+    char *d = dst;
+    while ((*d++ = *src++))
+        ;
+    return dst;
+}
+
+int
+strcmp(const char *a, const char *b)
+{
+    while (*a && (*a == *b)) {
+        a++;
+        b++;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
