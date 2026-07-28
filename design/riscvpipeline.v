@@ -215,10 +215,9 @@ reg2 m_reg2(
     .inst_regfd(inst_regfd),
     .flush(flush),
     .branch_taken(branch_taken),
-    .hold(div_stall | mem_stall),   // multi-cycle divide interlock (docs/adr/0009) OR
-                                     // MEM-stage interlock (docs/adr/0013) -- either
-                                     // way, ID/EX must not advance past the instruction
-                                     // reg3 isn't ready to accept yet.
+    .hold(reg2_hold),   // multi-cycle divide interlock (docs/adr/0009) OR MEM-stage
+                         // interlock (docs/adr/0013) -- either way, ID/EX must not
+                         // advance past the instruction reg3 isn't ready to accept yet.
     .readReg1(inst_regfd[19:15]),
     .readReg2(inst_regfd[24:20]),
     .jump(jump),
@@ -450,6 +449,11 @@ Forward m_Forward(
 
     assign pc_stall = stall | div_stall | mem_stall;
 
+    // reg2's own hold condition, factored out for reuse below (CSR.v's write
+    // gating needs to know exactly the same thing reg2 does: "is this
+    // instruction's stay in EX not over yet".
+    wire reg2_hold = div_stall | mem_stall;
+
     wire [31:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
 
     // CSR / synchronous exceptions (docs/adr/0011-csr-and-exceptions.md).
@@ -474,18 +478,37 @@ Forward m_Forward(
     wire [31:0] csr_old_val;
     wire [31:0] mtvec_val, mepc_val;
 
+    // csr_write_en/trap_taken/mret_taken must NOT simply be isCsr_regde/
+    // exception_taken/isMret_regde directly: those are combinational, live
+    // off reg2's *current* output, which stays constant across every cycle
+    // reg2 is held (docs/adr/0013's mem_stall, e.g. an unrelated load
+    // immediately preceding this instruction) -- unlike jal/branch (whose
+    // redirect is naturally protected by reg2's hold-priority over its own
+    // branch_taken squash, plus reg3 only ever capturing pre-edge values),
+    // CSR.v is an external stateful module with no notion of "already
+    // applied this instruction's effect." Left ungated, a held CSR/trap/mret
+    // instruction would write on *every* held cycle, not just its last one:
+    // csr_rdata (the value handed to rd) would reflect an already-applied
+    // write instead of the true old value, and mstatus's MIE/MPIE swap
+    // (self-referencing: mstatus[7]<=mstatus[3]) would corrupt itself on the
+    // second application. Found by constrained-random cross-checking after
+    // extending random_gen.py to generate CSR instructions -- not by any
+    // directed test, none of which happen to put a CSR/trap/mret instruction
+    // immediately after a load. Gating by !reg2_hold suppresses the write on
+    // every held cycle and lets it fire exactly once, on the same cycle
+    // reg3 finally accepts this instruction's other outputs.
     CSR m_CSR(
     .clk(clk),
     .rst(start),
-    .csr_write_en(isCsr_regde),
+    .csr_write_en(isCsr_regde && !reg2_hold),
     .csr_addr(imm_regde[11:0]),   // ImmGen.v zero-extends inst[31:20] into imm for OPCODE_SYSTEM
     .csr_op(funct3_regde[1:0]),
     .csr_wdata(csr_wdata),
     .csr_rdata(csr_old_val),
-    .trap_taken(exception_taken),
+    .trap_taken(exception_taken && !reg2_hold),
     .trap_pc(pc_o_regde),
     .trap_cause(trap_cause),
-    .mret_taken(isMret_regde),
+    .mret_taken(isMret_regde && !reg2_hold),
     .mtvec_val(mtvec_val),
     .mepc_val(mepc_val)
     );

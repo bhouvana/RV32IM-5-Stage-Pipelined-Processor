@@ -53,6 +53,19 @@ verification as the highest-leverage next investment rather than a nice-to-have:
    needed it. Neither was visible in the directed suite -- (a) needed a
    directed test with two adjacent loads, (b) only showed up via
    constrained-random cross-checking. See `docs/adr/0013-mem-stage-retiming.md`.
+8. **Two more real bugs, found extending `random_gen.py` to generate CSR
+   instructions**: (a) `CSR.v`'s write/trap/`mret` inputs, wired directly to
+   combinational EX-stage signals, double-applied their effect whenever the
+   instruction sat in `reg2` for an extra cycle behind an unrelated
+   `docs/adr/0013` `mem_stall` -- the third occurrence of the "bare
+   combinational level signal can't distinguish repeat from new" bug shape
+   (`docs/adr/0009`, `docs/adr/0013`, now this). (b) `reg1.v`'s reset value
+   for `inst_regfd` was a literal `0`, which decodes as opcode `0000000` --
+   a real illegal-instruction trap since `docs/adr/0011` -- corrupting
+   `mcause`/`mepc` for one cycle at every simulation's start, invisible to
+   every prior test because none read those CSRs before deliberately
+   triggering their own real trap first. See
+   `docs/adr/0014-verification-gaps-and-csr-hold-bugs.md`.
 
 Also implemented in this pass: `jal` (previously decoded but functionally
 inert, §11) is now fully wired -- target, link value, and forwarding
@@ -262,11 +275,11 @@ That was the correct **starting point** for Phase 3, not a criticism of what exi
 |---|---|
 | 1. Audit | This document. Done. |
 | 2. Code quality | Latch risk, hardcoded instruction-memory path, defs package, `default_nettype none` (which found 3 genuinely undeclared wires, `docs/adr/0008`), dead-field removal, and `reg1`/`reg2` dedup are all done. Real Verible lint config (CQ-5) is the only item still open. |
-| 3. Verification | Substantially complete. Self-checking directed suite (`sim/run_tests.sh`, 22 programs / 122 checks, including 5 CSR/exception tests and a standalone `DataMemoryBRAM` unit test), 4 embedded assertions (`docs/adr/0007`), an independent reference-model ISS (`sim/tools/iss.py`, now covering CSR/`ecall`/`ebreak`/`mret`) cross-checked against constrained-random programs (`docs/adr/0010`), and functional coverage (`sim/tools/coverage_report.py`). Found and fixed 8 real bugs total (see errata above plus the shift-mask bug from V-4). Remaining gaps: `blt`/`bge`/`ble`/`bgt`/`bltu`/`bgeu` each still missing directed coverage of one branch direction; `ALUCTL_ILLEGAL` (a recognized opcode with an unrecognized funct7/funct3, as opposed to `illegalOpcode`'s unrecognized-opcode case) has no directed test yet (both documented, lower priority). |
+| 3. Verification | Substantially complete. Self-checking directed suite (`sim/run_tests.sh`, 25 programs / 136 checks, including 6 CSR/exception tests and 2 standalone unit tests), 4 embedded assertions (`docs/adr/0007`), an independent reference-model ISS (`sim/tools/iss.py`, covering CSR/`ecall`/`ebreak`/`mret`) cross-checked against constrained-random programs including CSR ops (`docs/adr/0010`, `docs/adr/0014`), and functional coverage (`sim/tools/coverage_report.py`, confirms every branch direction and `ALUCTL_ILLEGAL` are now exercised). Found and fixed 10 real bugs total (see errata above). Remaining gap: `random_gen.py` still doesn't generate `ecall`/`ebreak`/`mret`/illegal-instruction control flow (deliberately scoped out, see `docs/adr/0014`). |
 | 4. Visualization | First version done: `sim/tb/gen_trace.v` + `sim/tools/gen_trace.py`/`build_viewer.py` produce an interactive, playable pipeline-occupancy viewer from a real execution trace (`make viewer`). Multi-program comparison and VCD export still open. |
 | 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1, `docs/adr/0005`), RV32M (5.2, `docs/adr/0006` + `0009`), and CSR/M-mode synchronous exceptions (5.3, `docs/adr/0011`) all done. RV32M includes a real multi-cycle divider (`design/Divider.v`) with a genuine pipeline interlock — the project's first multi-cycle-execute mechanism, whose stall/redirect shape CSR/exceptions reused directly. Caches/branch prediction/interrupts not started (the last needs a hardware interrupt source this design doesn't have — see `docs/adr/0011`'s Future improvements). |
 | 6. Research platform (pluggable subsystems) | Not started; memory sizes are now parameterized (`docs/adr/0012`), but the architectural register file/pipeline register widths still aren't — the rest of the §12 parameterization work is still required. |
-| 7. FPGA support | Scaffolding done (`docs/adr/0012`): memory sizes parameterized, a standalone unit-tested synchronous-read memory (`design/DataMemoryBRAM.v`, not yet wired in), a `debug_x10` observability port, a vendor-neutral bring-up top level (`fpga/top.v`), and a generic XDC constraints template. Still blocked on the actual MEM-stage retiming to integrate synchronous-read memory into the live pipeline, and completely unverified on real hardware. |
+| 7. FPGA support | Memory sizes parameterized, a `debug_x10` observability port, a vendor-neutral bring-up top level (`fpga/top.v`), and a generic XDC constraints template (`docs/adr/0012`). `design/DataMemoryBRAM.v` (synchronous read) is now wired into the live pipeline (`docs/adr/0013`), replacing the old combinational-read `DataMemory.v` (deleted). The one remaining item is real hardware validation -- nothing has touched an actual board yet. |
 | 8. Tooling | `sim/tools/asm.py` (assembler, now with CSR/`ecall`/`ebreak`/`mret` encoding and a raw `word` directive) and `sim/tb/trace_debug.v` (ad hoc cycle trace) exist as early building blocks; not yet the dedicated profiler/debugger/trace-explorer tooling Phase 8 describes. |
 | 9. Documentation | This document, `docs/ROADMAP.md`, and 12 ADRs (`docs/adr/`) as of this update. |
 | 10. Benchmarking | Not started; ISA is now complete enough to be a meaningful benchmarking target, but no benchmark suite exists yet. |

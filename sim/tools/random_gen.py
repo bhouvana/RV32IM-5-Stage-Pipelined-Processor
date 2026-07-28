@@ -14,6 +14,15 @@ loop-detector:
   - Division-by-zero and INT_MIN/-1 overflow are NOT avoided: both
     design/Divider.v and sim/tools/iss.py implement the same spec-mandated
     results, so hitting those cases is extra coverage, not a hazard.
+  - CSR read/write (`csrrw`/`csrrs`/`csrrc`(+i)) is included in the mix --
+    pure register/CSR data movement, no control-flow risk. `ecall`/`ebreak`/
+    `mret`/deliberately-illegal instructions are deliberately NOT generated:
+    unlike CSR reads/writes, those redirect control flow to mtvec/mepc,
+    which would need real safety machinery (a guaranteed-safe mtvec, trap-
+    recursion tracking) to keep programs forward-only and terminating --
+    disproportionate for what's already covered by directed tests
+    (ecall_trap.s, ebreak_trap.s, illegal_instr.s, aluctl_illegal.s,
+    mret_return.s). See docs/ROADMAP.md / ARCHITECTURE.md sec 15.
 """
 import random
 
@@ -22,6 +31,9 @@ R_TYPE = ["add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and",
 I_TYPE = ["addi", "slti", "sltiu", "xori", "ori", "andi"]  # slli/srli/srai handled separately (shamt, not full imm)
 SHIFT_I = ["slli", "srli", "srai"]
 BRANCH = ["beq", "bne", "blt", "bge", "ble", "bgt", "bltu", "bgeu"]
+CSR_REG_OP = ["csrrw", "csrrs", "csrrc"]
+CSR_IMM_OP = ["csrrwi", "csrrsi", "csrrci"]
+CSR_NAMES = ["mstatus", "mtvec", "mscratch", "mepc", "mcause"]
 
 BASE_REG = 31       # reserved memory-safe base pointer
 GP_REGS = list(range(1, 31))  # x1..x30, random general-purpose pool
@@ -37,8 +49,8 @@ def gen_program(seed, n_instrs=16, base_addr=32):
     instrs = []
     for _ in range(n_instrs):
         kind = rnd.choices(
-            ["r", "i", "shift", "load", "store", "branch", "jal"],
-            weights=[30, 20, 10, 12, 12, 10, 6],
+            ["r", "i", "shift", "load", "store", "branch", "jal", "csr"],
+            weights=[30, 20, 10, 12, 12, 10, 6, 8],
         )[0]
 
         if kind == "r":
@@ -73,6 +85,17 @@ def gen_program(seed, n_instrs=16, base_addr=32):
             mn = rnd.choice(BRANCH)
             rs1, rs2 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
             instrs.append(("branch", mn, rs1, rs2))
+        elif kind == "csr":
+            csr = rnd.choice(CSR_NAMES)
+            rd = rnd.choice(GP_REGS)
+            if rnd.random() < 0.5:
+                mn = rnd.choice(CSR_REG_OP)
+                rs1 = rnd.choice(GP_REGS)
+                instrs.append(f"{mn} x{rd}, {csr}, x{rs1}")
+            else:
+                mn = rnd.choice(CSR_IMM_OP)
+                uimm = rnd.randint(0, 31)  # zero-extended 5-bit field, see ImmGen.v/Control.v
+                instrs.append(f"{mn} x{rd}, {csr}, {uimm}")
         elif kind == "jal":
             rd = rnd.choice(GP_REGS)
             instrs.append(("jal", rd))

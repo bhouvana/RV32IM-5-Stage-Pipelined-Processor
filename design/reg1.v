@@ -17,7 +17,16 @@ always@(posedge clk)
 begin
     if(~rst)
     begin
-    inst_regfd <= 0;
+    // A nop (0x13), not a literal 0 -- opcode 0000000 is a real illegal-
+    // instruction trap since docs/adr/0011 (see squash below, which already
+    // knew this). Reset didn't get the same treatment: for the one cycle
+    // between reset releasing and the first real fetch reaching inst_regfd,
+    // Control.v would otherwise decode this register's raw reset value as
+    // opcode 0000000 and spuriously trap, corrupting mcause/mepc before any
+    // real instruction ever executes (docs/adr/0013's random-testing pass,
+    // once it started generating CSR reads, was the first thing to ever
+    // read those registers early enough to notice).
+    inst_regfd <= 32'h00000013;
     pc_o_regfd <= 0;
     end
     else

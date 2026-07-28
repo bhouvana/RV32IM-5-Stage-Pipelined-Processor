@@ -10,7 +10,7 @@ A synthesizable RV32I+M RISC-V 5-stage pipeline in Verilog
 a basic student pipeline project into a verified, documented core with a
 real verification harness, machine-mode CSRs/exceptions, and FPGA bring-up
 scaffolding. Every non-trivial design decision and every real bug found
-along the way is written up in `docs/adr/0001` through `0012` — those are
+along the way is written up in `docs/adr/0001` through `0014` — those are
 the actual source of truth for *why* things are the way they are. This file
 just orients you fast; `docs/ARCHITECTURE.md` (full technical audit,
 updated incrementally) and `docs/ROADMAP.md` (phased backlog + status log)
@@ -23,22 +23,26 @@ are the next things to read after this.
   `ecall`/`ebreak` traps, `mret`). Only `fence` (a no-op here — no cache,
   no multi-hart) and real interrupts (no hardware IRQ source exists) are
   unimplemented, both intentionally.
-- **23/23 directed tests, 128/128 checks passing** (`sim/run_tests.sh` /
-  `make test`), plus constrained-random cross-checking against an
-  independent reference-model ISS (`sim/tools/iss.py`, `make random-test`),
-  4 embedded RTL assertions, and functional coverage (`make coverage`).
+- **25/25 directed tests, 136/136 checks passing** (`sim/run_tests.sh` /
+  `make test`), plus constrained-random cross-checking (now including CSR
+  instructions) against an independent reference-model ISS (`sim/tools/iss.py`,
+  `make random-test`), 4 embedded RTL assertions, and functional coverage
+  (`make coverage`) confirming every branch direction and `ALUCTL_ILLEGAL`
+  are exercised.
 - FPGA readiness: memory sizes parameterized, a `debug_x10` observability
   port, `fpga/top.v`, `fpga/constraints_template.xdc`. The synchronous-read
-  memory (`design/DataMemoryBRAM.v`) is now **wired into the live pipeline**
+  memory (`design/DataMemoryBRAM.v`) is **wired into the live pipeline**
   (`docs/adr/0013`), replacing the old combinational-read `DataMemory.v`
-  (deleted) — a new `mem_stall` interlock in `riscvpipeline.v` holds
+  (deleted) — a `mem_stall` interlock in `riscvpipeline.v` holds
   `reg2`/`reg3`/`reg4` for the one extra cycle a load's registered read
   needs; no changes were needed to `Hazard.v`/`Forward.v`. Nothing has
-  touched real hardware yet — that's the one remaining Phase 7 item. See
-  `docs/adr/0013` for two real interlock bugs found integrating this.
-- Git repo, 13 commits as of this writing, all on `master`, plus the
-  MEM-stage retiming work above staged/uncommitted at the time this was
-  written — check `git log`/`git status` for current truth. No remote.
+  touched real hardware yet — that's the one remaining Phase 7 item.
+- `docs/adr/0013` and `0014` between them found and fixed four real
+  interlock/reset bugs while wiring the synchronous memory in and then
+  extending random testing to CSR instructions — see "Lessons" below before
+  touching `mem_stall`/`reg2_hold`/CSR.v/reset values again.
+- Git repo, all on `master`, no remote — run `git log --oneline | head -20`
+  for the current commit count/truth rather than trusting a number here.
 
 ## Verify the state yourself (don't take the above on faith)
 
@@ -93,7 +97,7 @@ docs/adr/000N-*.md One ADR per non-trivial decision or bug fix. Numbered,
                    ADRs explain.
 fpga/              Bring-up wrapper/constraints, not yet hardware-tested (the
                    RTL it targets is fully integrated as of docs/adr/0013).
-                   See docs/adr/0012, 0013.
+                   See docs/adr/0012, 0013, 0014.
 ```
 
 ## How the project got here (brief — ADRs have the real detail)
@@ -135,6 +139,16 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
    for the one extra cycle a load's registered read now needs. Found and
    fixed two real interlock bugs along the way (see "Lessons" below);
    `Hazard.v`/`Forward.v` needed no changes at all.
+10. **Closing the last verification gaps** (`0014`) — directed coverage for
+    the one missing branch direction on six branch types and for
+    `ALUCTL_ILLEGAL`, plus extending `random_gen.py` to generate CSR
+    instructions (deliberately not `ecall`/`ebreak`/`mret`/illegal-control-
+    flow, see the ADR for why). The CSR-generation work found two more real
+    bugs: `CSR.v` double-applying writes when `reg2` is held behind an
+    unrelated `mem_stall`, and `reg1.v`'s reset value for `inst_regfd`
+    (a literal `0`, decoding as a real illegal-instruction trap since
+    `docs/adr/0011`) corrupting `mcause`/`mepc` for one cycle at every
+    simulation's start.
 
 ## Lessons worth not re-learning
 
@@ -179,17 +193,35 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
   debugging time once already (see `docs/adr/0011`'s "A real bug found
   during verification").
 - **A bare "was X requested last cycle" level signal can't tell a repeated
-  request from a new one that looks the same.** Bit us twice now in the
-  exact same shape: `docs/adr/0009`'s divider re-triggered a bogus second
+  request from a new one that looks the same.** Bit us three times now in
+  the same shape: `docs/adr/0009`'s divider re-triggered a bogus second
   division because `start && !busy` looked identical on the done cycle and
   the next idle cycle; `docs/adr/0013`'s first MEM-stage interlock attempt
   derived readiness from `DataMemoryBRAM`'s own registered "read happened"
   signal, which broke on back-to-back loads for the identical reason (a
   load held for its stall cycle keeps `memRead` asserted for 2 cycles, so
-  the *next* load's first cycle looks like the previous one's completion).
-  When gating on "did an in-flight operation finish," track it against the
-  *consumer's* occupancy/state, not a raw level from the thing being waited
-  on.
+  the *next* load's first cycle looks like the previous one's completion);
+  `docs/adr/0014` hit it a third time when `CSR.v`'s write/trap/`mret`
+  inputs, wired directly to combinational EX-stage signals, double-applied
+  their effect for every cycle `reg2` was held behind an unrelated
+  `mem_stall`. When gating on "did an in-flight operation finish" *or*
+  "should this side effect fire," track it against the *consumer's*
+  occupancy/hold state, not a raw combinational level from the thing being
+  waited on or the instruction causing it — grep for any other module wired
+  the same way (a combinational EX-stage signal driving an external
+  stateful module's write) before adding the next hold/interlock mechanism.
+- **Reset values need to be "obviously inert," not just zero.** `reg1.v`'s
+  squash path already knew to reset `inst_regfd` to `32'h00000013` (a real
+  `nop`), not `0` — because opcode `0000000` has been a genuine illegal-
+  instruction trap since `docs/adr/0011`. Its *reset* path used a literal
+  `0` anyway, meaning every simulation spent its first post-reset cycle
+  presenting what `Control.v` correctly reads as an illegal instruction,
+  silently corrupting `mcause`/`mepc`. Invisible for a long time because
+  every existing test overwrites those CSRs with a deliberate real trap
+  before ever checking them; only surfaced once `docs/adr/0014` made random
+  testing read CSRs early. When a signal has more than one "not a real
+  instruction yet" source (reset *and* squash here), make sure they agree
+  on what that looks like, not just that each one individually seems safe.
 - **A bubble is not always the right fix for "don't let a stalled register
   latch bad data" — sometimes it needs a real hold instead.** `docs/adr/0009`
   established feeding a zeroed bubble into the register just *after* a
@@ -217,11 +249,10 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
    board. `fpga/constraints_template.xdc` is Xilinx/XDC-syntax only. This is
    the one remaining Phase 7 (FPGA) item; MEM-stage retiming (integrating
    `design/DataMemoryBRAM.v`) is done as of `docs/adr/0013`.
-2. Minor verification gaps, all documented in ARCHITECTURE.md §15 / ROADMAP
-   status log: `blt`/`bge`/`ble`/`bgt`/`bltu`/`bgeu` each missing directed
-   coverage of one branch direction; `ALUCTL_ILLEGAL` (recognized opcode,
-   unrecognized funct7/funct3) has no directed test; `random_gen.py`
-   doesn't generate CSR/exception instructions yet.
+2. `random_gen.py` still doesn't generate `ecall`/`ebreak`/`mret`/
+   deliberately-illegal-instruction control flow (deliberately scoped out
+   of `docs/adr/0014` — see that ADR for why: needs real safety machinery
+   an already-directed-tested area doesn't currently justify).
 3. Phase 6 (research platform / pluggable subsystems): memory sizes are
    parameterized now, but the architectural register file and pipeline
    register widths are still fixed literals.
