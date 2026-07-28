@@ -1,10 +1,12 @@
 `default_nettype none
 
-module Hazard (
+module Hazard #(
+    parameter NUM_REGS = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
+) (
 
-    input [4:0] readReg1_fd,
-    input [4:0] readReg2_fd,
-    input [4:0] write_to_Reg_regde,
+    input [$clog2(NUM_REGS)-1:0] readReg1_fd,
+    input [$clog2(NUM_REGS)-1:0] readReg2_fd,
+    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regde,
     input memRead_regde,
     output flush,
     output stall

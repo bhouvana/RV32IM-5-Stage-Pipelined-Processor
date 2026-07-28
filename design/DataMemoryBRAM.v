@@ -17,16 +17,24 @@
 // synthesis tools recognize as single-port block RAM, on Xilinx/Intel/
 // Lattice alike.
 module DataMemoryBRAM #(
-    parameter SIZE_BYTES = 128
+    parameter SIZE_BYTES = 128,
+    // docs/adr/0015-xlen-and-regcount-parameterization.md -- only the port
+    // widths, not the access-width logic below: lb/lh/lw/sb/sh/sw are a
+    // fixed byte/halfword/(4-byte)word set in RV32I's own encoding,
+    // independent of XLEN (RV64I keeps the same three and adds a separate
+    // ld/sd for the 8-byte case) -- that's an ISA-behavior axis, not a
+    // width/depth one, so it stays literal here same as Control.v/ALUCtrl.v's
+    // opcode/funct3 decoding does.
+    parameter XLEN = 32
 )(
     input clk,
     input rst,
     input memWrite,
     input memRead,
-    input [31:0] address,
-    input [31:0] writeData,
+    input [XLEN-1:0] address,
+    input [XLEN-1:0] writeData,
     input [2:0] funct3,   // access width/signedness: 000=b(signed) 001=h(signed) 010=w 100=bu 101=hu
-    output reg [31:0] readData
+    output reg [XLEN-1:0] readData
 );
 
     reg [7:0] data_memory [0:SIZE_BYTES-1];

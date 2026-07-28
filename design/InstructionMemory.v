@@ -6,17 +6,22 @@ module InstructionMemory #(
     // not the source file's location) -- the provided Makefile always
     // invokes vvp from the repository root, so paths here are repo-root-relative.
     parameter INIT_FILE = "sim/programs/arith.mem",
-    parameter SIZE_BYTES = 128   // was a hardcoded 128 throughout; now threaded
+    parameter SIZE_BYTES = 128,  // was a hardcoded 128 throughout; now threaded
                                    // from PIPELINED, matching DataMemory.v
                                    // (docs/ROADMAP.md Phase 6/7).
+    parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md.
+                            // Applies to readAddr/inst too, same simplification
+                            // ImmGen.v/reg1.v already made -- RV32I's fixed
+                            // 32-bit instruction word happens to equal XLEN,
+                            // only because both are 32 for this ISA.
 ) (
-    input [31:0] readAddr,
-    output [31:0] inst
+    input [XLEN-1:0] readAddr,
+    output [XLEN-1:0] inst
 );
 
     reg [7:0] insts [0:SIZE_BYTES-1];
 
-    assign inst = (readAddr >= SIZE_BYTES) ? 32'b0 : {insts[readAddr], insts[readAddr + 1], insts[readAddr + 2], insts[readAddr + 3]};
+    assign inst = (readAddr >= SIZE_BYTES) ? {XLEN{1'b0}} : {insts[readAddr], insts[readAddr + 1], insts[readAddr + 2], insts[readAddr + 3]};
 
     integer i;
     initial begin

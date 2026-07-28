@@ -10,7 +10,7 @@ A synthesizable RV32I+M RISC-V 5-stage pipeline in Verilog
 a basic student pipeline project into a verified, documented core with a
 real verification harness, machine-mode CSRs/exceptions, and FPGA bring-up
 scaffolding. Every non-trivial design decision and every real bug found
-along the way is written up in `docs/adr/0001` through `0014` — those are
+along the way is written up in `docs/adr/0001` through `0015` — those are
 the actual source of truth for *why* things are the way they are. This file
 just orients you fast; `docs/ARCHITECTURE.md` (full technical audit,
 updated incrementally) and `docs/ROADMAP.md` (phased backlog + status log)
@@ -41,6 +41,12 @@ are the next things to read after this.
   interlock/reset bugs while wiring the synchronous memory in and then
   extending random testing to CSR instructions — see "Lessons" below before
   touching `mem_stall`/`reg2_hold`/CSR.v/reset values again.
+- Phase 6's entry point is done (`docs/adr/0015`): the register file and
+  every pipeline register's data/register-address widths are now `XLEN`/
+  `NUM_REGS` parameters (default 32/32) instead of scattered literals —
+  named, not truly variable at other values for this ISA (see the ADR).
+  `design/Register.v`'s old `// Do not modify this file!` header is gone
+  (confirmed stale template leftover with the user before removing it).
 - Git repo, all on `master`, no remote — run `git log --oneline | head -20`
   for the current commit count/truth rather than trusting a number here.
 
@@ -149,6 +155,14 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
     (a literal `0`, decoding as a real illegal-instruction trap since
     `docs/adr/0011`) corrupting `mcause`/`mepc` for one cycle at every
     simulation's start.
+11. **Phase 6 parameterization** (`0015`) — `XLEN`/`NUM_REGS` threaded
+    through ~15 files, replacing scattered `32`/`[31:0]`/`[4:0]` literals.
+    Found and fixed one real latent bug: `x2`/`sp`'s reset value was
+    hardcoded independently of `MEM_SIZE_BYTES` instead of wired to it.
+    `Register.v`'s stale "do not modify" header removed (confirmed with the
+    user first). Named parameters, not truly variable at other values —
+    RV32I's own encoding fixes a 32-bit instruction word and 5-bit register
+    fields regardless.
 
 ## Lessons worth not re-learning
 
@@ -253,9 +267,10 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
    deliberately-illegal-instruction control flow (deliberately scoped out
    of `docs/adr/0014` — see that ADR for why: needs real safety machinery
    an already-directed-tested area doesn't currently justify).
-3. Phase 6 (research platform / pluggable subsystems): memory sizes are
-   parameterized now, but the architectural register file and pipeline
-   register widths are still fixed literals.
+3. Phase 6 (research platform / pluggable subsystems): the named-
+   parameterization prerequisite is done (`docs/adr/0015`), but the actual
+   "pluggable subsystems" vision — swappable hazard strategies, variable
+   pipeline depth — hasn't been started.
 4. Phase 8 (tooling) and Phase 10 (benchmarking): both essentially not
    started beyond early building blocks (`asm.py`, `trace_debug.v`).
 5. Real Verilog lint (Verible) — CQ-5 in ROADMAP, still open; the closest

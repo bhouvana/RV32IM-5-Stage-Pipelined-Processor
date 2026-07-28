@@ -2,24 +2,30 @@
 
 `include "riscv_defs.vh"
 
-module ALU (
+module ALU #(
+    parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
+)(
     input [4:0] ALUCtl,
-    input [31:0] A,B,
-    output reg [31:0] ALUOut,
+    input [XLEN-1:0] A,B,
+    output reg [XLEN-1:0] ALUOut,
     output reg zero,
     output reg branch_zero
 );
+
+// Register-register shift amounts (sll/srl/sra) use only the low
+// $clog2(XLEN) bits of B, per spec -- see the SLL case below.
+localparam SHAMT_WIDTH = $clog2(XLEN);
 
 integer i;
 integer count;
 integer done;
 
-// RV32M scratch (docs/adr/0006-rv32m.md). Widened to 64 bits *before*
+// RV32M scratch (docs/adr/0006-rv32m.md). Widened to 2*XLEN bits *before*
 // multiplying (not after) so the product is computed at full precision
 // regardless of how a given tool self-determines `*`'s result width.
-reg signed [63:0] mul_ss;  // signed x signed  (mul, mulh)
-reg signed [63:0] mul_su;  // signed x unsigned (mulhsu)
-reg        [63:0] mul_uu;  // unsigned x unsigned (mulhu)
+reg signed [2*XLEN-1:0] mul_ss;  // signed x signed  (mul, mulh)
+reg signed [2*XLEN-1:0] mul_su;  // signed x unsigned (mulhsu)
+reg        [2*XLEN-1:0] mul_uu;  // unsigned x unsigned (mulhu)
 
 always@(*)
 begin
@@ -31,11 +37,12 @@ case(ALUCtl)
     `ALUCTL_SUB:
     ALUOut = A - B;//just subtracting
     `ALUCTL_SLL:
-    // Per spec, register-register shifts only use rs2[4:0] as the shift
-    // amount -- rs2 holds a full 32-bit value, and B here is that whole
-    // register for R-type sll/srl/sra (I-type slli/srli/srai are unaffected:
-    // ImmGen.v already encodes their shamt as a 5-bit zero-extended
-    // immediate, so B is already <=31 by construction on that path). Without
+    // Per spec, register-register shifts only use the low $clog2(XLEN) bits
+    // of rs2 as the shift amount -- rs2 holds a full XLEN-bit value, and B
+    // here is that whole register for R-type sll/srl/sra (I-type
+    // slli/srli/srai are unaffected: ImmGen.v already encodes their shamt as
+    // a 5-bit zero-extended immediate, so B is already <=31 by construction
+    // on that path). Without
     // masking, `A << B`/`A >> B` treat B as the *literal* shift count, and
     // Verilog shifts by >=32 discard every bit -- e.g. `sll rd,rs1,rs2` with
     // rs2 holding any value >=32 (utterly ordinary, rs2 is just a register)
@@ -43,7 +50,7 @@ case(ALUCtl)
     // random testing (docs/ROADMAP.md V-4) hitting `srl x5,x25,x25`, not by
     // any directed test -- every hand-written shift test happened to use a
     // shift-amount register already holding a small value.
-    ALUOut = (A << B[4:0]);//logical shift left
+    ALUOut = (A << B[SHAMT_WIDTH-1:0]);//logical shift left
     `ALUCTL_SLT:
     // A/B are plain (unsigned) ports -- $signed() is required here, the same
     // way it is for SRA below, or this "signed" comparison would silently
@@ -55,12 +62,12 @@ case(ALUCtl)
     `ALUCTL_XOR:
     ALUOut = A ^ B;//xor
     `ALUCTL_SRL:
-    ALUOut = (A >> B[4:0]);//shift right logical -- see SLL's comment on B[4:0]
+    ALUOut = (A >> B[SHAMT_WIDTH-1:0]);//shift right logical -- see SLL's comment on the shift-amount width
     `ALUCTL_SRA:
     // See docs/adr/0004-signed-arithmetic-casts.md -- >>> only sign-extends
     // when the operand's *type* is signed, which A/B are not by default.
-    // See SLL's comment above on B[4:0].
-    ALUOut = ($signed(A) >>> B[4:0]);//shift right arithmetic
+    // See SLL's comment above on the shift-amount width.
+    ALUOut = ($signed(A) >>> B[SHAMT_WIDTH-1:0]);//shift right arithmetic
     `ALUCTL_OR:
     ALUOut = ( A | B ) ;//OR
     `ALUCTL_AND:
@@ -110,7 +117,7 @@ case(ALUCtl)
 
             count = 0;
             done =0;
-            for(i =0 ; i<31 ; i=i+1)
+            for(i =0 ; i<XLEN-1 ; i=i+1)
             begin
                 if(A[i] == 0 && done ==0)
                     count = count + 1;
@@ -135,18 +142,18 @@ case(ALUCtl)
                           // regardless of signedness, so no cast needed
     `ALUCTL_MULH:
         begin
-            mul_ss = $signed({{32{A[31]}}, A}) * $signed({{32{B[31]}}, B});
-            ALUOut = mul_ss[63:32];
+            mul_ss = $signed({{XLEN{A[XLEN-1]}}, A}) * $signed({{XLEN{B[XLEN-1]}}, B});
+            ALUOut = mul_ss[2*XLEN-1:XLEN];
         end
     `ALUCTL_MULHSU:
         begin
-            mul_su = $signed({{32{A[31]}}, A}) * $signed({32'b0, B});
-            ALUOut = mul_su[63:32];
+            mul_su = $signed({{XLEN{A[XLEN-1]}}, A}) * $signed({{XLEN{1'b0}}, B});
+            ALUOut = mul_su[2*XLEN-1:XLEN];
         end
     `ALUCTL_MULHU:
         begin
-            mul_uu = {32'b0, A} * {32'b0, B};
-            ALUOut = mul_uu[63:32];
+            mul_uu = {{XLEN{1'b0}}, A} * {{XLEN{1'b0}}, B};
+            ALUOut = mul_uu[2*XLEN-1:XLEN];
         end
 
 endcase

@@ -45,7 +45,10 @@
     readReg1_regde <= readReg1; \
     readReg2_regde <= readReg2;
 
-module reg2(
+module reg2 #(
+    parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
+    parameter NUM_REGS = 32
+) (
     input clk,
     input rst,
     input branch,
@@ -54,15 +57,15 @@ module reg2(
     input memWrite,
     input ALUSrc,
     input regWrite,
-    input [4:0] writeReg,
+    input [$clog2(NUM_REGS)-1:0] writeReg,
     input [6:0] funct7,
     input [2:0] funct3,
     input [1:0] ALUOp,
-    input [31:0] pc_o_regfd,
-    input [31:0] readData1,
-    input [31:0] readData2,
-    input [31:0] imm,
-    input [31:0] inst_regfd,
+    input [XLEN-1:0] pc_o_regfd,
+    input [XLEN-1:0] readData1,
+    input [XLEN-1:0] readData2,
+    input [XLEN-1:0] imm,
+    input [XLEN-1:0] inst_regfd,
     input flush,
     input branch_taken,
     input hold,   // multi-cycle divide interlock (docs/adr/0009): freeze every
@@ -71,8 +74,8 @@ module reg2(
                   // control, keeps decode context); hold changes nothing at
                   // all, because the div/rem instruction itself must stay
                   // put in EX until the divider finishes with it.
-    input [4:0] readReg1,
-    input [4:0] readReg2,
+    input [$clog2(NUM_REGS)-1:0] readReg1,
+    input [$clog2(NUM_REGS)-1:0] readReg2,
     input jump,
     input jalr,
     input lui,
@@ -90,16 +93,16 @@ module reg2(
     output reg ALUSrc_regde,
     output reg regWrite_regde,
     output reg [1:0] ALUOp_regde,
-    output reg [4:0] write_to_Reg_regde,
-    output reg [31:0] pc_o_regde,
-    output reg [31:0] readData1_regde,
-    output reg [31:0] readData2_regde,
-    output reg [31:0] imm_regde,
-    output reg [31:0] inst_regde,
+    output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regde,
+    output reg [XLEN-1:0] pc_o_regde,
+    output reg [XLEN-1:0] readData1_regde,
+    output reg [XLEN-1:0] readData2_regde,
+    output reg [XLEN-1:0] imm_regde,
+    output reg [XLEN-1:0] inst_regde,
     output reg [6:0] funct7_regde,
     output reg [2:0] funct3_regde,
-    output reg [4:0] readReg1_regde,
-    output reg [4:0] readReg2_regde,
+    output reg [$clog2(NUM_REGS)-1:0] readReg1_regde,
+    output reg [$clog2(NUM_REGS)-1:0] readReg2_regde,
     output reg jump_regde,
     output reg jalr_regde,
     output reg lui_regde,

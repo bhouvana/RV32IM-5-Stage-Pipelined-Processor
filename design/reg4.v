@@ -1,15 +1,18 @@
 `default_nettype none
 
-module reg4(
+module reg4 #(
+    parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
+    parameter NUM_REGS = 32
+) (
     input clk,
     input rst,
     input memtoReg_regem,
     input regWrite_regem,
-    input [31:0] readData,
-    input [31:0] ALUOut_regem,
-    input [4:0] write_to_Reg_regem,
+    input [XLEN-1:0] readData,
+    input [XLEN-1:0] ALUOut_regem,
+    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
     input jump_regem,
-    input [31:0] pc_plus4_regem,
+    input [XLEN-1:0] pc_plus4_regem,
     input hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
                   // freeze every field exactly as-is while a load sitting in
                   // reg3 (this register's own source) hasn't come back from
@@ -22,11 +25,11 @@ module reg4(
                   // match it would otherwise have had (see the ADR).
     output reg memtoReg_regwb,
     output reg regWrite_regwb,
-    output reg [31:0] readData_regwb,
-    output reg [31:0] ALUOut_regwb,
-    output reg [4:0] write_to_Reg_regwb,
+    output reg [XLEN-1:0] readData_regwb,
+    output reg [XLEN-1:0] ALUOut_regwb,
+    output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regwb,
     output reg jump_regwb,
-    output reg [31:0] pc_plus4_regwb
+    output reg [XLEN-1:0] pc_plus4_regwb
 );
 
 always@(posedge clk)

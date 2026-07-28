@@ -1,16 +1,22 @@
 `default_nettype none
 
-module reg1(
+module reg1 #(
+    parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md --
+                            // applies to inst/inst_regfd too, same simplification
+                            // ImmGen.v already made (RV32I's instruction word
+                            // happens to be XLEN bits wide, coincidentally, only
+                            // because both are 32 for this ISA).
+)(
     input clk,
     input rst,
     input stall,
-    input [31:0] inst,
-    input [31:0] pc_o,
+    input [XLEN-1:0] inst,
+    input [XLEN-1:0] pc_o,
     input branch_regde,
     input zero,
     input jump,       // unconditional redirect (jal) resolved in EX, same squash as a taken branch
-    output reg [31:0] inst_regfd,
-    output reg [31:0] pc_o_regfd
+    output reg [XLEN-1:0] inst_regfd,
+    output reg [XLEN-1:0] pc_o_regfd
 );
 
 always@(posedge clk)

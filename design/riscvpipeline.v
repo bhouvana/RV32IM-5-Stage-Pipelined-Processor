@@ -4,14 +4,25 @@
 
 module PIPELINED #(
     parameter INIT_FILE = "sim/programs/arith.mem",
-    parameter MEM_SIZE_BYTES = 128   // threaded to both memories (docs/ROADMAP.md
+    parameter MEM_SIZE_BYTES = 128,  // threaded to both memories (docs/ROADMAP.md
                                        // Phase 6/7) -- default matches every
                                        // existing test program's assumptions,
                                        // so this is a no-op unless overridden.
+    // docs/adr/0015-xlen-and-regcount-parameterization.md -- named, not truly
+    // variable at other values: this core is RV32I+M only, and RV32I's own
+    // instruction encoding hardwires a 32-bit instruction word and 5-bit
+    // rs1/rs2/rd fields, so XLEN=32/NUM_REGS=32 are the only ISA-compliant
+    // combination today. Threaded through as a single source of truth
+    // (matching CQ-1's riscv_defs.vh spirit and docs/adr/0012's memory-size
+    // precedent) and as groundwork for a possible future RV64I variant
+    // (same instruction encoding, wider XLEN), not to claim arbitrary-width
+    // support exists now.
+    parameter XLEN = 32,
+    parameter NUM_REGS = 32
 )(
     input clk,
     input start,
-    output [31:0] debug_x10   // read-only tap on x10/a0 (docs/adr/0012-fpga-
+    output [XLEN-1:0] debug_x10   // read-only tap on x10/a0 (docs/adr/0012-fpga-
                                 // readiness.md) -- a bare-metal test program's
                                 // natural "write your result here" register
                                 // under the standard RISC-V calling
@@ -20,6 +31,10 @@ module PIPELINED #(
                                 // nothing about existing behavior); fpga/top.v
                                 // is the first consumer.
 );
+// Register-address field width, derived once and reused on every
+// pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
+localparam REG_ADDR_WIDTH = $clog2(NUM_REGS);
+
 wire branch;
 wire memRead;
 wire memtoReg;
@@ -27,24 +42,24 @@ wire [1:0] ALUOp;
 wire memWrite;
 wire ALUSrc;
 wire regWrite;
-wire [4:0] readReg1;
-wire [4:0] readReg2;
-wire [4:0] writeReg;
-wire [31:0] writeData;
-wire [31:0] readData1;
-wire [31:0] readData2;
-wire [31:0] pc_final;
-wire [31:0] imm_reg_val;
+wire [REG_ADDR_WIDTH-1:0] readReg1;
+wire [REG_ADDR_WIDTH-1:0] readReg2;
+wire [REG_ADDR_WIDTH-1:0] writeReg;
+wire [XLEN-1:0] writeData;
+wire [XLEN-1:0] readData1;
+wire [XLEN-1:0] readData2;
+wire [XLEN-1:0] pc_final;
+wire [XLEN-1:0] imm_reg_val;
 wire zero;
 wire [4:0] ALUCtl;
-wire [31:0] imm;
-wire [31:0] ALUOut;
-wire [31:0] imm_sum;
-wire [31:0] imm_s;
-wire [31:0] inst;
-wire [31:0] pc_o;
-wire [31:0] pc_new;
-wire [31:0] readData;
+wire [XLEN-1:0] imm;
+wire [XLEN-1:0] ALUOut;
+wire [XLEN-1:0] imm_sum;
+wire [XLEN-1:0] imm_s;
+wire [XLEN-1:0] inst;
+wire [XLEN-1:0] pc_o;
+wire [XLEN-1:0] pc_new;
+wire [XLEN-1:0] readData;
 wire jump;
 wire jalr;
 wire lui;
@@ -58,7 +73,7 @@ wire isEcall;
 wire isEbreak;
 wire isMret;
 wire illegalOpcode;
-wire [31:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a trap/mret
+wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a trap/mret
 
 // rst is active-low and synchronous: while low, every pipeline register
 // and the architectural register file hold their reset values; once
@@ -68,12 +83,12 @@ wire [31:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a t
 
  //FETCH
 
-    InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES)) m_InstMem(
+    InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_InstMem(
     .readAddr(pc_o),
     .inst(inst)
     );
     //
-    Mux2to1 #(.size(32)) m_Mux_PC(
+    Mux2to1 #(.size(XLEN)) m_Mux_PC(
         .sel(branch_taken),   // fires on a taken branch, jal/jalr, a trap, or mret -- all resolved in EX
         .s0(pc_new),
         .s1(redirect_target),
@@ -81,7 +96,7 @@ wire [31:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a t
 
     );
     //
-    PC m_PC(
+    PC #(.XLEN(XLEN)) m_PC(
         .clk(clk),
         .rst(start),
         .stall(pc_stall),   // Hazard.v's load-use stall, the multi-cycle divide interlock (docs/adr/0009),
@@ -90,16 +105,16 @@ wire [31:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a t
         .pc_o(pc_o)
     );
 
-    Adder m_Adder_1(
+    Adder #(.XLEN(XLEN)) m_Adder_1(
         .a(pc_o),
         .b(4),
         .sum(pc_new)
     );
 
-wire [31:0] inst_regfd;
-wire [31:0] pc_o_regfd;
+wire [XLEN-1:0] inst_regfd;
+wire [XLEN-1:0] pc_o_regfd;
 
-reg1 m_reg1(
+reg1 #(.XLEN(XLEN)) m_reg1(
     .clk(clk),
     .rst(start),
     .stall(pc_stall),
@@ -142,12 +157,12 @@ wire [6:0] funct7_control;
         .illegalOpcode(illegalOpcode)
     );
 //
-    ImmGen #(.Width(32)) m_ImmGen(
+    ImmGen #(.Width(XLEN)) m_ImmGen(
         .inst(inst_regfd),
         .imm(imm)
     );
 //
-    Register m_Register(
+    Register #(.XLEN(XLEN), .NUM_REGS(NUM_REGS), .SP_INIT(MEM_SIZE_BYTES)) m_Register(
         .clk(clk),
         .rst(start),
         .regWrite(regWrite_regwb),
@@ -159,7 +174,7 @@ wire [6:0] funct7_control;
         .readData2(readData2)
     );
 
-    Hazard m_Hazard(
+    Hazard #(.NUM_REGS(NUM_REGS)) m_Hazard(
         .readReg1_fd(inst_regfd[19:15]),
         .readReg2_fd(inst_regfd[24:20]),
         .write_to_Reg_regde(write_to_Reg_regde),
@@ -175,14 +190,14 @@ wire [6:0] funct7_control;
     wire ALUSrc_regde;
     wire regWrite_regde;
     wire [1:0] ALUOp_regde;
-    wire [4:0] writeReg_regde;
-    wire [31:0] pc_o_regde;
-    wire [31:0] readData1_regde;
-    wire [31:0] readData2_regde;
-    wire [31:0] imm_regde;
-    wire [31:0] inst_regde;
-    wire [4:0] readReg1_regde;
-    wire [4:0] readReg2_regde;
+    wire [REG_ADDR_WIDTH-1:0] writeReg_regde;
+    wire [XLEN-1:0] pc_o_regde;
+    wire [XLEN-1:0] readData1_regde;
+    wire [XLEN-1:0] readData2_regde;
+    wire [XLEN-1:0] imm_regde;
+    wire [XLEN-1:0] inst_regde;
+    wire [REG_ADDR_WIDTH-1:0] readReg1_regde;
+    wire [REG_ADDR_WIDTH-1:0] readReg2_regde;
     wire [1:0] forwardA;
     wire [1:0] forwardB;
     wire jump_regde;
@@ -195,7 +210,7 @@ wire [6:0] funct7_control;
     wire isMret_regde;
     wire illegalOpcode_regde;
     //
-reg2 m_reg2(
+reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .clk(clk),
     .rst(start),
     .branch(branch),
@@ -260,8 +275,8 @@ reg2 m_reg2(
 
 wire [6:0] funct7_regde;
 wire [2:0] funct3_regde;
-wire [31:0] readData1_final;
-wire [31:0] readData2_final;
+wire [XLEN-1:0] readData1_final;
+wire [XLEN-1:0] readData2_final;
 wire branch_taken;
 wire unconditional_redirect;  // jal/jalr | trap | mret -- see the assign below, and docs/adr/0011
 // Fires on a taken branch, an unconditional jal/jalr, a synchronous
@@ -270,7 +285,7 @@ wire unconditional_redirect;  // jal/jalr | trap | mret -- see the assign below,
 assign branch_taken = (branch_regde & zero) | unconditional_redirect;
 
 // forwarding unit
-Forward m_Forward(
+Forward #(.NUM_REGS(NUM_REGS)) m_Forward(
     .readReg1_regde(readReg1_regde),
     .readReg2_regde(readReg2_regde),
     .write_to_Reg_regem(write_to_Reg_regem),
@@ -291,20 +306,20 @@ Forward m_Forward(
     // jalr uses rs1 + (plain, unshifted immediate) with bit0 cleared per
     // spec. Same adder, muxed inputs -- avoids a second dedicated adder for
     // what is otherwise identical redirect-target-computation plumbing.
-    wire [31:0] target_base = jalr_regde ? readData1_final : pc_o_regde;
-    wire [31:0] target_off  = jalr_regde ? imm_regde : imm_s;
-    wire [31:0] imm_sum_raw;
-    Adder m_Adder_2(
+    wire [XLEN-1:0] target_base = jalr_regde ? readData1_final : pc_o_regde;
+    wire [XLEN-1:0] target_off  = jalr_regde ? imm_regde : imm_s;
+    wire [XLEN-1:0] imm_sum_raw;
+    Adder #(.XLEN(XLEN)) m_Adder_2(
     .a(target_base),
     .b(target_off),
     .sum(imm_sum_raw)
     );
-    assign imm_sum = {imm_sum_raw[31:1], 1'b0};  // clear bit0 (only jalr needs this; branch/jal sums are already even)
+    assign imm_sum = {imm_sum_raw[XLEN-1:1], 1'b0};  // clear bit0 (only jalr needs this; branch/jal sums are already even)
 
     // Link value for jal (rd = PC+4). Reuses the generic Adder the same way
     // Adder_1 (fetch, PC+4) and Adder_2 (branch/jump target) already do.
-    wire [31:0] pc_plus4_regde;
-    Adder m_Adder_3(
+    wire [XLEN-1:0] pc_plus4_regde;
+    Adder #(.XLEN(XLEN)) m_Adder_3(
     .a(pc_o_regde),
     .b(32'd4),
     .sum(pc_plus4_regde)
@@ -315,10 +330,10 @@ Forward m_Forward(
     // unused/meaningless for jal; the real result is PC+4). Forwarded from
     // MEM/WB (writeData_regwb, s1 below) is unaffected: that value is formed
     // by the WB-stage jal-override mux and is already correct.
-    wire [31:0] exmem_fwd_val;
+    wire [XLEN-1:0] exmem_fwd_val;
     assign exmem_fwd_val = jump_regem ? pc_plus4_regem : ALUOut_regem;
 
-    Mux4to1 #(.size(32)) m_Mux_ALU_A(
+    Mux4to1 #(.size(XLEN)) m_Mux_ALU_A(
     .sel(forwardA),
     .s0(readData1_regde),
     .s1(writeData_regwb),
@@ -326,7 +341,7 @@ Forward m_Forward(
     .out(readData1_final)
     );
 
-    Mux4to1 #(.size(32)) m_Mux_ALU_B(
+    Mux4to1 #(.size(XLEN)) m_Mux_ALU_B(
     .sel(forwardB),
     .s0(readData2_regde),
     .s1(writeData_regwb),
@@ -338,7 +353,7 @@ Forward m_Forward(
 
 
 //
-    Mux2to1 #(.size(32)) m_Mux_ALU(
+    Mux2to1 #(.size(XLEN)) m_Mux_ALU(
     .sel(ALUSrc_regde),
     .s0(readData2_final),
     .s1(imm_regde),
@@ -362,16 +377,16 @@ Forward m_Forward(
     // This is why lui/auipc need no writeback-mux override or forwarding
     // correction the way jal/jalr did: ALUOut is already the right value,
     // so it flows through the existing EX/MEM path untouched.
-    wire [31:0] aluA;
-    Mux4to1 #(.size(32)) m_Mux_ALU_A_Src(
+    wire [XLEN-1:0] aluA;
+    Mux4to1 #(.size(XLEN)) m_Mux_ALU_A_Src(
     .sel({auipc_regde, lui_regde}),
     .s0(readData1_final),
-    .s1(32'b0),
+    .s1({XLEN{1'b0}}),
     .s2(pc_o_regde),
     .out(aluA)
     );
 
-    ALU m_ALU(
+    ALU #(.XLEN(XLEN)) m_ALU(
     .ALUCtl(ALUCtl),
     .A(aluA),
     .B(imm_reg_val),
@@ -391,9 +406,9 @@ Forward m_Forward(
                     (ALUCtl == `ALUCTL_REM) || (ALUCtl == `ALUCTL_REMU);
     wire isDivSigned = (ALUCtl == `ALUCTL_DIV) || (ALUCtl == `ALUCTL_REM);
     wire div_busy, div_done;
-    wire [31:0] div_quotient, div_remainder;
+    wire [XLEN-1:0] div_quotient, div_remainder;
 
-    Divider m_Divider(
+    Divider #(.XLEN(XLEN)) m_Divider(
     .clk(clk),
     .rst(start),
     .start(isDivRem),
@@ -454,7 +469,7 @@ Forward m_Forward(
     // instruction's stay in EX not over yet".
     wire reg2_hold = div_stall | mem_stall;
 
-    wire [31:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
+    wire [XLEN-1:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
 
     // CSR / synchronous exceptions (docs/adr/0011-csr-and-exceptions.md).
     // M-mode only, no real interrupts -- illegal instruction, ecall, ebreak,
@@ -465,18 +480,18 @@ Forward m_Forward(
     // funct12), while ALUCtl==ILLEGAL is only known now, after ALUCtrl has
     // decoded a *recognized* opcode's funct7/funct3 and found no valid op.
     wire exception_taken = illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) | isEcall_regde | isEbreak_regde;
-    wire [31:0] trap_cause = (illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL)) ? `MCAUSE_ILLEGAL_INSTRUCTION :
+    wire [XLEN-1:0] trap_cause = (illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL)) ? `MCAUSE_ILLEGAL_INSTRUCTION :
                               isEbreak_regde ? `MCAUSE_BREAKPOINT :
                               isEcall_regde  ? `MCAUSE_ECALL_FROM_M :
-                              32'b0;
+                              {XLEN{1'b0}};
 
     // csrrwi/csrrsi/csrrci (funct3[2]=1) source their write data from a
     // zero-extended 5-bit immediate sitting in rs1's *field position*
     // (inst[19:15]) rather than a real register read; csrrw/csrrs/csrrc
     // (funct3[2]=0) use the actual (forwarded) rs1 value.
-    wire [31:0] csr_wdata = funct3_regde[2] ? {27'b0, inst_regde[19:15]} : readData1_final;
-    wire [31:0] csr_old_val;
-    wire [31:0] mtvec_val, mepc_val;
+    wire [XLEN-1:0] csr_wdata = funct3_regde[2] ? {{(XLEN-5){1'b0}}, inst_regde[19:15]} : readData1_final;
+    wire [XLEN-1:0] csr_old_val;
+    wire [XLEN-1:0] mtvec_val, mepc_val;
 
     // csr_write_en/trap_taken/mret_taken must NOT simply be isCsr_regde/
     // exception_taken/isMret_regde directly: those are combinational, live
@@ -497,7 +512,7 @@ Forward m_Forward(
     // immediately after a load. Gating by !reg2_hold suppresses the write on
     // every held cycle and lets it fire exactly once, on the same cycle
     // reg3 finally accepts this instruction's other outputs.
-    CSR m_CSR(
+    CSR #(.XLEN(XLEN)) m_CSR(
     .clk(clk),
     .rst(start),
     .csr_write_en(isCsr_regde && !reg2_hold),
@@ -519,7 +534,7 @@ Forward m_Forward(
     // the ALU's result otherwise. No forwarding correction needed for CSR
     // reads either (same reasoning as lui/auipc, docs/adr/0009): ex_result
     // is already correct by the time reg3 latches it.
-    wire [31:0] ex_result = isCsr_regde ? csr_old_val : (isDivRem ? div_result : ALUOut);
+    wire [XLEN-1:0] ex_result = isCsr_regde ? csr_old_val : (isDivRem ? div_result : ALUOut);
 
     assign unconditional_redirect = jump_regde | exception_taken | isMret_regde;
     assign redirect_target = exception_taken ? mtvec_val :
@@ -591,16 +606,16 @@ Forward m_Forward(
     `endif
 
 //
-wire [4:0] write_to_Reg_regde;
+wire [REG_ADDR_WIDTH-1:0] write_to_Reg_regde;
 wire memtoReg_regem;
 wire regWrite_regem;
 wire memRead_regem;
 wire memWrite_regem;
-wire [31:0] ALUOut_regem;
-wire [31:0] readData2_regem;
-wire [4:0] write_to_Reg_regem;
+wire [XLEN-1:0] ALUOut_regem;
+wire [XLEN-1:0] readData2_regem;
+wire [REG_ADDR_WIDTH-1:0] write_to_Reg_regem;
 wire jump_regem;
-wire [31:0] pc_plus4_regem;
+wire [XLEN-1:0] pc_plus4_regem;
 wire [2:0] funct3_regem;
 //
     // While a div/rem is still computing (div_stall), reg2/EX keeps
@@ -619,9 +634,9 @@ wire [2:0] funct3_regem;
     wire memRead_to_reg3       = reg3_bubble ? 1'b0 : memRead_regde;
     wire memWrite_to_reg3      = reg3_bubble ? 1'b0 : memWrite_regde;
     wire jump_to_reg3          = reg3_bubble ? 1'b0 : jump_regde;
-    wire [4:0] destReg_to_reg3 = reg3_bubble ? 5'b0  : write_to_Reg_regde;
+    wire [REG_ADDR_WIDTH-1:0] destReg_to_reg3 = reg3_bubble ? {REG_ADDR_WIDTH{1'b0}}  : write_to_Reg_regde;
 
-reg3 m_reg3(
+reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
     .clk(clk),
     .rst(start),
     .memtoReg_regde(memtoReg_to_reg3),
@@ -667,7 +682,7 @@ reg3 m_reg3(
 // this assertion would have caught that wiring mistake immediately instead
 // of needing a directed test (store_load.s) to stumble into it.
 `ifdef ASSERT_ON
-reg [31:0] expected_store_data;
+reg [XLEN-1:0] expected_store_data;
 always @(posedge clk) begin
     expected_store_data <= readData2_final;
     if (start && memWrite_regem && (readData2_regem !== expected_store_data))
@@ -685,7 +700,7 @@ end
     // cycle *after* a load's address/memRead are presented, which is exactly
     // what mem_stall (declared above, with the rest of the EX-stage hazard
     // logic) exists to accommodate.
-    DataMemoryBRAM #(.SIZE_BYTES(MEM_SIZE_BYTES)) m_DataMemory(
+    DataMemoryBRAM #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_DataMemory(
     .rst(start),
     .clk(clk),
     .memWrite(memWrite_regem),
@@ -698,16 +713,16 @@ end
 //
 wire memtoReg_regwb;
 wire regWrite_regwb;
-wire [31:0] readData_regwb;
-wire [31:0] ALUOut_regwb;
-wire [31:0] readData_regem;
-wire [4:0] write_to_Reg_regwb;
-wire [31:0] writeData_regwb;
+wire [XLEN-1:0] readData_regwb;
+wire [XLEN-1:0] ALUOut_regwb;
+wire [XLEN-1:0] readData_regem;
+wire [REG_ADDR_WIDTH-1:0] write_to_Reg_regwb;
+wire [XLEN-1:0] writeData_regwb;
 wire jump_regwb;
-wire [31:0] pc_plus4_regwb;
+wire [XLEN-1:0] pc_plus4_regwb;
 
 //
-reg4 m_reg4(
+reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .clk(clk),
     .rst(start),
     .memtoReg_regem(memtoReg_regem),
@@ -737,8 +752,8 @@ reg4 m_reg4(
 );
 
 //WRITEBACK
-    wire [31:0] writeData_regwb_mem_alu;
-    Mux2to1 #(.size(32)) m_Mux_WriteData(
+    wire [XLEN-1:0] writeData_regwb_mem_alu;
+    Mux2to1 #(.size(XLEN)) m_Mux_WriteData(
     .sel(memtoReg_regwb),
     .s0(ALUOut_regwb),
     .s1(readData_regwb),
@@ -746,7 +761,7 @@ reg4 m_reg4(
     );
 
     // jal's result (PC+4) overrides the normal ALU/memory writeback value.
-    Mux2to1 #(.size(32)) m_Mux_WriteData_Jump(
+    Mux2to1 #(.size(XLEN)) m_Mux_WriteData_Jump(
     .sel(jump_regwb),
     .s0(writeData_regwb_mem_alu),
     .s1(pc_plus4_regwb),

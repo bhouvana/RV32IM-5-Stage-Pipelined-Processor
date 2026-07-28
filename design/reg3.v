@@ -1,17 +1,20 @@
 `default_nettype none
 
-module reg3(
+module reg3 #(
+    parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
+    parameter NUM_REGS = 32
+) (
     input clk,
     input rst,
     input memtoReg_regde,
     input regWrite_regde,
     input memRead_regde,
     input memWrite_regde,
-    input [31:0] ALUOut,
-    input [31:0] readData2_regde,
-    input [4:0] write_to_Reg_regde,
+    input [XLEN-1:0] ALUOut,
+    input [XLEN-1:0] readData2_regde,
+    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regde,
     input jump_regde,
-    input [31:0] pc_plus4_regde,   // rd = PC+4 link value for jal, computed in EX
+    input [XLEN-1:0] pc_plus4_regde,   // rd = PC+4 link value for jal, computed in EX
     input [2:0] funct3_regde,      // load/store access width+signedness, for DataMemory
     input hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
                   // freeze every field exactly as-is while a load sitting in
@@ -24,11 +27,11 @@ module reg3(
     output reg regWrite_regem,
     output reg memRead_regem,
     output reg memWrite_regem,
-    output reg [31:0] ALUOut_regem,
-    output reg [31:0] readData2_regem,
-    output reg [4:0] write_to_Reg_regem,
+    output reg [XLEN-1:0] ALUOut_regem,
+    output reg [XLEN-1:0] readData2_regem,
+    output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
     output reg jump_regem,
-    output reg [31:0] pc_plus4_regem,
+    output reg [XLEN-1:0] pc_plus4_regem,
     output reg [2:0] funct3_regem
 );
 

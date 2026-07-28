@@ -1,11 +1,13 @@
 `default_nettype none
 
-module Forward (
+module Forward #(
+    parameter NUM_REGS = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
+) (
 
-    input [4:0] readReg1_regde,
-    input [4:0] readReg2_regde,
-    input [4:0] write_to_Reg_regem,
-    input [4:0] write_to_Reg_regwb,
+    input [$clog2(NUM_REGS)-1:0] readReg1_regde,
+    input [$clog2(NUM_REGS)-1:0] readReg2_regde,
+    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
+    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regwb,
     input regWrite_regwb,
     input regWrite_regem,
     output reg [1:0] forwardA,

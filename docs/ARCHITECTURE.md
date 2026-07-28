@@ -121,25 +121,29 @@ This matches the diagram in [README.md](../README.md) but adds the two feedback 
 
 | Module | File | Parameterized? | Role |
 |---|---|---|---|
-| `PIPELINED` | `riscvpipeline.v` | No | Top-level integration |
-| `PC` | `PC.v` | No | Program counter register, stall-holds |
-| `Adder` | `Adder.v` | No (fixed 32-bit) | Generic add; reused for PC+4 and branch target |
-| `InstructionMemory` | `InstructionMemory.v` | No | 128-byte instruction ROM, `$readmemb`-loaded |
-| `reg1` | `reg1.v` | No | IF/ID register; also does branch-squash and stall-hold |
-| `Control` | `Control.v` | No | Main decoder (opcode → control signals) |
-| `ImmGen` | `ImmGen.v` | `Width` (unused in practice — always 32) | Immediate extraction |
-| `Register` | `Register.v` | No | 32×32 register file, `x0` hardwired, `sp` reset to 128 |
-| `Hazard` | `Hazard.v` | No | Load-use RAW hazard → stall/flush |
-| `reg2` | `reg2.v` | No | ID/EX register; also does branch-squash and load-use bubble |
-| `Forward` | `Forward.v` | No | EX/MEM & MEM/WB forwarding priority logic |
+| `PIPELINED` | `riscvpipeline.v` | `INIT_FILE`, `MEM_SIZE_BYTES`, `XLEN`, `NUM_REGS` (`docs/adr/0012`, `0015`) | Top-level integration |
+| `PC` | `PC.v` | `XLEN` (`docs/adr/0015`) | Program counter register, stall-holds |
+| `Adder` | `Adder.v` | `XLEN` (`docs/adr/0015`) | Generic add; reused for PC+4 and branch target |
+| `InstructionMemory` | `InstructionMemory.v` | `SIZE_BYTES`, `XLEN` (`docs/adr/0012`, `0015`) | Instruction ROM (default 128 bytes), `$readmemb`-loaded |
+| `reg1` | `reg1.v` | `XLEN` (`docs/adr/0015`) | IF/ID register; also does branch-squash and stall-hold |
+| `Control` | `Control.v` | No (operates on fixed instruction-encoding field widths, not XLEN — see `docs/adr/0015`) | Main decoder (opcode → control signals) |
+| `ImmGen` | `ImmGen.v` | `Width` (now genuinely driven by `XLEN`, `docs/adr/0015`) | Immediate extraction |
+| `Register` | `Register.v` | `XLEN`, `NUM_REGS`, `SP_INIT` (`docs/adr/0015`) | Register file (default 32×32), `x0` hardwired, `sp` reset now wired to `MEM_SIZE_BYTES` |
+| `Hazard` | `Hazard.v` | `NUM_REGS` (`docs/adr/0015`) | Load-use RAW hazard → stall/flush |
+| `reg2` | `reg2.v` | `XLEN`, `NUM_REGS` (`docs/adr/0015`) | ID/EX register; also does branch-squash and load-use bubble |
+| `Forward` | `Forward.v` | `NUM_REGS` (`docs/adr/0015`) | EX/MEM & MEM/WB forwarding priority logic |
 | `ShiftLeftOne` | `ShiftLeftOne.v` | No | `imm << 1` for branch target |
 | `Mux4to1` | `Mux4to1.v` | `size` | ALU operand forwarding mux (only 3 of 4 select codes used) |
 | `Mux2to1` | `Mux2to1.v` | `size` | Generic 2:1 mux, reused 3× (PC select, ALU-B select, WB select) |
-| `ALUCtrl` | `ALUCtrl.v` | No | ALUOp + funct3/funct7 → 5-bit ALU opcode |
-| `ALU` | `ALU.v` | No | Execute unit; also computes branch conditions |
-| `reg3` | `reg3.v` | No | EX/MEM register; `hold` freezes it during `mem_stall` (`docs/adr/0013`) |
-| `DataMemoryBRAM` | `DataMemoryBRAM.v` | `SIZE_BYTES` | Data RAM, byte/halfword/word access; synchronous (registered) read |
-| `reg4` | `reg4.v` | No | MEM/WB register; `hold` freezes it during `mem_stall` (`docs/adr/0013`) |
+| `ALUCtrl` | `ALUCtrl.v` | No (control-encoding widths, not XLEN) | ALUOp + funct3/funct7 → 5-bit ALU opcode |
+| `ALU` | `ALU.v` | `XLEN` (`docs/adr/0015`) | Execute unit; also computes branch conditions |
+| `reg3` | `reg3.v` | `XLEN`, `NUM_REGS` (`docs/adr/0015`) | EX/MEM register; `hold` freezes it during `mem_stall` (`docs/adr/0013`) |
+| `DataMemoryBRAM` | `DataMemoryBRAM.v` | `SIZE_BYTES`, `XLEN` (`docs/adr/0012`, `0015`; access-width logic itself stays literal, see `0015`) | Data RAM, byte/halfword/word access; synchronous (registered) read |
+| `reg4` | `reg4.v` | `XLEN`, `NUM_REGS` (`docs/adr/0015`) | MEM/WB register; `hold` freezes it during `mem_stall` (`docs/adr/0013`) |
+| `CSR` | `CSR.v` | `XLEN` (`docs/adr/0015`; `csr_addr` stays a fixed 12 bits) | Machine-mode CSR file, trap/`mret` entry-exit |
+| `Divider` | `Divider.v` | `XLEN` (`docs/adr/0015`) | Multi-cycle restoring divider for `div`/`divu`/`rem`/`remu` |
+
+`XLEN`/`NUM_REGS` are named parameters, not truly variable at other values — RV32I's own instruction encoding fixes a 32-bit instruction word and 5-bit rs1/rs2/rd fields regardless of what they're set to (see `docs/adr/0015`'s Design section for exactly which fields did and didn't get parameterized, and why).
 
 **Reuse is already present** (`Adder` used twice, `Mux2to1` used three times) — this is a good foundation for the "reusable IP" objective, but the reuse stops at trivial combinational primitives. None of the stage-specific logic (`Control`, `ALUCtrl`, `Hazard`, `Forward`) is written against a shared types/constants package, so there is no single source of truth for opcode values, ALUCtl encodings, or pipeline register field layouts. Every module re-derives bit widths and magic numbers independently.
 
@@ -252,7 +256,7 @@ However: the signal is called `rst` throughout the design but is literally wired
 - ~~`wire [14:12] funct3_regde;` in `riscvpipeline.v`~~ **Fixed** (`docs/adr/0011`): this was flagged here as merely cosmetic, but turned out to be a real latent bug — every use up to that point connected/indexed the *whole* vector (position/value based, so the mismatched index labels never mattered), but `docs/adr/0011`'s CSR wiring was the first code to bit-select *into* it (`funct3_regde[2]`, `funct3_regde[1:0]`), and those indices fall outside the declared `[12:14]` range, silently reading as `x`. Now `[2:0]`. Worth remembering as a general lesson: an index-range mismatch that only ever appears in whole-vector connections is invisible until something finally slices it.
 - `ImmGen.v`'s `case` statement has no `default` arm — for any opcode not in {`0010011`,`1100011`,`0000011`,`0100011`,`1101111`}, `imm` is left unassigned in that evaluation of the `always @*` block, which in a real synthesis tool infers a **level-sensitive latch**, not a wire. Not a functional bug today (every consumer of `imm` gates it behind `ALUSrc`, which is 0 for opcodes ImmGen doesn't cover), but it will show up as a "latch inferred" warning the moment anyone runs a real lint pass, and is exactly the kind of thing Phase 3 (verification) should catch with an assertion or lint gate before it's allowed to merge again.
 - ~~`reg1.v`/`reg2.v` repeat their entire reset-value field list~~ **Done** (`docs/adr/0008`): `reg2.v` now uses text macros (`` `ZERO_CONTROL_FIELDS`` etc.) instead of repeating ~90 lines across 4 arms; `reg1.v` needed no change (already minimal).
-- ~~Every register file, memory, and pipeline register in the design is sized as literal `32`/`128`/`5` rather than a `localparam`~~ **Partially done** (`docs/adr/0012`): `DataMemory.v`/`InstructionMemory.v` sizes are now a `parameter` (`SIZE_BYTES`), threaded from `PIPELINED`'s new `MEM_SIZE_BYTES`. The architectural register file (32 x 32-bit) and pipeline register widths are still fixed literals — only memory sizing was in scope for FPGA readiness; the rest remains blocking for the fuller Phase 6 "compare pipeline depths" goal.
+- ~~Every register file, memory, and pipeline register in the design is sized as literal `32`/`128`/`5` rather than a `localparam`~~ **Done** (`docs/adr/0012`, `docs/adr/0015`): `DataMemory.v`/`InstructionMemory.v` sizes are a `parameter` (`SIZE_BYTES`), threaded from `PIPELINED`'s `MEM_SIZE_BYTES` (`docs/adr/0012`). The architectural register file and every pipeline register's data/register-address widths are now `XLEN`/`NUM_REGS` parameters too (`docs/adr/0015`) — named, not truly variable at other values (RV32I's own encoding fixes a 32-bit instruction word and 5-bit register fields regardless), but a single source of truth instead of scattered literals, and the prerequisite this section originally flagged for Phase 6's fuller "compare pipeline depths" goal (which itself remains future work, not delivered by this parameterization).
 
 ## 13. What this audit could *not* determine from static reading alone
 
@@ -278,7 +282,7 @@ That was the correct **starting point** for Phase 3, not a criticism of what exi
 | 3. Verification | Substantially complete. Self-checking directed suite (`sim/run_tests.sh`, 25 programs / 136 checks, including 6 CSR/exception tests and 2 standalone unit tests), 4 embedded assertions (`docs/adr/0007`), an independent reference-model ISS (`sim/tools/iss.py`, covering CSR/`ecall`/`ebreak`/`mret`) cross-checked against constrained-random programs including CSR ops (`docs/adr/0010`, `docs/adr/0014`), and functional coverage (`sim/tools/coverage_report.py`, confirms every branch direction and `ALUCTL_ILLEGAL` are now exercised). Found and fixed 10 real bugs total (see errata above). Remaining gap: `random_gen.py` still doesn't generate `ecall`/`ebreak`/`mret`/illegal-instruction control flow (deliberately scoped out, see `docs/adr/0014`). |
 | 4. Visualization | First version done: `sim/tb/gen_trace.v` + `sim/tools/gen_trace.py`/`build_viewer.py` produce an interactive, playable pipeline-occupancy viewer from a real execution trace (`make viewer`). Multi-program comparison and VCD export still open. |
 | 5. Extensions (RV32M/CSR/caches/prediction/etc.) | RV32I completeness (5.1, `docs/adr/0005`), RV32M (5.2, `docs/adr/0006` + `0009`), and CSR/M-mode synchronous exceptions (5.3, `docs/adr/0011`) all done. RV32M includes a real multi-cycle divider (`design/Divider.v`) with a genuine pipeline interlock — the project's first multi-cycle-execute mechanism, whose stall/redirect shape CSR/exceptions reused directly. Caches/branch prediction/interrupts not started (the last needs a hardware interrupt source this design doesn't have — see `docs/adr/0011`'s Future improvements). |
-| 6. Research platform (pluggable subsystems) | Not started; memory sizes are now parameterized (`docs/adr/0012`), but the architectural register file/pipeline register widths still aren't — the rest of the §12 parameterization work is still required. |
+| 6. Research platform (pluggable subsystems) | The named-parameterization prerequisite is done: memory sizes (`docs/adr/0012`), and now the architectural register file/every pipeline register's data and register-address widths too (`XLEN`/`NUM_REGS`, `docs/adr/0015`) — not truly variable at other values for this ISA, but a single source of truth. The actual "pluggable subsystems" vision this phase describes (swappable hazard strategies, variable pipeline depth) has not been started. |
 | 7. FPGA support | Memory sizes parameterized, a `debug_x10` observability port, a vendor-neutral bring-up top level (`fpga/top.v`), and a generic XDC constraints template (`docs/adr/0012`). `design/DataMemoryBRAM.v` (synchronous read) is now wired into the live pipeline (`docs/adr/0013`), replacing the old combinational-read `DataMemory.v` (deleted). The one remaining item is real hardware validation -- nothing has touched an actual board yet. |
 | 8. Tooling | `sim/tools/asm.py` (assembler, now with CSR/`ecall`/`ebreak`/`mret` encoding and a raw `word` directive) and `sim/tb/trace_debug.v` (ad hoc cycle trace) exist as early building blocks; not yet the dedicated profiler/debugger/trace-explorer tooling Phase 8 describes. |
 | 9. Documentation | This document, `docs/ROADMAP.md`, and 12 ADRs (`docs/adr/`) as of this update. |
