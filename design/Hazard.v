@@ -1,17 +1,43 @@
 `default_nettype none
 
 module Hazard #(
-    parameter NUM_REGS = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md
+    parameter NUM_REGS = 32,   // docs/adr/0015-xlen-and-regcount-parameterization.md
+    // docs/adr/0018-variable-pipeline-depth.md (Phase A5) -- number of
+    // in-flight producer slots checked for a load-use hazard against the
+    // instruction currently in ID. Ports below flatten them into one bus,
+    // nearest-producer-first (index 0). Default 1 (today's single ID/EX-
+    // stage check, the one instruction directly ahead) reproduces this
+    // core's original load-use detection exactly -- infrastructure only,
+    // not exercised above this default by any profile shipped so far (every
+    // other RAW-hazard gap is covered by Forward.v's forwarding or
+    // Register.v's write-first bypass, not by stalling here).
+    parameter NUM_LOOKAHEAD = 1
 ) (
 
     input [$clog2(NUM_REGS)-1:0] readReg1_fd,
     input [$clog2(NUM_REGS)-1:0] readReg2_fd,
-    input [$clog2(NUM_REGS)-1:0] write_to_Reg_regde,
-    input memRead_regde,
+    // Per-lookahead-slot hazard sources, nearest-producer-first (see
+    // riscvpipeline.v's instantiation for the default NUM_LOOKAHEAD=1
+    // mapping: index 0 = the instruction now entering EX, "regde").
+    input [NUM_LOOKAHEAD-1:0] la_memRead,
+    input [NUM_LOOKAHEAD*$clog2(NUM_REGS)-1:0] la_dest,
     output flush,
     output stall
 );
-assign flush = ( memRead_regde && ((write_to_Reg_regde ==readReg1_fd) || (write_to_Reg_regde == readReg2_fd))) ? 1'b1 : 1'b0;
+
+localparam REG_ADDR_WIDTH = $clog2(NUM_REGS);
+
+wire [NUM_LOOKAHEAD-1:0] hazard_per_slot;
+genvar g;
+generate
+for (g = 0; g < NUM_LOOKAHEAD; g = g + 1) begin : gen_lookahead
+    assign hazard_per_slot[g] = la_memRead[g] &&
+        ((la_dest[g*REG_ADDR_WIDTH +: REG_ADDR_WIDTH] == readReg1_fd) ||
+         (la_dest[g*REG_ADDR_WIDTH +: REG_ADDR_WIDTH] == readReg2_fd));
+end
+endgenerate
+
+assign flush = |hazard_per_slot;
 assign stall = flush;
 
 // Compiled in only with -DASSERT_ON (see sim/run_tests.sh). stall/flush are

@@ -9,6 +9,7 @@
 `include "InstructionMemory.v"
 `include "Mux2to1.v"
 `include "Mux4to1.v"
+`include "MuxN.v"
 `include "Register.v"
 `include "ShiftLeftOne.v"
 `include "reg1.v"

@@ -290,8 +290,8 @@ wire [6:0] funct7_control;
         Hazard #(.NUM_REGS(NUM_REGS)) m_Hazard(
             .readReg1_fd(inst_regfd[19:15]),
             .readReg2_fd(inst_regfd[24:20]),
-            .write_to_Reg_regde(write_to_Reg_regde),
-            .memRead_regde(memRead_regde),
+            .la_memRead(memRead_regde),
+            .la_dest(write_to_Reg_regde),
             .flush(flush),
             .stall(stall)
         );
@@ -418,13 +418,15 @@ assign branch_taken = (branch_regde & zero) | unconditional_redirect;
 // bypass instead).
 generate
 if (HAZARD_STRATEGY == 0) begin : gen_forward
+    // fwd_valid/fwd_dest are farthest-producer-first (index 0 = MEM/WB,
+    // index 1 = EX/MEM), matching Forward.v's NUM_FWD_SRC=2 default -- see
+    // its own comment for why that order makes the nearest producer win
+    // ties.
     Forward #(.NUM_REGS(NUM_REGS)) m_Forward(
         .readReg1_regde(readReg1_regde),
         .readReg2_regde(readReg2_regde),
-        .write_to_Reg_regem(write_to_Reg_regem),
-        .write_to_Reg_regwb(write_to_Reg_regwb),
-        .regWrite_regwb(regWrite_regwb),
-        .regWrite_regem(regWrite_regem),
+        .fwd_valid({regWrite_regem, regWrite_regwb}),
+        .fwd_dest({write_to_Reg_regem, write_to_Reg_regwb}),
         .forwardA(forwardA),
         .forwardB(forwardB)
     );
@@ -471,19 +473,20 @@ endgenerate
     wire [XLEN-1:0] exmem_fwd_val;
     assign exmem_fwd_val = jump_regem ? pc_plus4_regem : ALUOut_regem;
 
-    Mux4to1 #(.size(XLEN)) m_Mux_ALU_A(
+    // src bus must match Forward.v's fwd_dest ordering above (index 0 =
+    // MEM/WB, index 1 = EX/MEM) so forwardA/B's encoding selects the right
+    // value.
+    MuxN #(.size(XLEN)) m_Mux_ALU_A(
     .sel(forwardA),
     .s0(readData1_regde),
-    .s1(writeData_regwb),
-    .s2(exmem_fwd_val),
+    .src({exmem_fwd_val, writeData_regwb}),
     .out(readData1_final)
     );
 
-    Mux4to1 #(.size(XLEN)) m_Mux_ALU_B(
+    MuxN #(.size(XLEN)) m_Mux_ALU_B(
     .sel(forwardB),
     .s0(readData2_regde),
-    .s1(writeData_regwb),
-    .s2(exmem_fwd_val),
+    .src({exmem_fwd_val, writeData_regwb}),
     .out(readData2_final)
     );
 
