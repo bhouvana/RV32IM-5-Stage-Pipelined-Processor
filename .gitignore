@@ -23,3 +23,7 @@ sim/tools/*.json
 
 __pycache__/
 *.pyc
+
+# Local session-continuity doc for future Claude sessions picking this up
+# cold -- kept on disk, deliberately not published to the remote.
+/handoff.md
