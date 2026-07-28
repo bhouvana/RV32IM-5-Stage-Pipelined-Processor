@@ -115,7 +115,6 @@ interrupt source exists to drive them) remain unimplemented, both by design.
 | Compiled-C toolchain (real GCC → this core) | ✅ Infrastructure verified end-to-end |
 | CoreMark / Dhrystone ports | 🚧 In progress |
 | FPGA real-hardware validation | 🚧 Scaffolding done, not yet run on a board |
-| Variable pipeline depth | ⏸ Deliberately out of scope — see `docs/ROADMAP.md` Phase 6 |
 
 ## Verification
 
