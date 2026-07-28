@@ -8,22 +8,23 @@
 // up by sim/run_tests.sh's plain `tb_*.v` glob and counted in its
 // tests/checks total, same as tb_divider_unit.v/tb_data_memory_bram.v
 // already are.
+//
+// reg1a.v is deliberately a plain, unconditional relay (reset/stall only,
+// no squash notion of its own -- see its header comment for why); this
+// test covers exactly that surface. Redirect handling for this profile is
+// riscvpipeline.v's own concern (redirect_squash_extend_r), exercised by
+// the pipeline-level directed/random tests instead, not here.
 module tb_reg1a_unit;
     reg clk = 0;
     reg rst = 1;
     reg stall = 0;
     reg [31:0] pc_o = 0;
-    reg branch_regde = 0;
-    reg zero = 0;
-    reg jump = 0;
     wire [31:0] pc_o_reg1a;
 
     integer fails = 0;
     integer checks = 0;
 
-    reg1a dut(.clk(clk), .rst(rst), .stall(stall), .pc_o(pc_o),
-              .branch_regde(branch_regde), .zero(zero), .jump(jump),
-              .pc_o_reg1a(pc_o_reg1a));
+    reg1a dut(.clk(clk), .rst(rst), .stall(stall), .pc_o(pc_o), .pc_o_reg1a(pc_o_reg1a));
 
     always #5 clk = ~clk;
 
@@ -72,39 +73,6 @@ module tb_reg1a_unit;
         @(posedge clk);
         @(posedge clk); #1;
         check(32'hFF, "resumes latching once stall clears");
-
-        // Squash via taken branch (branch_regde & zero).
-        pc_o <= 32'h20;
-        @(posedge clk);
-        @(posedge clk); #1;
-        check(32'h20, "normal latch before squash: pc_o=0x20");
-        branch_regde <= 1; zero <= 1;
-        @(posedge clk);
-        @(posedge clk); #1;
-        check(0, "taken-branch squash resets to 0");
-        branch_regde <= 0; zero <= 0;
-
-        // Squash via unconditional redirect (jump -- jal/jalr/trap/mret).
-        pc_o <= 32'h40;
-        @(posedge clk);
-        @(posedge clk); #1;
-        check(32'h40, "normal latch before squash: pc_o=0x40");
-        jump <= 1;
-        @(posedge clk);
-        @(posedge clk); #1;
-        check(0, "unconditional-redirect squash resets to 0");
-        jump <= 0;
-
-        // Squash takes priority over stall (matching reg1.v's priority order).
-        pc_o <= 32'h60;
-        @(posedge clk);
-        @(posedge clk); #1;
-        check(32'h60, "normal latch before priority check: pc_o=0x60");
-        stall <= 1; jump <= 1;
-        @(posedge clk);
-        @(posedge clk); #1;
-        check(0, "squash takes priority over a simultaneous stall");
-        stall <= 0; jump <= 0;
 
         if (fails == 0)
             $display("PASS  reg1a_unit (%0d checks)", checks);

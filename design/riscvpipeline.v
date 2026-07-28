@@ -118,8 +118,19 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
 
  //FETCH
 
+    // Under PROFILE_6STAGE_SPLIT_FETCH (docs/adr/0018-variable-pipeline-
+    // depth.md), instruction memory reads reg1a's registered PC instead of
+    // PC.v's combinational output directly -- one extra cycle of fetch
+    // latency, decoupling PC generation from instruction-memory access.
+    // PIPELINE_PROFILE is a parameter (elaboration-time constant), so this
+    // ternary collapses to a direct wire connection with no runtime mux --
+    // no generate/if needed here, unlike reg1a's own module-instantiation
+    // choice, since this is a plain wire select, not a choice between
+    // instantiating different modules.
+    wire [XLEN-1:0] imem_read_addr = (PIPELINE_PROFILE == PROFILE_5STAGE) ? pc_o : pc_o_reg1a;
+
     InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_InstMem(
-    .readAddr(pc_o),
+    .readAddr(imem_read_addr),
     .inst(inst)
     );
     //
@@ -154,10 +165,23 @@ reg1 #(.XLEN(XLEN)) m_reg1(
     .rst(start),
     .stall(pc_stall),
     .inst(inst),
-    .pc_o(pc_o),
+    // Must be the PC that was actually used to fetch `inst` this cycle
+    // (imem_read_addr), not PC.v's live pc_o -- under PROFILE_5STAGE these
+    // are the same wire, but under PROFILE_6STAGE_SPLIT_FETCH pc_o has
+    // already advanced to the *next* PC by the time inst (fetched via
+    // reg1a's one-cycle-delayed address) comes back. Pairing inst with the
+    // wrong PC here silently corrupts every PC-relative computation
+    // downstream (branch/jal targets, auipc, jal's link address) --
+    // caught by constrained-random cross-checking at profile 1 before this
+    // fix, not assumed correct from the design alone.
+    .pc_o(imem_read_addr),
     .branch_regde(branch_regde),
     .zero(zero),
-    .jump(unconditional_redirect),  // jal/jalr, or a trap/mret (docs/adr/0011) -- see branch_taken's definition
+    // jal/jalr, or a trap/mret (docs/adr/0011) -- see branch_taken's
+    // definition -- ORed with redirect_squash_extend_r (docs/adr/0018),
+    // which is always 0 under PROFILE_5STAGE, so this term is a genuine
+    // no-op at the default profile.
+    .jump(unconditional_redirect | redirect_squash_extend_r),
     .inst_regfd(inst_regfd),
     .pc_o_regfd(pc_o_regfd)
 );
@@ -166,10 +190,10 @@ reg1 #(.XLEN(XLEN)) m_reg1(
 // instantiated (and only meaningful) under PROFILE_6STAGE_SPLIT_FETCH --
 // same elaboration-time generate/if template docs/adr/0016 established for
 // HAZARD_STRATEGY, so PROFILE_5STAGE's branch costs nothing and isn't even
-// instantiated. Not yet consumed by InstructionMemory or anything else at
-// this commit -- that's the next step, isolated on its own so this step
-// only has to prove the module elaborates and squashes/freezes correctly
-// under both profiles, not that rerouting fetch actually works end to end.
+// instantiated. A plain, unconditional relay -- no squash notion of its
+// own; see reg1a.v's header comment for the two rejected designs (an
+// infinite loop, then a duplicated fetch) and redirect_squash_extend_r
+// below for where the actual fix lives.
 wire [XLEN-1:0] pc_o_reg1a;
 generate
 if (PIPELINE_PROFILE == PROFILE_5STAGE) begin : gen_fetch_5stage
@@ -180,13 +204,35 @@ end else begin : gen_fetch_6stage_split_fetch
         .rst(start),
         .stall(pc_stall),
         .pc_o(pc_o),
-        .branch_regde(branch_regde),
-        .zero(zero),
-        .jump(unconditional_redirect),
         .pc_o_reg1a(pc_o_reg1a)
     );
 end
 endgenerate
+
+// Under PROFILE_6STAGE_SPLIT_FETCH, a redirect needs reg1 (IF2/ID) to
+// squash for one EXTRA cycle beyond what PROFILE_5STAGE needs -- an
+// honest architectural cost, not a workaround: the extra fetch stage
+// (reg1a) means one additional instruction is already "in flight," fetched
+// using a now-stale address reg1a held before the redirect corrected it,
+// by the time the redirect is discovered. Registers `branch_taken` one
+// cycle so reg1's squash condition (fed via its `jump` port below) can OR
+// it in; always 0 under PROFILE_5STAGE (the condition that sets it is
+// itself gated on the split-fetch profile), so this is a genuine no-op at
+// the default profile, not just a harmless-in-practice one. A real bug
+// found by running constrained-random programs at this profile, not
+// reasoned out in advance: without this, a redirect immediately followed
+// by another instruction that depends on the redirect target's own
+// results computes wrong values, because the duplicate/stale fetch this
+// extra squash cycle discards would otherwise flow into reg2 and (for a
+// CSR instruction specifically) apply its side effect an extra, spurious
+// time.
+reg redirect_squash_extend_r;
+always @(posedge clk) begin
+    if (~start)
+        redirect_squash_extend_r <= 1'b0;
+    else
+        redirect_squash_extend_r <= (PIPELINE_PROFILE == PROFILE_6STAGE_SPLIT_FETCH) ? branch_taken : 1'b0;
+end
 
 wire [2:0] funct3_control;
 wire [6:0] funct7_control;

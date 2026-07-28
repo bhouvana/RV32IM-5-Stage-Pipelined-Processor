@@ -31,7 +31,7 @@ def load_words(mem_path):
     return words
 
 
-def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0):
+def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
     with open(prog_s, "w") as f:
@@ -58,7 +58,8 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0)
     with open(template) as f:
         tpl = f.read()
     tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
-              .replace("__OUT_FILE__", out_path).replace("__HAZARD_STRATEGY__", str(hazard_strategy)))
+              .replace("__OUT_FILE__", out_path).replace("__HAZARD_STRATEGY__", str(hazard_strategy))
+              .replace("__PIPELINE_PROFILE__", str(pipeline_profile)))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
@@ -100,6 +101,9 @@ def main():
     ap.add_argument("--keep-failures", action="store_true", help="don't delete work dir contents for failing seeds")
     ap.add_argument("--hazard-strategy", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's HAZARD_STRATEGY (docs/adr/0016): 0=forwarding (default), 1=stall-only")
+    ap.add_argument("--pipeline-profile", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's PIPELINE_PROFILE (docs/adr/0018): "
+                          "0=5-stage (default), 1=6-stage split-fetch")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -110,7 +114,8 @@ def main():
     with tempfile.TemporaryDirectory() as work_dir:
         for i in range(args.count):
             seed = args.seed_start + i
-            ok, msg = run_one(seed, args.n_instrs, work_dir, args.iverilog_dir, template, args.hazard_strategy)
+            ok, msg = run_one(seed, args.n_instrs, work_dir, args.iverilog_dir, template,
+                              args.hazard_strategy, args.pipeline_profile)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")
