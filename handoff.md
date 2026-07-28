@@ -10,8 +10,8 @@ A synthesizable RV32I+M RISC-V 5-stage pipeline in Verilog
 a basic student pipeline project into a verified, documented core with a
 real verification harness, machine-mode CSRs/exceptions, and FPGA bring-up
 scaffolding. Every non-trivial design decision and every real bug found
-along the way is written up in `docs/adr/0001` through `0015` — those are
-the actual source of truth for *why* things are the way they are. This file
+along the way is written up in `docs/adr/0001` through `0015` (15 ADRs) —
+those are the actual source of truth for *why* things are the way they are. This file
 just orients you fast; `docs/ARCHITECTURE.md` (full technical audit,
 updated incrementally) and `docs/ROADMAP.md` (phased backlog + status log)
 are the next things to read after this.
@@ -47,6 +47,11 @@ are the next things to read after this.
   named, not truly variable at other values for this ISA (see the ADR).
   `design/Register.v`'s old `// Do not modify this file!` header is gone
   (confirmed stale template leftover with the user before removing it).
+- Phase 8 (tooling): `sim/tools/debugger.py`, an interactive ISS-based step
+  debugger (`make debug PROGRAM=path/to/foo.s`). Phase 10 (benchmarking):
+  three hand-written kernels in `sim/benchmarks/` with real cycle/IPC data
+  (`make benchmark`) — not CoreMark/Dhrystone (no RISC-V C toolchain in
+  this environment, confirmed directly, not assumed).
 - Git repo, all on `master`, no remote — run `git log --oneline | head -20`
   for the current commit count/truth rather than trusting a number here.
 
@@ -80,16 +85,29 @@ design/           RTL. riscvpipeline.v is the top-level PIPELINED module —
                    read it first, it instantiates everything else and is
                    the map of how stages connect.
 sim/programs/*.s   Hand-written directed test programs (custom asm, see
-                   sim/tools/asm.py's header for the exact dialect).
+                   sim/tools/asm.py's header for the exact dialect). Every
+                   file here gets unconditionally assembled by
+                   sim/run_tests.sh at the *default* 128-byte memory size --
+                   don't drop anything needing more room in here (see
+                   sim/benchmarks/ below for where that went).
 sim/tb/tb_*.v      One self-checking testbench per program, same basename.
                    Auto-discovered by sim/run_tests.sh (glob), no registry
                    to update when adding one.
+sim/benchmarks/bench_*.s   Hand-written performance kernels (docs/ROADMAP.md
+                   Phase 10), separate from sim/programs/ specifically so
+                   run_tests.sh's blanket 128-byte assembly step doesn't
+                   apply to them. Run via sim/tools/bench_runner.py.
 sim/tools/asm.py   The assembler (this core's specific ISA subset + a couple
                    of custom instructions — not a general RV32I assembler).
 sim/tools/iss.py   Independent reference-model simulator, used for
                    constrained-random cross-checking. Deliberately NOT
                    sharing code with asm.py's encoding tables or the RTL —
                    the whole point is to catch disagreements.
+sim/tools/disasm.py   Shared disassembler, used by gen_trace.py (pipeline
+                   viewer) and debugger.py (Phase 8 interactive debugger).
+sim/tools/debugger.py   Interactive ISS-based step debugger (Phase 8).
+sim/tools/bench_runner.py   Benchmark runner (Phase 10) -- cycles/instructions/
+                   IPC per sim/benchmarks/bench_*.s kernel.
 sim/tools/random_gen.py   Constrained-random program generator (forward-only
                    control flow, reserved base pointer — see its docstring).
 docs/ARCHITECTURE.md   Full technical audit, with an Errata section at the
@@ -171,6 +189,16 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
     disassembler only checked instruction bit 30, so every RV32M
     instruction silently misdisassembled as `add`/`sll`/etc. in the
     pipeline viewer. Pure tooling, no ADR (see ROADMAP's own rule for that).
+13. **Phase 10 benchmarking**: real CoreMark/Dhrystone confirmed out of
+    reach (no RISC-V C toolchain anywhere in this environment — checked
+    directly). Three hand-written kernels instead (`sim/benchmarks/
+    bench_fib.s`/`bench_sum_array.s`/`bench_bubble_sort.s`), each
+    correctness-cross-checked against the ISS, cycle-counted via a new
+    generic-halt-detecting testbench (`sim/tb/bench_template.v`) and
+    `sim/tools/bench_runner.py` (`make benchmark`). Also Phase 9
+    (documentation): no standalone action — it has no independent
+    deliverable beyond what every other phase's own doc updates already
+    produce, per that phase's own text.
 
 ## Lessons worth not re-learning
 
@@ -279,12 +307,16 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
    parameterization prerequisite is done (`docs/adr/0015`), but the actual
    "pluggable subsystems" vision — swappable hazard strategies, variable
    pipeline depth — hasn't been started.
-4. Phase 8 (tooling): interactive debugger now done (`sim/tools/debugger.py`);
-   a dedicated profiler and benchmark runner are still open. Phase 10
-   (benchmarking) not started.
+4. Phase 8 (tooling): interactive debugger done (`sim/tools/debugger.py`);
+   a dedicated profiler is still open.
 5. Real Verilog lint (Verible) — CQ-5 in ROADMAP, still open; the closest
    thing today is `make lint` (just `iverilog -Wall`, catches syntax/width/
    latch issues, not a real style/lint pass).
+6. Real hardware-comparable benchmarking (CoreMark/Dhrystone) — needs a
+   RISC-V C toolchain this environment doesn't have. `sim/benchmarks/` has
+   hand-written kernels with real IPC data instead (`docs/ROADMAP.md`
+   Phase 10), useful for relative comparison, not absolute/standardized
+   scores.
 
 ## If you're picking this up cold
 

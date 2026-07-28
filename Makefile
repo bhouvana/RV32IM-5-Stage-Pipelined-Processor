@@ -5,7 +5,7 @@
 PROGRAMS := $(wildcard sim/programs/*.s)
 MEMS     := $(PROGRAMS:.s=.mem)
 
-.PHONY: test lint clean viewer random-test coverage debug
+.PHONY: test lint clean viewer random-test coverage debug benchmark
 
 test: $(MEMS)
 	@bash sim/run_tests.sh
@@ -46,3 +46,11 @@ coverage:
 # cycle-accurate `viewer` target above for that). Pass PROGRAM=path/to/foo.s.
 debug:
 	python sim/tools/debugger.py $(PROGRAM)
+
+# Hand-written microbenchmark kernels (docs/ROADMAP.md Phase 10) -- NOT
+# CoreMark/Dhrystone (no RISC-V C toolchain in this environment, see
+# sim/tools/bench_runner.py's docstring), but real cycles/instructions/IPC
+# measurements from actual RTL simulation, useful for relative comparisons
+# between this core's own changes.
+benchmark:
+	python sim/tools/bench_runner.py
