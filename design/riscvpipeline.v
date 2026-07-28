@@ -33,7 +33,21 @@ module PIPELINED #(
     // around any of them (Forward.v's muxes are forced to "no forward" in
     // this mode). Both are independently verified (see the ADR); 0 is what
     // every pre-existing test/ADR/benchmark result in this repo assumes.
-    parameter HAZARD_STRATEGY = 0
+    parameter HAZARD_STRATEGY = 0,
+    // docs/adr/0018-variable-pipeline-depth.md (docs/ROADMAP.md Phase 6:
+    // "compare pipeline depths") -- a closed, named enum, not a free integer
+    // implying arbitrary stage counts (same honesty convention as
+    // docs/adr/0015's XLEN/NUM_REGS). PROFILE_5STAGE (0, default): today's
+    // exact IF/ID/EX/MEM/WB structure, bit-exact, what every existing test/
+    // ADR/benchmark in this repo assumes. PROFILE_6STAGE_SPLIT_FETCH (1):
+    // adds a second fetch-stage relay register (reg1a) ahead of today's IF/ID
+    // boundary -- deliberately the structurally cheap alternate depth
+    // (Forward.v/Hazard.v/reg2/reg3/reg4/the divider and MEM-stage interlocks
+    // all anchor at ID/EX/MEM/WB, none of which a fetch-side split touches).
+    // Splitting EX/MEM (branch-resolve-early, cache-miss stalls) remains
+    // explicitly out of scope -- the genuinely larger redesign docs/adr/0016
+    // already deferred, not attempted here either.
+    parameter PIPELINE_PROFILE = 0
 )(
     input clk,
     input start,
@@ -49,6 +63,12 @@ module PIPELINED #(
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
 localparam REG_ADDR_WIDTH = $clog2(NUM_REGS);
+
+// PIPELINE_PROFILE values (docs/adr/0018-variable-pipeline-depth.md) -- named
+// constants purely for readability at the generate/if sites that consume
+// this parameter; not yet consumed anywhere as of this commit.
+localparam PROFILE_5STAGE = 0;
+localparam PROFILE_6STAGE_SPLIT_FETCH = 1;
 
 wire branch;
 wire memRead;
