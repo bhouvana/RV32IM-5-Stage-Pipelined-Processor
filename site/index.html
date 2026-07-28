@@ -1,0 +1,879 @@
+<title>RV32IM · 5-Stage Pipelined RISC-V Core</title>
+<style>
+  :root {
+    --bg-deep: #080b10;
+    --bg: #0d1119;
+    --panel: #12161f;
+    --panel-2: #171c26;
+    --grid: #232a37;
+    --text: #dde4ec;
+    --text-dim: #7d8794;
+    --text-faint: #4d5561;
+    --accent: #4f9cff;
+    --accent-soft: #16233a;
+    --accent-line: #2a4266;
+    --stall: #e3a53d;
+    --stall-soft: #2c2211;
+    --squash: #ef5a5a;
+    --squash-soft: #2c1414;
+    --forward: #4fd1a5;
+    --forward-soft: #10281f;
+    --branch: #b28dff;
+    --branch-soft: #221a38;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 28px rgba(0, 0, 0, 0.35);
+    --radius: 8px;
+    --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg-deep: #e7ebf1; --bg: #eef1f5; --panel: #ffffff; --panel-2: #f6f8fb; --grid: #d7dee7;
+      --text: #1b2430; --text-dim: #62707f; --text-faint: #9aa6b2;
+      --accent: #2f7fd6; --accent-soft: #e4eefb; --accent-line: #bcd6f4;
+      --stall: #b5790c; --stall-soft: #fdf0d6; --squash: #c93f3f; --squash-soft: #fbe4e4;
+      --forward: #1f8f6e; --forward-soft: #e0f4ec; --branch: #7c4fd6; --branch-soft: #ede4fb;
+      --shadow: 0 1px 2px rgba(20, 30, 45, 0.06), 0 8px 24px rgba(20, 30, 45, 0.05);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg-deep: #080b10; --bg: #0d1119; --panel: #12161f; --panel-2: #171c26; --grid: #232a37;
+    --text: #dde4ec; --text-dim: #7d8794; --text-faint: #4d5561;
+    --accent: #4f9cff; --accent-soft: #16233a; --accent-line: #2a4266;
+    --stall: #e3a53d; --stall-soft: #2c2211; --squash: #ef5a5a; --squash-soft: #2c1414;
+    --forward: #4fd1a5; --forward-soft: #10281f; --branch: #b28dff; --branch-soft: #221a38;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 28px rgba(0, 0, 0, 0.35);
+  }
+  :root[data-theme="light"] {
+    --bg-deep: #e7ebf1; --bg: #eef1f5; --panel: #ffffff; --panel-2: #f6f8fb; --grid: #d7dee7;
+    --text: #1b2430; --text-dim: #62707f; --text-faint: #9aa6b2;
+    --accent: #2f7fd6; --accent-soft: #e4eefb; --accent-line: #bcd6f4;
+    --stall: #b5790c; --stall-soft: #fdf0d6; --squash: #c93f3f; --squash-soft: #fbe4e4;
+    --forward: #1f8f6e; --forward-soft: #e0f4ec; --branch: #7c4fd6; --branch-soft: #ede4fb;
+    --shadow: 0 1px 2px rgba(20, 30, 45, 0.06), 0 8px 24px rgba(20, 30, 45, 0.05);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg-deep);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-soft); color: var(--accent); }
+  a { color: var(--accent); }
+  code, .mono { font-family: var(--mono); }
+  h1, h2, h3 { text-wrap: balance; font-family: var(--sans); }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .eyebrow::before { content: ""; width: 16px; height: 1px; background: var(--accent); display: inline-block; }
+
+  .shell { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- Hero ---------- */
+  .hero {
+    background:
+      radial-gradient(ellipse 900px 420px at 78% -10%, var(--accent-soft), transparent 60%),
+      linear-gradient(180deg, var(--bg-deep), var(--bg) 70%);
+    border-bottom: 1px solid var(--grid);
+    padding: 64px 0 0;
+    overflow: clip;
+  }
+  .hero-inner { display: grid; gap: 18px; max-width: 760px; padding-bottom: 40px; }
+  .hero h1 {
+    font-size: clamp(34px, 5vw, 54px); font-weight: 800; letter-spacing: -0.02em;
+    margin: 0; line-height: 1.06;
+  }
+  .hero h1 em {
+    font-style: normal; color: var(--accent);
+  }
+  .hero .lede {
+    font-size: 16.5px; color: var(--text-dim); max-width: 62ch; margin: 0;
+  }
+  .hero .lede code { color: var(--text); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--grid); font-size: 0.9em; }
+
+  .hero-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .btn {
+    appearance: none; border: 1px solid var(--grid); background: var(--panel); color: var(--text);
+    border-radius: 6px; padding: 10px 16px; font: inherit; font-size: 13.5px; font-weight: 600;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+    transition: border-color .15s, transform .15s, background .15s;
+  }
+  .btn:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #08101d; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn .mono { font-size: 12px; opacity: .8; }
+
+  /* ---------- Animated datapath strip ---------- */
+  .datapath {
+    position: relative; margin-top: 46px; padding: 0 0 0;
+    border-top: 1px solid var(--grid);
+    background: var(--bg);
+  }
+  .datapath-scroll { overflow-x: auto; }
+  .datapath-rail {
+    display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr));
+    min-width: 760px; position: relative;
+  }
+  .dp-stage {
+    padding: 22px 18px 26px; border-right: 1px solid var(--grid); position: relative;
+    min-height: 132px;
+  }
+  .dp-stage:last-child { border-right: none; }
+  .dp-stage .tag {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); letter-spacing: .08em;
+  }
+  .dp-stage .name {
+    font-family: var(--mono); font-weight: 700; font-size: 20px; color: var(--text); margin-top: 4px;
+  }
+  .dp-stage .desc { font-size: 12px; color: var(--text-dim); margin-top: 8px; max-width: 24ch; }
+  .dp-track {
+    position: absolute; left: 0; right: 0; bottom: 14px; height: 26px; overflow: hidden;
+  }
+  .dp-packet {
+    position: absolute; top: 0; left: -140px; width: 118px; height: 26px;
+    background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 4px;
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    animation: dp-flow 6.4s linear infinite;
+    white-space: nowrap;
+  }
+  @keyframes dp-flow {
+    0%   { transform: translateX(0); opacity: 0; }
+    4%   { opacity: 1; }
+    92%  { opacity: 1; }
+    100% { transform: translateX(920px); opacity: 0; }
+  }
+  .dp-stage:nth-child(1) .dp-packet { animation-delay: 0s; }
+  .dp-stage:nth-child(2) .dp-packet { animation-delay: -1.28s; }
+  .dp-stage:nth-child(3) .dp-packet { animation-delay: -2.56s; }
+  .dp-stage:nth-child(4) .dp-packet { animation-delay: -3.84s; }
+  .dp-stage:nth-child(5) .dp-packet { animation-delay: -5.12s; }
+  @media (prefers-reduced-motion: reduce) {
+    .dp-packet { animation: none; left: 16px; opacity: 1; }
+  }
+  .dp-bus {
+    position: absolute; bottom: 26px; left: 0; right: 0; height: 1px;
+    background: repeating-linear-gradient(90deg, var(--grid) 0 6px, transparent 6px 11px);
+  }
+
+  /* ---------- Stat readout ---------- */
+  .readout {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    border-top: 1px solid var(--grid); background: var(--bg);
+  }
+  .readout .stat {
+    padding: 22px 20px; border-right: 1px solid var(--grid); border-bottom: 1px solid var(--grid);
+  }
+  .readout .stat:last-child { border-right: none; }
+  .readout .stat .v {
+    font-family: var(--mono); font-size: 26px; font-weight: 700; color: var(--text);
+    font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+  }
+  .readout .stat .v .unit { font-size: 13px; color: var(--text-dim); font-weight: 500; margin-left: 3px; }
+  .readout .stat .l {
+    font-size: 11.5px; color: var(--text-dim); margin-top: 5px; letter-spacing: .01em;
+  }
+
+  /* ---------- Sections ---------- */
+  section.block { padding: 56px 0; border-bottom: 1px solid var(--grid); }
+  section.block.tight { padding: 48px 0; }
+  .block h2 {
+    font-size: 24px; font-weight: 800; letter-spacing: -0.01em; margin: 0 0 10px;
+  }
+  .block .intro { color: var(--text-dim); max-width: 68ch; margin: 0 0 30px; font-size: 14.5px; }
+
+  /* Stage cards (architecture) */
+  .stage-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--grid); border: 1px solid var(--grid); border-radius: var(--radius); overflow: hidden; }
+  @media (max-width: 860px) { .stage-grid { grid-template-columns: repeat(2, 1fr); } }
+  .stage-card { background: var(--panel); padding: 18px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .stage-card .num { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+  .stage-card h3 { font-family: var(--mono); font-size: 16px; margin: 0; color: var(--accent); font-weight: 700; }
+  .stage-card p { font-size: 12.5px; color: var(--text-dim); margin: 0; line-height: 1.5; }
+  .stage-card .modules { display: flex; flex-wrap: wrap; gap: 5px; margin-top: auto; padding-top: 6px; }
+  .stage-card .modules code {
+    font-size: 10.5px; background: var(--panel-2); border: 1px solid var(--grid); border-radius: 4px;
+    padding: 2px 6px; color: var(--text-dim);
+  }
+
+  /* Verification grid */
+  .vgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  @media (max-width: 860px) { .vgrid { grid-template-columns: repeat(2, 1fr); } }
+  .vcard {
+    background: var(--panel); border: 1px solid var(--grid); border-radius: var(--radius); padding: 16px;
+    box-shadow: var(--shadow);
+  }
+  .vcard .k { font-family: var(--mono); font-size: 21px; font-weight: 700; color: var(--forward); font-variant-numeric: tabular-nums; }
+  .vcard .d { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+
+  /* Hazard strategy comparison */
+  .hz-compare { display: grid; gap: 14px; }
+  .hz-row { display: grid; grid-template-columns: 132px 1fr 64px; align-items: center; gap: 14px; }
+  .hz-row .name { font-family: var(--mono); font-size: 12.5px; color: var(--text-dim); }
+  .hz-bars { display: grid; gap: 5px; }
+  .hz-bar-track { background: var(--panel-2); border: 1px solid var(--grid); border-radius: 4px; height: 20px; position: relative; overflow: hidden; }
+  .hz-bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; }
+  .hz-bar-fill.fwd { background: var(--forward); opacity: .85; }
+  .hz-bar-fill.nofwd { background: var(--stall); opacity: .85; }
+  .hz-row .pct { font-family: var(--mono); font-size: 12.5px; color: var(--stall); text-align: right; font-weight: 700; }
+  .hz-legend { display: flex; gap: 18px; font-size: 11.5px; color: var(--text-dim); margin-top: 4px; }
+  .hz-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .hz-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+  /* Benchmarks table */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--grid); border-radius: var(--radius); background: var(--panel); }
+  table.bench { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 520px; }
+  table.bench th, table.bench td { padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--grid); }
+  table.bench th { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); font-weight: 600; }
+  table.bench td { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  table.bench td.desc { font-family: var(--sans); color: var(--text-dim); font-size: 12.5px; }
+  table.bench tr:last-child td { border-bottom: none; }
+  table.bench td.ipc { color: var(--accent); font-weight: 700; }
+
+  /* Toolchain */
+  .tool-list { display: grid; gap: 10px; }
+  .tool-item { display: grid; grid-template-columns: 20px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--grid); }
+  .tool-item:last-child { border-bottom: none; }
+  .tool-item .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; }
+  .tool-item .dot.done { background: var(--forward); }
+  .tool-item .dot.wip { background: var(--stall); }
+  .tool-item .t { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text); }
+  .tool-item .s { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+  .status-pill { font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; padding: 2px 7px; border-radius: 999px; margin-left: 8px; position: relative; top: -1px; }
+  .status-pill.done { background: var(--forward-soft); color: var(--forward); }
+  .status-pill.wip { background: var(--stall-soft); color: var(--stall); }
+
+  /* ---------- Trace viewer (existing tool, restyled) ---------- */
+  .viewer-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
+  .transport {
+    position: sticky; top: 12px; z-index: 5;
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--grid); border-radius: var(--radius);
+    padding: 10px 14px; box-shadow: var(--shadow); margin-bottom: 18px;
+    flex-wrap: wrap;
+  }
+  .transport .btn { padding: 6px 10px; font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  .cyc-label {
+    font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; color: var(--text-dim);
+    min-width: 84px; text-align: center;
+  }
+  .cyc-label b { color: var(--text); font-weight: 650; }
+  input[type="range"] { flex: 1 1 160px; min-width: 140px; accent-color: var(--accent); cursor: pointer; }
+  .spacer { flex: 1 1 auto; }
+  .prog-label { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--grid); border-radius: var(--radius);
+    box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden;
+  }
+  .panel h2 {
+    font-size: 11px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase;
+    color: var(--text-dim); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--grid);
+    display: flex; align-items: center; gap: 8px; justify-content: space-between;
+  }
+  .legend { display: flex; gap: 12px; font-size: 10.5px; letter-spacing: 0.02em; text-transform: none; font-weight: 500; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; color: var(--text-dim); }
+  .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+  .timeline-scroll { overflow-x: auto; }
+  .timeline { display: grid; grid-auto-columns: 108px; grid-auto-flow: column; width: max-content; }
+  .stage-col { display: grid; grid-template-rows: 28px repeat(5, 58px); }
+  .stage-col.sticky-labels {
+    position: sticky; left: 0; z-index: 2; background: var(--panel);
+    grid-auto-columns: 84px; border-right: 1px solid var(--grid);
+  }
+  .stage-col.sticky-labels .cell { grid-column: auto; }
+  .head-cell {
+    font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-dim);
+    display: flex; align-items: center; justify-content: center; border-bottom: 1px solid var(--grid);
+    border-left: 1px solid var(--grid);
+  }
+  .stage-col.sticky-labels .head-cell { border-left: none; color: var(--text-dim); font-family: var(--sans); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .06em; }
+  .cell {
+    border-left: 1px solid var(--grid); border-bottom: 1px solid var(--grid);
+    padding: 6px 7px; font-family: var(--mono); font-size: 11px; display: flex; flex-direction: column;
+    justify-content: center; gap: 2px; cursor: pointer; color: var(--text);
+  }
+  .stage-col.sticky-labels .cell { font-family: var(--sans); font-size: 11px; font-weight: 600; color: var(--text-dim); justify-content: center; border-left: none; }
+  .cell .pc { color: var(--text-dim); font-size: 10px; }
+  .cell .mn { font-weight: 600; }
+  .cell.dim .mn, .cell.dim .pc { color: var(--text-dim); font-weight: 400; }
+  .cell.cur-col { background: var(--accent-soft); }
+  .cell.stall { background: var(--stall-soft); box-shadow: inset 0 0 0 1.5px var(--stall); }
+  .cell.squash { background: var(--squash-soft); }
+  .cell.squash .mn { color: var(--squash); }
+  .cell.branch .mn { color: var(--branch); }
+  .badge { font-size: 9px; font-weight: 700; letter-spacing: .03em; padding: 1px 4px; border-radius: 3px; width: fit-content; text-transform: uppercase; }
+  .badge.fwd { background: var(--forward-soft); color: var(--forward); }
+  .badge.stallb { background: var(--stall-soft); color: var(--stall); }
+  .badge.branchb { background: var(--branch-soft); color: var(--branch); }
+
+  .detail-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 18px; }
+  @media (max-width: 860px) { .detail-grid { grid-template-columns: 1fr; } }
+  .stage-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding: 14px 16px; }
+  @media (max-width: 700px) { .stage-cards { grid-template-columns: repeat(2, 1fr); } }
+  .scard { background: var(--panel-2); border: 1px solid var(--grid); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 4px; min-height: 74px; }
+  .scard .label { font-size: 9.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
+  .scard .mn { font-family: var(--mono); font-size: 12px; font-weight: 600; text-wrap: balance; }
+  .scard .pc { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); }
+  .scard.flag-stall { box-shadow: inset 0 0 0 1.5px var(--stall); }
+  .scard.flag-squash { box-shadow: inset 0 0 0 1.5px var(--squash); background: var(--squash-soft); }
+  .scard.flag-branch { box-shadow: inset 0 0 0 1.5px var(--branch); background: var(--branch-soft); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 14px; }
+  .chip { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--grid); color: var(--text-dim); background: var(--panel-2); }
+  .chip.on { color: #fff; border-color: transparent; }
+  .chip.on.stallc { background: var(--stall); }
+  .chip.on.squashc { background: var(--squash); }
+  .chip.on.branchc { background: var(--branch); }
+  .chip.on.fwdc { background: var(--forward); }
+
+  .regs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--grid); border: 1px solid var(--grid); border-radius: 6px; overflow: hidden; margin: 14px 16px 16px; }
+  .reg { background: var(--panel); padding: 5px 8px; display: flex; justify-content: space-between; align-items: baseline; font-family: var(--mono); font-size: 11px; transition: background .5s, color .5s; }
+  .reg .rn { color: var(--text-dim); }
+  .reg .rv { font-variant-numeric: tabular-nums; }
+  .reg.flash { background: var(--forward-soft); }
+  .reg.flash .rv { color: var(--forward); font-weight: 700; }
+
+  footer.site {
+    padding: 40px 0 56px;
+  }
+  footer.site .row { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  footer.site p { font-size: 12.5px; color: var(--text-dim); max-width: 60ch; margin: 0; }
+  footer.site .mark { font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="hero">
+  <div class="shell hero-inner">
+    <p class="eyebrow">RV32IM · Verilog · Icarus-verified</p>
+    <h1>A 5-stage pipelined<br>RISC-V core, <em>proven</em><br>signal by signal.</h1>
+    <p class="lede">
+      In-order Fetch&nbsp;→ Decode&nbsp;→ Execute&nbsp;→ Memory&nbsp;→ Writeback, with hardware
+      forwarding, hazard detection, a real multi-cycle divider, and machine-mode CSRs/exceptions —
+      checked against an independent instruction-set simulator, not just directed tests.
+      Every number on this page, including the trace viewer at the bottom, is read directly off
+      <code>design/riscvpipeline.v</code> in simulation. Nothing here is illustrated.
+    </p>
+    <div class="hero-actions">
+      <a class="btn primary" href="#viewer">Watch it execute →</a>
+      <a class="btn" href="#verification">Verification evidence</a>
+    </div>
+  </div>
+
+  <div class="datapath">
+    <div class="datapath-scroll">
+      <div class="datapath-rail" aria-hidden="true">
+        <div class="dp-stage">
+          <div class="tag">01</div>
+          <div class="name">IF</div>
+          <div class="desc">PC-driven instruction fetch</div>
+          <div class="dp-bus"></div>
+          <div class="dp-track"><div class="dp-packet">addi x1,x0,5</div></div>
+        </div>
+        <div class="dp-stage">
+          <div class="tag">02</div>
+          <div class="name">ID</div>
+          <div class="desc">Decode, regfile read, hazard check</div>
+          <div class="dp-bus"></div>
+          <div class="dp-track"><div class="dp-packet">add x3,x1,x2</div></div>
+        </div>
+        <div class="dp-stage">
+          <div class="tag">03</div>
+          <div class="name">EX</div>
+          <div class="desc">ALU / branch / forwarding muxes</div>
+          <div class="dp-bus"></div>
+          <div class="dp-track"><div class="dp-packet">sw x3,0(x5)</div></div>
+        </div>
+        <div class="dp-stage">
+          <div class="tag">04</div>
+          <div class="name">MEM</div>
+          <div class="desc">Synchronous-read BRAM access</div>
+          <div class="dp-bus"></div>
+          <div class="dp-track"><div class="dp-packet">lw x6,0(x5)</div></div>
+        </div>
+        <div class="dp-stage">
+          <div class="tag">05</div>
+          <div class="name">WB</div>
+          <div class="desc">Register-file writeback mux</div>
+          <div class="dp-bus"></div>
+          <div class="dp-track"><div class="dp-packet">beq x1,x1,+12</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="readout">
+    <div class="stat"><div class="v">25<span class="unit">/25</span></div><div class="l">directed tests passing</div></div>
+    <div class="stat"><div class="v">136<span class="unit">/136</span></div><div class="l">assertion checks passing</div></div>
+    <div class="stat"><div class="v">350<span class="unit">+</span></div><div class="l">random programs vs. reference ISS</div></div>
+    <div class="stat"><div class="v">16</div><div class="l">ADRs — every real bug documented</div></div>
+    <div class="stat"><div class="v">0</div><div class="l">iverilog -Wall warnings</div></div>
+  </div>
+</div>
+
+<div class="shell">
+
+  <section class="block" id="architecture">
+    <h2>Five stages, real interlocks</h2>
+    <p class="intro">
+      Separated by four pipeline registers (<code>reg1</code>–<code>reg4</code>). Hazards are handled
+      in hardware, not papered over in software: a forwarding unit resolves most RAW hazards in the
+      same cycle, a hazard-detection unit stalls the one case forwarding can't fix (load-use), and
+      control hazards flush speculatively-fetched instructions on a resolved branch or trap.
+    </p>
+    <div class="stage-grid">
+      <div class="stage-card">
+        <div class="num">01</div>
+        <h3>IF</h3>
+        <p>Program counter drives instruction memory. Redirected on taken branches, jumps, and trap/mret targets.</p>
+        <div class="modules"><code>PC.v</code><code>InstructionMemory.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">02</div>
+        <h3>ID</h3>
+        <p>Instruction decode, register-file read, immediate generation, and hazard detection all happen here.</p>
+        <div class="modules"><code>Control.v</code><code>Hazard.v</code><code>ImmGen.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">03</div>
+        <h3>EX</h3>
+        <p>ALU, branch resolution, and the forwarding muxes that short-circuit EX/MEM and MEM/WB results back in.</p>
+        <div class="modules"><code>ALU.v</code><code>Forward.v</code><code>Divider.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">04</div>
+        <h3>MEM</h3>
+        <p>Synchronous-read BRAM-style data memory, byte/halfword/word aligned, with its own retimed interlock.</p>
+        <div class="modules"><code>DataMemoryBRAM.v</code></div>
+      </div>
+      <div class="stage-card">
+        <div class="num">05</div>
+        <h3>WB</h3>
+        <p>Selects ALU result, memory data, or PC+4 (for <code>jal</code>/<code>jalr</code>) back into the register file.</p>
+        <div class="modules"><code>Register.v</code><code>Mux4to1.v</code></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block tight" id="verification">
+    <h2>Verification, not vibes</h2>
+    <p class="intro">
+      Directed tests catch what you thought to test for. This core is also cross-checked against
+      <code>sim/tools/iss.py</code>, an independent instruction-set simulator with no shared code path
+      to the RTL — constrained-random programs run on both, and any divergence is a real bug.
+      That process alone has found and fixed a dozen-plus RTL bugs that no directed test caught.
+    </p>
+    <div class="vgrid">
+      <div class="vcard"><div class="k">Directed suite</div><div class="d">25 self-checking tests, 136 checks — ISA coverage, forwarding, hazards, CSR/exception handling, branch resolution.</div></div>
+      <div class="vcard"><div class="k">Random cross-check</div><div class="d">350+ constrained-random programs matched bit-for-bit against the independent ISS reference model.</div></div>
+      <div class="vcard"><div class="k">RTL assertions</div><div class="d">4 embedded invariants (forwarding-select legality, stall/flush consistency, x0 hard-wired to zero, store-forwarding correctness) — verified to actually fire by deliberately reintroducing the bug each one guards against.</div></div>
+      <div class="vcard"><div class="k">Functional coverage</div><div class="d">Per-opcode / per-branch-direction counters closed a real gap: <code>bne</code> was untested by any directed program until coverage caught it.</div></div>
+    </div>
+  </section>
+
+  <section class="block tight" id="hazards">
+    <h2>Forwarding is measured, not assumed</h2>
+    <p class="intro">
+      The hazard unit is swappable at elaboration time (<code>HAZARD_STRATEGY</code> parameter,
+      zero cost when unused) between the default forwarding unit and <code>HazardNoForward.v</code>,
+      which stalls on every RAW hazard instead. Running the benchmark kernels under both quantifies
+      exactly what forwarding buys this core.
+    </p>
+    <div class="hz-compare">
+      <div class="hz-legend">
+        <span><i style="background:var(--forward)"></i>with forwarding</span>
+        <span><i style="background:var(--stall)"></i>stall-only</span>
+      </div>
+      <div class="hz-row">
+        <div class="name">bench_fib</div>
+        <div class="hz-bars">
+          <div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:69.8%"></div></div>
+          <div class="hz-bar-track"><div class="hz-bar-fill nofwd" style="width:100%"></div></div>
+        </div>
+        <div class="pct">+43.3%</div>
+      </div>
+      <div class="hz-row">
+        <div class="name">bench_bubble_sort</div>
+        <div class="hz-bars">
+          <div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:73.5%"></div></div>
+          <div class="hz-bar-track"><div class="hz-bar-fill nofwd" style="width:100%"></div></div>
+        </div>
+        <div class="pct">+36.1%</div>
+      </div>
+      <div class="hz-row">
+        <div class="name">bench_sum_array</div>
+        <div class="hz-bars">
+          <div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:76.5%"></div></div>
+          <div class="hz-bar-track"><div class="hz-bar-fill nofwd" style="width:100%"></div></div>
+        </div>
+        <div class="pct">+30.8%</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block tight" id="benchmarks">
+    <h2>Benchmark kernels</h2>
+    <p class="intro">
+      Three hand-written kernels in this core's own assembly dialect — ALU/branch-heavy, memory-load-heavy,
+      and mixed-with-a-data-dependent-branch respectively — cross-checked against the ISS before their
+      cycle counts are trusted, then measured on real RTL via <code>sim/tb/bench_template.v</code>'s
+      generic halt detection.
+    </p>
+    <div class="tbl-wrap">
+      <table class="bench">
+        <thead><tr><th>Kernel</th><th>Character</th><th>IPC</th></tr></thead>
+        <tbody>
+          <tr><td>bench_fib</td><td class="desc">Pure ALU / branch, lowest pipeline overhead</td><td class="ipc">0.716</td></tr>
+          <tr><td>bench_bubble_sort</td><td class="desc">Mixed ALU, memory, and data-dependent branches</td><td class="ipc">0.668</td></tr>
+          <tr><td>bench_sum_array</td><td class="desc">Heaviest load density — lowest IPC, consistent with the MEM-stage retiming interlock</td><td class="ipc">0.639</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="block tight" id="toolchain">
+    <h2>Toolchain &amp; tooling</h2>
+    <p class="intro">
+      Beyond the RTL itself: a full simulation and analysis toolchain, plus real compiled-C support —
+      not just this core's own hand-written assembly dialect.
+    </p>
+    <div class="tool-list">
+      <div class="tool-item"><span class="dot done"></span><div><span class="t">Pipeline trace viewer<span class="status-pill done">shipped</span></span><div class="s">This page's viewer, below — real per-cycle DUT signals, nothing reconstructed.</div></div></div>
+      <div class="tool-item"><span class="dot done"></span><div><span class="t">Independent ISS + step debugger<span class="status-pill done">shipped</span></span><div class="s">Instant single-instruction stepping (<code>step</code>/<code>break</code>/<code>regs</code>/<code>disas</code>) for fast iteration, backed by the same reference model random-testing trusts.</div></div></div>
+      <div class="tool-item"><span class="dot done"></span><div><span class="t">Compiled-C toolchain infrastructure<span class="status-pill done">shipped</span></span><div class="s">Real <code>riscv-none-elf-gcc</code>, a Harvard-architecture linker script, and an ELF→memory-image converter — verified end-to-end on a known-answer smoke test.</div></div></div>
+      <div class="tool-item"><span class="dot wip"></span><div><span class="t">CoreMark / Dhrystone ports<span class="status-pill wip">in progress</span></span><div class="s">Bare-metal ports of both industry-standard benchmarks are underway on top of the toolchain above.</div></div></div>
+      <div class="tool-item"><span class="dot wip"></span><div><span class="t">FPGA bring-up<span class="status-pill wip">in progress</span></span><div class="s">Vendor-neutral top level and constraints template exist (<code>fpga/</code>); real hardware validation is the next open milestone.</div></div></div>
+    </div>
+  </section>
+
+  <section class="block" id="viewer">
+    <div class="viewer-head">
+      <div>
+        <p class="eyebrow">Live from the DUT</p>
+        <h2 style="margin:0;">Pipeline execution trace</h2>
+      </div>
+    </div>
+    <p class="intro" style="margin-top:-14px;">
+      Cycle-accurate replay of <code>sim/programs/demo.s</code> on the real RTL
+      (<code>design/riscvpipeline.v</code>), captured via <code>sim/tb/gen_trace.v</code>. Every field
+      below is a signal read directly off the simulated DUT.
+    </p>
+
+    <div class="transport">
+      <button class="btn" id="btnFirst" title="First cycle">|◀</button>
+      <button class="btn" id="btnStepBack" title="Step back">◀ step</button>
+      <button class="btn primary" id="btnPlay" title="Play / pause">▶ play</button>
+      <button class="btn" id="btnStepFwd" title="Step forward">step ▶</button>
+      <button class="btn" id="btnLast" title="Last cycle">▶|</button>
+      <span class="cyc-label">cycle <b id="cycNum">1</b> / <span id="cycTotal">1</span></span>
+      <input type="range" id="scrub" min="0" max="0" value="0" />
+      <span class="spacer"></span>
+      <span class="prog-label">addi·addi·add·addi·sw·lw·add·beq·(poison×2)·addi·nop×5</span>
+    </div>
+
+    <section class="panel">
+      <h2>
+        Pipeline occupancy
+        <span class="legend">
+          <span><i class="swatch" style="background:var(--accent)"></i>current cycle</span>
+          <span><i class="swatch" style="background:var(--stall)"></i>stall</span>
+          <span><i class="swatch" style="background:var(--squash)"></i>squash / bubble</span>
+          <span><i class="swatch" style="background:var(--branch)"></i>branch taken</span>
+          <span><i class="swatch" style="background:var(--forward)"></i>forwarded operand</span>
+        </span>
+      </h2>
+      <div class="timeline-scroll">
+        <div class="timeline" id="timeline"></div>
+      </div>
+    </section>
+
+    <section class="panel detail-grid">
+      <div>
+        <h2>Stage detail — selected cycle</h2>
+        <div class="stage-cards" id="stageCards"></div>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div>
+        <h2>Register file (reconstructed from real WB writes up to this cycle)</h2>
+        <div class="regs" id="regs"></div>
+      </div>
+    </section>
+
+    <p class="intro" style="margin-top: 8px;">
+      To trace a different program: point <code>gen_trace.v</code>'s <code>INIT_FILE</code> at another
+      <code>sim/programs/*.mem</code>, re-run under Icarus Verilog, and regenerate with
+      <code>sim/tools/build_viewer.py</code>.
+    </p>
+  </section>
+
+</div>
+
+<footer class="site">
+  <div class="shell row">
+    <p>Built with Icarus Verilog. No behavior on this page is fabricated — the datapath animation in
+    the hero is decorative, but every stat, benchmark number, and trace cycle below it is read from
+    an actual simulation run.</p>
+    <span class="mark">design/riscvpipeline.v</span>
+  </div>
+</footer>
+
+<script>
+const TRACE = [{"cycle": 1, "if": {"pc": 0, "inst": "addi x1,x0,5"}, "id": {"pc": 0, "inst": "—", "stall": false, "flush": false}, "ex": {"pc": 0, "inst": "—", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": false}, "wb": {"dest": 0, "val": 0, "regWrite": false}}, {"cycle": 2, "if": {"pc": 4, "inst": "addi x2,x0,3"}, "id": {"pc": 0, "inst": "addi x1,x0,5", "stall": false, "flush": false}, "ex": {"pc": 0, "inst": "—", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": false}, "wb": {"dest": 0, "val": 0, "regWrite": false}}, {"cycle": 3, "if": {"pc": 8, "inst": "add x3,x1,x2"}, "id": {"pc": 4, "inst": "addi x2,x0,3", "stall": false, "flush": false}, "ex": {"pc": 0, "inst": "addi x1,x0,5", "branchTaken": false, "jump": false, "aluOut": 5, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": false}, "wb": {"dest": 0, "val": 0, "regWrite": false}}, {"cycle": 4, "if": {"pc": 12, "inst": "addi x5,x0,20"}, "id": {"pc": 8, "inst": "add x3,x1,x2", "stall": false, "flush": false}, "ex": {"pc": 4, "inst": "addi x2,x0,3", "branchTaken": false, "jump": false, "aluOut": 3, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 5, "dest": 1, "regWrite": true}, "wb": {"dest": 0, "val": 0, "regWrite": false}}, {"cycle": 5, "if": {"pc": 16, "inst": "sw x3,0(x5)"}, "id": {"pc": 12, "inst": "addi x5,x0,20", "stall": false, "flush": false}, "ex": {"pc": 8, "inst": "add x3,x1,x2", "branchTaken": false, "jump": false, "aluOut": 8, "fwdA": 1, "fwdB": 2}, "mem": {"we": false, "re": false, "addr": 3, "dest": 2, "regWrite": true}, "wb": {"dest": 1, "val": 5, "regWrite": true}}, {"cycle": 6, "if": {"pc": 20, "inst": "lw x6,0(x5)"}, "id": {"pc": 16, "inst": "sw x3,0(x5)", "stall": false, "flush": false}, "ex": {"pc": 12, "inst": "addi x5,x0,20", "branchTaken": false, "jump": false, "aluOut": 20, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 8, "dest": 3, "regWrite": true}, "wb": {"dest": 2, "val": 3, "regWrite": true}}, {"cycle": 7, "if": {"pc": 24, "inst": "add x7,x6,x6"}, "id": {"pc": 20, "inst": "lw x6,0(x5)", "stall": false, "flush": false}, "ex": {"pc": 16, "inst": "sw x3,0(x5)", "branchTaken": false, "jump": false, "aluOut": 20, "fwdA": 2, "fwdB": 1}, "mem": {"we": false, "re": false, "addr": 20, "dest": 5, "regWrite": true}, "wb": {"dest": 3, "val": 8, "regWrite": true}}, {"cycle": 8, "if": {"pc": 28, "inst": "beq x1,x1,+12"}, "id": {"pc": 24, "inst": "add x7,x6,x6", "stall": true, "flush": true}, "ex": {"pc": 20, "inst": "lw x6,0(x5)", "branchTaken": false, "jump": false, "aluOut": 20, "fwdA": 1, "fwdB": 0}, "mem": {"we": true, "re": false, "addr": 20, "dest": 0, "regWrite": false}, "wb": {"dest": 5, "val": 20, "regWrite": true}}, {"cycle": 9, "if": {"pc": 28, "inst": "beq x1,x1,+12"}, "id": {"pc": 24, "inst": "add x7,x6,x6", "stall": false, "flush": false}, "ex": {"pc": 24, "inst": "add x7,x6,x6", "branchTaken": false, "jump": false, "aluOut": 40, "fwdA": 2, "fwdB": 2}, "mem": {"we": false, "re": true, "addr": 20, "dest": 6, "regWrite": true}, "wb": {"dest": 0, "val": 20, "regWrite": false}}, {"cycle": 10, "if": {"pc": 32, "inst": "addi x8,x0,999"}, "id": {"pc": 28, "inst": "beq x1,x1,+12", "stall": false, "flush": false}, "ex": {"pc": 24, "inst": "add x7,x6,x6", "branchTaken": false, "jump": false, "aluOut": 16, "fwdA": 1, "fwdB": 1}, "mem": {"we": false, "re": false, "addr": 40, "dest": 0, "regWrite": false}, "wb": {"dest": 6, "val": 8, "regWrite": true}}, {"cycle": 11, "if": {"pc": 36, "inst": "addi x8,x0,888"}, "id": {"pc": 32, "inst": "addi x8,x0,999", "stall": false, "flush": false}, "ex": {"pc": 28, "inst": "beq x1,x1,+12", "branchTaken": true, "jump": false, "aluOut": 5, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 16, "dest": 7, "regWrite": true}, "wb": {"dest": 0, "val": 40, "regWrite": false}}, {"cycle": 12, "if": {"pc": 40, "inst": "addi x8,x0,42"}, "id": {"pc": 0, "inst": "nop", "stall": false, "flush": false}, "ex": {"pc": 0, "inst": "nop", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 5, "dest": 12, "regWrite": false}, "wb": {"dest": 7, "val": 16, "regWrite": true}}, {"cycle": 13, "if": {"pc": 44, "inst": "nop"}, "id": {"pc": 40, "inst": "addi x8,x0,42", "stall": false, "flush": false}, "ex": {"pc": 0, "inst": "nop", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": false}, "wb": {"dest": 12, "val": 5, "regWrite": false}}, {"cycle": 14, "if": {"pc": 48, "inst": "nop"}, "id": {"pc": 44, "inst": "nop", "stall": false, "flush": false}, "ex": {"pc": 40, "inst": "addi x8,x0,42", "branchTaken": false, "jump": false, "aluOut": 42, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": true}, "wb": {"dest": 0, "val": 0, "regWrite": false}}, {"cycle": 15, "if": {"pc": 52, "inst": "nop"}, "id": {"pc": 48, "inst": "nop", "stall": false, "flush": false}, "ex": {"pc": 44, "inst": "nop", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 42, "dest": 8, "regWrite": true}, "wb": {"dest": 0, "val": 0, "regWrite": true}}, {"cycle": 16, "if": {"pc": 56, "inst": "nop"}, "id": {"pc": 52, "inst": "nop", "stall": false, "flush": false}, "ex": {"pc": 48, "inst": "nop", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": true}, "wb": {"dest": 8, "val": 42, "regWrite": true}}, {"cycle": 17, "if": {"pc": 60, "inst": "nop"}, "id": {"pc": 56, "inst": "nop", "stall": false, "flush": false}, "ex": {"pc": 52, "inst": "nop", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": true}, "wb": {"dest": 0, "val": 0, "regWrite": true}}, {"cycle": 18, "if": {"pc": 64, "inst": "—"}, "id": {"pc": 60, "inst": "nop", "stall": false, "flush": false}, "ex": {"pc": 56, "inst": "nop", "branchTaken": false, "jump": false, "aluOut": 0, "fwdA": 0, "fwdB": 0}, "mem": {"we": false, "re": false, "addr": 0, "dest": 0, "regWrite": true}, "wb": {"dest": 0, "val": 0, "regWrite": true}}];
+
+const STAGES = ["if", "id", "ex", "mem", "wb"];
+const STAGE_LABELS = { if: "IF", id: "ID", ex: "EX", mem: "MEM", wb: "WB" };
+const FWD_LABEL = ["—", "MEM/WB", "EX/MEM", "—"];
+
+let idx = 0;
+let playing = false;
+let timer = null;
+
+function initialRegs() {
+  const r = new Array(32).fill(0);
+  r[2] = 128; // sp reset default, see design/Register.v
+  return r;
+}
+
+function regsUpTo(i) {
+  const r = initialRegs();
+  for (let k = 0; k <= i; k++) {
+    const wb = TRACE[k].wb;
+    if (wb.regWrite && wb.dest !== 0) r[wb.dest] = wb.val;
+  }
+  return r;
+}
+
+function buildTimeline() {
+  const el = document.getElementById("timeline");
+  el.innerHTML = "";
+
+  const labelCol = document.createElement("div");
+  labelCol.className = "stage-col sticky-labels";
+  const headBlank = document.createElement("div");
+  headBlank.className = "head-cell";
+  headBlank.textContent = "cyc";
+  labelCol.appendChild(headBlank);
+  STAGES.forEach(s => {
+    const c = document.createElement("div");
+    c.className = "cell";
+    c.textContent = STAGE_LABELS[s];
+    labelCol.appendChild(c);
+  });
+  el.appendChild(labelCol);
+
+  TRACE.forEach((row, i) => {
+    const col = document.createElement("div");
+    col.className = "stage-col";
+    col.dataset.idx = i;
+
+    const head = document.createElement("div");
+    head.className = "head-cell";
+    head.textContent = row.cycle;
+    col.appendChild(head);
+
+    STAGES.forEach(s => {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      cell.dataset.idx = i;
+      const data = row[s];
+
+      if (s === "mem" || s === "wb") {
+        if (data.regWrite && (s === "wb" ? data.dest !== 0 : true)) {
+          const mn = document.createElement("div");
+          mn.className = "mn";
+          mn.textContent = s === "wb" ? `x${data.dest} ← ${data.val}` : `x${data.dest} ← ...`;
+          cell.appendChild(mn);
+          if (s === "mem") {
+            const pc = document.createElement("div");
+            pc.className = "pc";
+            pc.textContent = row.mem.we ? `store → ${row.mem.addr}` : row.mem.re ? `load ← ${row.mem.addr}` : "alu result";
+            cell.appendChild(pc);
+          }
+        } else {
+          cell.classList.add("dim");
+          const mn = document.createElement("div");
+          mn.className = "mn";
+          mn.textContent = "—";
+          cell.appendChild(mn);
+        }
+      } else {
+        const pc = document.createElement("div");
+        pc.className = "pc";
+        pc.textContent = "pc " + data.pc;
+        const mn = document.createElement("div");
+        mn.className = "mn";
+        mn.textContent = data.inst;
+        if (data.inst === "—" || data.inst === "nop") cell.classList.add("dim");
+        cell.appendChild(pc);
+        cell.appendChild(mn);
+
+        if (s === "id" && data.stall) {
+          cell.classList.add("stall");
+          const b = document.createElement("div");
+          b.className = "badge stallb";
+          b.textContent = "stall";
+          cell.appendChild(b);
+        }
+        if (s === "ex" && data.branchTaken) {
+          cell.classList.add("branch");
+          const b = document.createElement("div");
+          b.className = "badge branchb";
+          b.textContent = "taken";
+          cell.appendChild(b);
+        }
+        if (s === "ex" && (data.fwdA || data.fwdB)) {
+          const b = document.createElement("div");
+          b.className = "badge fwd";
+          const parts = [];
+          if (data.fwdA) parts.push("A:" + FWD_LABEL[data.fwdA]);
+          if (data.fwdB) parts.push("B:" + FWD_LABEL[data.fwdB]);
+          b.textContent = parts.join(" ");
+          cell.appendChild(b);
+        }
+        if (s === "id" && data.inst === "nop" && i > 0 && (TRACE[i - 1].id.stall || TRACE[i - 1].ex.branchTaken)) {
+          cell.classList.add("squash");
+        }
+      }
+
+      cell.addEventListener("click", () => { idx = i; render(); });
+      col.appendChild(cell);
+    });
+
+    el.appendChild(col);
+  });
+}
+
+function render() {
+  document.querySelectorAll(".cell[data-idx]").forEach(c => {
+    c.classList.toggle("cur-col", Number(c.dataset.idx) === idx);
+  });
+  const active = document.querySelector(`.stage-col[data-idx="${idx}"]`);
+  if (active) active.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+
+  document.getElementById("cycNum").textContent = TRACE[idx].cycle;
+  document.getElementById("scrub").value = idx;
+
+  const row = TRACE[idx];
+  const cardsEl = document.getElementById("stageCards");
+  cardsEl.innerHTML = "";
+  STAGES.forEach(s => {
+    const data = row[s];
+    const card = document.createElement("div");
+    card.className = "scard";
+    if (s === "id" && data.stall) card.classList.add("flag-stall");
+    if (s === "ex" && data.branchTaken) card.classList.add("flag-branch");
+    if (s === "id" && data.inst === "nop" && idx > 0 && (TRACE[idx - 1].id.stall || TRACE[idx - 1].ex.branchTaken)) card.classList.add("flag-squash");
+
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = STAGE_LABELS[s];
+    card.appendChild(label);
+
+    if (s === "mem" || s === "wb") {
+      const mn = document.createElement("div");
+      mn.className = "mn";
+      mn.textContent = data.regWrite ? `x${data.dest} ← ${data.val !== undefined ? data.val : "..."}` : "no writeback";
+      card.appendChild(mn);
+      if (s === "mem" && (row.mem.we || row.mem.re)) {
+        const pc = document.createElement("div");
+        pc.className = "pc";
+        pc.textContent = row.mem.we ? `store → addr ${row.mem.addr}` : `load ← addr ${row.mem.addr}`;
+        card.appendChild(pc);
+      }
+    } else {
+      const mn = document.createElement("div");
+      mn.className = "mn";
+      mn.textContent = data.inst;
+      const pc = document.createElement("div");
+      pc.className = "pc";
+      pc.textContent = "PC " + data.pc + (s === "ex" ? `  ALU=${data.aluOut}` : "");
+      card.appendChild(mn);
+      card.appendChild(pc);
+    }
+    cardsEl.appendChild(card);
+  });
+
+  const chipsEl = document.getElementById("chips");
+  chipsEl.innerHTML = "";
+  const chipDefs = [
+    ["stall", row.id.stall, "stallc"],
+    ["flush", row.id.flush, "squashc"],
+    ["branch taken", row.ex.branchTaken, "branchc"],
+    ["jump", row.ex.jump, "branchc"],
+    ["fwdA " + (row.ex.fwdA ? FWD_LABEL[row.ex.fwdA] : "none"), row.ex.fwdA > 0, "fwdc"],
+    ["fwdB " + (row.ex.fwdB ? FWD_LABEL[row.ex.fwdB] : "none"), row.ex.fwdB > 0, "fwdc"],
+  ];
+  chipDefs.forEach(([label, on, cls]) => {
+    const c = document.createElement("span");
+    c.className = "chip" + (on ? " on " + cls : "");
+    c.textContent = label;
+    chipsEl.appendChild(c);
+  });
+
+  const regs = regsUpTo(idx);
+  const prevRegs = idx > 0 ? regsUpTo(idx - 1) : initialRegs();
+  const regsEl = document.getElementById("regs");
+  regsEl.innerHTML = "";
+  for (let i = 0; i < 32; i++) {
+    const d = document.createElement("div");
+    d.className = "reg" + (regs[i] !== prevRegs[i] ? " flash" : "");
+    const rn = document.createElement("span");
+    rn.className = "rn";
+    rn.textContent = "x" + i;
+    const rv = document.createElement("span");
+    rv.className = "rv";
+    rv.textContent = regs[i];
+    d.appendChild(rn);
+    d.appendChild(rv);
+    regsEl.appendChild(d);
+  }
+}
+
+function step(delta) {
+  idx = Math.max(0, Math.min(TRACE.length - 1, idx + delta));
+  render();
+}
+
+function setPlaying(p) {
+  playing = p;
+  const btn = document.getElementById("btnPlay");
+  btn.textContent = playing ? "❚❚ pause" : "▶ play";
+  if (timer) { clearInterval(timer); timer = null; }
+  if (playing) {
+    timer = setInterval(() => {
+      if (idx >= TRACE.length - 1) { setPlaying(false); return; }
+      step(1);
+    }, 550);
+  }
+}
+
+document.getElementById("btnFirst").addEventListener("click", () => { idx = 0; render(); });
+document.getElementById("btnLast").addEventListener("click", () => { idx = TRACE.length - 1; render(); });
+document.getElementById("btnStepBack").addEventListener("click", () => { setPlaying(false); step(-1); });
+document.getElementById("btnStepFwd").addEventListener("click", () => { setPlaying(false); step(1); });
+document.getElementById("btnPlay").addEventListener("click", () => setPlaying(!playing));
+document.getElementById("scrub").addEventListener("input", (e) => {
+  setPlaying(false);
+  idx = Number(e.target.value);
+  render();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowRight") { setPlaying(false); step(1); }
+  if (e.key === "ArrowLeft") { setPlaying(false); step(-1); }
+  if (e.key === " ") { e.preventDefault(); setPlaying(!playing); }
+});
+
+document.getElementById("cycTotal").textContent = TRACE.length;
+document.getElementById("scrub").max = TRACE.length - 1;
+buildTimeline();
+render();
+</script>
