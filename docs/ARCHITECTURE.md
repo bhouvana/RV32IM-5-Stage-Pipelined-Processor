@@ -76,6 +76,20 @@ verification as the highest-leverage next investment rather than a nice-to-have:
    signal needs checking against everything else sharing its consumer"
    (`docs/adr/0009`, `0013`, `0014`, now this). Found by constrained-random
    cross-checking, not any directed test.
+10. **Three real bugs wiring `PROFILE_6STAGE_SPLIT_FETCH` (variable pipeline
+    depth) into the live pipeline**, all found by actually running
+    constrained-random programs at the new profile, none reasoned out in
+    advance: (a) `reg1` (IF2/ID) stayed paired with `PC.v`'s live `pc_o`
+    instead of the PC that actually fetched its instruction, corrupting
+    every PC-relative computation under the split-fetch profile; (b) a
+    squash-to-0 copied from `reg1.v`'s own pattern without re-deriving
+    whether it applied caused a genuine infinite loop, since `reg1a`'s
+    output — unlike `reg1`'s — is used as a real instruction-memory read
+    address every cycle; (c) the first fix for (b), squashing to
+    `redirect_target` instead, duplicated the target fetch one cycle later.
+    The actual fix extends `reg1`'s own squash window by one cycle instead
+    of giving `reg1a` any squash logic at all. See
+    `docs/adr/0018-variable-pipeline-depth.md`.
 
 Also implemented in this pass: `jal` (previously decoded but functionally
 inert, §11) is now fully wired -- target, link value, and forwarding
@@ -131,20 +145,22 @@ This matches the diagram in [README.md](../README.md) but adds the two feedback 
 
 | Module | File | Parameterized? | Role |
 |---|---|---|---|
-| `PIPELINED` | `riscvpipeline.v` | `INIT_FILE`, `MEM_SIZE_BYTES`, `XLEN`, `NUM_REGS` (`docs/adr/0012`, `0015`) | Top-level integration |
+| `PIPELINED` | `riscvpipeline.v` | `INIT_FILE`, `MEM_SIZE_BYTES`, `XLEN`, `NUM_REGS`, `HAZARD_STRATEGY`, `PIPELINE_PROFILE` (`docs/adr/0012`, `0015`, `0016`, `0018`) | Top-level integration |
 | `PC` | `PC.v` | `XLEN` (`docs/adr/0015`) | Program counter register, stall-holds |
 | `Adder` | `Adder.v` | `XLEN` (`docs/adr/0015`) | Generic add; reused for PC+4 and branch target |
-| `InstructionMemory` | `InstructionMemory.v` | `SIZE_BYTES`, `XLEN` (`docs/adr/0012`, `0015`) | Instruction ROM (default 128 bytes), `$readmemb`-loaded |
-| `reg1` | `reg1.v` | `XLEN` (`docs/adr/0015`) | IF/ID register; also does branch-squash and stall-hold |
+| `reg1a` | `reg1a.v` | `XLEN` (`docs/adr/0018`) | IF1/IF2 relay register, only instantiated under `PIPELINE_PROFILE=PROFILE_6STAGE_SPLIT_FETCH`; unconditional relay, no squash logic of its own (see `docs/adr/0018`'s Design for why) |
+| `InstructionMemory` | `InstructionMemory.v` | `SIZE_BYTES`, `XLEN` (`docs/adr/0012`, `0015`) | Instruction ROM (default 128 bytes), `$readmemb`-loaded; reads `reg1a`'s output instead of `PC.v`'s `pc_o` under the split-fetch profile |
+| `reg1` | `reg1.v` | `XLEN` (`docs/adr/0015`) | IF/ID register; also does branch-squash and stall-hold. Under `PROFILE_6STAGE_SPLIT_FETCH`, its own squash window is extended one extra cycle (`redirect_squash_extend_r`, `docs/adr/0018`) instead of `reg1a` squashing |
 | `Control` | `Control.v` | No (operates on fixed instruction-encoding field widths, not XLEN — see `docs/adr/0015`) | Main decoder (opcode → control signals) |
 | `ImmGen` | `ImmGen.v` | `Width` (now genuinely driven by `XLEN`, `docs/adr/0015`) | Immediate extraction |
 | `Register` | `Register.v` | `XLEN`, `NUM_REGS`, `SP_INIT` (`docs/adr/0015`) | Register file (default 32×32), `x0` hardwired, `sp` reset now wired to `MEM_SIZE_BYTES` |
-| `Hazard` | `Hazard.v` | `NUM_REGS` (`docs/adr/0015`) | Load-use RAW hazard → stall/flush. Default strategy (`HAZARD_STRATEGY=0`, `docs/adr/0016`) |
-| `HazardNoForward` | `HazardNoForward.v` | `NUM_REGS` (`docs/adr/0015`) | Alternate strategy (`HAZARD_STRATEGY=1`, `docs/adr/0016`): stalls on every RAW hazard instead of forwarding |
+| `Hazard` | `Hazard.v` | `NUM_REGS` (`docs/adr/0015`), `NUM_LOOKAHEAD` (default 1, `docs/adr/0018`) | Load-use RAW hazard → stall/flush. Default strategy (`HAZARD_STRATEGY=0`, `docs/adr/0016`). `NUM_LOOKAHEAD` is infrastructure only, not exercised above its default by any shipped profile |
+| `HazardNoForward` | `HazardNoForward.v` | `NUM_REGS` (`docs/adr/0015`) | Alternate strategy (`HAZARD_STRATEGY=1`, `docs/adr/0016`): stalls on every RAW hazard instead of forwarding. Deliberately not generalized alongside `Hazard.v` (`docs/adr/0018`) |
 | `reg2` | `reg2.v` | `XLEN`, `NUM_REGS` (`docs/adr/0015`) | ID/EX register; also does branch-squash and load-use bubble |
-| `Forward` | `Forward.v` | `NUM_REGS` (`docs/adr/0015`) | EX/MEM & MEM/WB forwarding priority logic |
+| `Forward` | `Forward.v` | `NUM_REGS` (`docs/adr/0015`), `NUM_FWD_SRC` (default 2, `docs/adr/0018`) | EX/MEM & MEM/WB forwarding priority logic, generalized to a flattened farthest-producer-first bus + priority-encode loop. `NUM_FWD_SRC` is infrastructure only, not exercised above its default by any shipped profile |
 | `ShiftLeftOne` | `ShiftLeftOne.v` | No | `imm << 1` for branch target |
-| `Mux4to1` | `Mux4to1.v` | `size` | ALU operand forwarding mux (only 3 of 4 select codes used) |
+| `Mux4to1` | `Mux4to1.v` | `size` | Lui/auipc ALU-A-operand select mux (only 3 of 4 select codes used); no longer used for forwarding, see `MuxN` |
+| `MuxN` | `MuxN.v` | `size`, `NUM_SRC` (`docs/adr/0018`) | Generalized forwarding mux, replaces the two forwarding `Mux4to1` instances; `NUM_SRC` mirrors `Forward.v`'s `NUM_FWD_SRC` |
 | `Mux2to1` | `Mux2to1.v` | `size` | Generic 2:1 mux, reused 3× (PC select, ALU-B select, WB select) |
 | `ALUCtrl` | `ALUCtrl.v` | No (control-encoding widths, not XLEN) | ALUOp + funct3/funct7 → 5-bit ALU opcode |
 | `ALU` | `ALU.v` | `XLEN` (`docs/adr/0015`) | Execute unit; also computes branch conditions |
