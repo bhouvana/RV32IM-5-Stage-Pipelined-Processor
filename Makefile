@@ -5,7 +5,7 @@
 PROGRAMS := $(wildcard sim/programs/*.s)
 MEMS     := $(PROGRAMS:.s=.mem)
 
-.PHONY: test lint clean viewer random-test coverage
+.PHONY: test lint clean viewer random-test coverage debug
 
 test: $(MEMS)
 	@bash sim/run_tests.sh
@@ -39,3 +39,10 @@ random-test:
 # Functional coverage across the directed suite (docs/ROADMAP.md V-5, docs/adr/0010).
 coverage:
 	python sim/tools/coverage_report.py
+
+# Interactive step debugger (docs/ROADMAP.md Phase 8) -- runs the ISS
+# reference model, not the RTL, so stepping is instant but doesn't reflect
+# pipeline-specific timing (see sim/tools/debugger.py's docstring, and the
+# cycle-accurate `viewer` target above for that). Pass PROGRAM=path/to/foo.s.
+debug:
+	python sim/tools/debugger.py $(PROGRAM)

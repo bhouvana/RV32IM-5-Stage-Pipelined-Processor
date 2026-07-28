@@ -72,6 +72,10 @@ Scaffolding (`docs/adr/0012-fpga-readiness.md`): memory sizes are now `parameter
 
 Instruction trace generator and binary loader are natural byproducts of V-1; the rest (profiler, interactive debugger, benchmark runner) are downstream of Phases 3–4 existing.
 
+Interactive debugger: ✅ Done, `sim/tools/debugger.py` — a step debugger built directly on `sim/tools/iss.py` (instant single-instruction stepping, no Verilog simulator round-trip; architectural state only, same scope `iss.py` itself has, not cycle-accurate pipeline timing — that's `build_viewer.py`'s job). `step`/`continue`/`break`/`regs`/`mem`/`csr`/`disas`/`history`/`restart`. Takes a `.s` (assembled on the fly) or pre-assembled `.mem` file; `make debug PROGRAM=path/to/foo.s`. Along the way, extracted a shared `sim/tools/disasm.py` (RV32I+M+CSR/SYSTEM, this core's custom `ble`/`bgt`/`ctz`) out of `gen_trace.py`'s previously-incomplete, non-reusable local copy — fixed a real latent bug in the process: `gen_trace.py`'s old disassembler only checked instruction bit 30 to distinguish add/sub, so any RV32M instruction (`mul`/`div`/etc., funct7=`0000001`, bit 30=0) silently misdisassembled as `add`/`sll`/etc. in the pipeline viewer; CSR/SYSTEM instructions weren't recognized at all. Pure tooling change, no ADR per this file's own "purely additive tooling doesn't need one" rule — verified directly (disassembly smoke tests for `mul`/`csrrw`, full step-through of `load_use_stall.s` reproducing the exact `x8=154` result the directed test itself checks, full end-to-end `viewer` pipeline regenerated without error).
+
+Profiler and benchmark runner remain open (benchmark runner belongs with Phase 10, see below).
+
 ## Phase 9 — Documentation
 
 This audit + this roadmap are the start. Grows incrementally alongside each phase above — resist writing documentation for subsystems that don't exist yet.

@@ -163,6 +163,14 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
     user first). Named parameters, not truly variable at other values —
     RV32I's own encoding fixes a 32-bit instruction word and 5-bit register
     fields regardless.
+12. **Phase 8 tooling**: `sim/tools/debugger.py`, an interactive step
+    debugger built on `sim/tools/iss.py` (instant stepping, architectural
+    state only — not cycle-accurate pipeline timing, that's still
+    `build_viewer.py`'s job). Extracted a shared `sim/tools/disasm.py` out
+    of `gen_trace.py` along the way, fixing a real latent bug: the old
+    disassembler only checked instruction bit 30, so every RV32M
+    instruction silently misdisassembled as `add`/`sll`/etc. in the
+    pipeline viewer. Pure tooling, no ADR (see ROADMAP's own rule for that).
 
 ## Lessons worth not re-learning
 
@@ -271,8 +279,9 @@ bugs. Rebuilt incrementally, in this order (each is a real commit + ADR):
    parameterization prerequisite is done (`docs/adr/0015`), but the actual
    "pluggable subsystems" vision — swappable hazard strategies, variable
    pipeline depth — hasn't been started.
-4. Phase 8 (tooling) and Phase 10 (benchmarking): both essentially not
-   started beyond early building blocks (`asm.py`, `trace_debug.v`).
+4. Phase 8 (tooling): interactive debugger now done (`sim/tools/debugger.py`);
+   a dedicated profiler and benchmark runner are still open. Phase 10
+   (benchmarking) not started.
 5. Real Verilog lint (Verible) — CQ-5 in ROADMAP, still open; the closest
    thing today is `make lint` (just `iverilog -Wall`, catches syntax/width/
    latch issues, not a real style/lint pass).
