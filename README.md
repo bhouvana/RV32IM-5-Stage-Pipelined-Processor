@@ -23,10 +23,6 @@ rule: nothing gets claimed as "done" until it's been run under Icarus Verilog an
 touches RTL behavior, cross-checked against an independent reference simulator. `docs/adr/` has the
 receipts — including every real bug this process has found and fixed.
 
-**[→ Live cycle-accurate pipeline viewer](site/index.html)** — replays a real execution trace with
-stalls, squashes, forwarding, and branch resolution color-coded, straight off DUT signals. Deployable
-as-is (`site/index.html` is fully self-contained, no build step).
-
 ## Contents
 
 - [What this is](#what-this-is)
@@ -217,6 +213,7 @@ docs/
   ARCHITECTURE.md  Full technical audit of the design
   ROADMAP.md       Phased backlog — what's done, what's next, and why
   adr/             One doc per non-trivial design decision, including every real bug found and fixed
+vercel.json      Points a Vercel deployment at site/ (no build step -- index.html is served as-is)
 ```
 
 ## Documentation
