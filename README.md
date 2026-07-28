@@ -113,8 +113,9 @@ interrupt source exists to drive them) remain unimplemented, both by design.
 | Interactive pipeline visualizer | ✅ Complete |
 | Independent-ISS step debugger | ✅ Complete |
 | Compiled-C toolchain (real GCC → this core) | ✅ Infrastructure verified end-to-end |
-| CoreMark / Dhrystone ports | 🚧 In progress |
-| FPGA real-hardware validation | 🚧 Scaffolding done, not yet run on a board |
+| Dhrystone port | ✅ Verified correct — all 6 documented expected values match exactly (462,126 cycles, `Number_Of_Runs=500`) |
+| CoreMark port | 🚧 Correct at reduced size (`TOTAL_DATA_SIZE=400`, 37,323 cycles, no hang) — the standard, citable `TOTAL_DATA_SIZE=2000` configuration hasn't completed a clean run yet |
+| FPGA real-hardware validation | 🚧 Scaffolding hardened (`fpga/build.tcl`, `fpga/README.md`), not yet run against a real toolchain or board |
 
 ## Verification
 
