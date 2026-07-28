@@ -27,8 +27,16 @@ named as a research-platform goal (docs/adr/0016-swappable-hazard-strategy.md):
 HAZARD_STRATEGY=0 (forwarding, the default/original design) and =1
 (stall-only, no forwarding) and reports the cycle-count delta.
 
+--compare-profiles does the same for "compare pipeline depths"
+(docs/adr/0018-variable-pipeline-depth.md, Phase A6): every benchmark under
+both PIPELINE_PROFILE=0 (PROFILE_5STAGE, the default) and =1
+(PROFILE_6STAGE_SPLIT_FETCH, the split-fetch alternate), reporting the
+cycle-count delta -- the honest cost of profile 1's one extra redirect-
+recovery cycle (see docs/adr/0018's Design section), not a hypothetical.
+
 Usage: python bench_runner.py --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-strategies --iverilog-dir /c/iverilog/bin
+       python bench_runner.py --compare-profiles --iverilog-dir /c/iverilog/bin
 """
 import argparse
 import glob
@@ -72,7 +80,7 @@ def load_words(mem_path):
     return words
 
 
-def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0):
+def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
@@ -92,12 +100,13 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
     if expected is not None and iss.regs[10] != expected:
         return None, f"ISS correctness check failed: x10={iss.regs[10]}, expected {expected}"
 
-    # Strategy 1 (stall-only) can only ever take *more* cycles per
-    # instruction than strategy 0 (forwarding) -- generous margin, not
-    # tuned per-strategy.
+    # Neither the stall-only hazard strategy nor the split-fetch pipeline
+    # profile can ever take *fewer* cycles per instruction than the defaults
+    # -- generous margin, not tuned per-strategy/per-profile.
     max_time = (instrs * 60 + 500) * 10
-    dump_v = os.path.join(work_dir, f"{name}_hs{hazard_strategy}.v")
-    out_path = os.path.join(work_dir, f"{name}_hs{hazard_strategy}.out").replace("\\", "/")
+    tag = f"{name}_hs{hazard_strategy}_p{pipeline_profile}"
+    dump_v = os.path.join(work_dir, f"{tag}.v")
+    out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
     with open(template) as f:
         tpl = f.read()
@@ -105,11 +114,12 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
               .replace("__MAX_TIME__", str(max_time))
               .replace("__OUT_FILE__", out_path)
               .replace("__MEM_SIZE__", str(mem_size))
-              .replace("__HAZARD_STRATEGY__", str(hazard_strategy)))
+              .replace("__HAZARD_STRATEGY__", str(hazard_strategy))
+              .replace("__PIPELINE_PROFILE__", str(pipeline_profile)))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
-    vvp_path = os.path.join(work_dir, f"{name}_hs{hazard_strategy}.vvp")
+    vvp_path = os.path.join(work_dir, f"{tag}.vvp")
     iverilog_exe = os.path.join(iverilog_bin, "iverilog.exe") if iverilog_bin else "iverilog"
     vvp_exe = os.path.join(iverilog_bin, "vvp.exe") if iverilog_bin else "vvp"
     r = subprocess.run([iverilog_exe, "-g2005", "-I", "design", "-o", vvp_path, dump_v],
@@ -132,8 +142,14 @@ def main():
     ap.add_argument("--programs-dir", default="sim/benchmarks")
     ap.add_argument("--hazard-strategy", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's HAZARD_STRATEGY (docs/adr/0016): 0=forwarding (default), 1=stall-only")
-    ap.add_argument("--compare-strategies", action="store_true",
-                     help="run every benchmark under both strategies and report the delta")
+    ap.add_argument("--pipeline-profile", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's PIPELINE_PROFILE (docs/adr/0018): 0=PROFILE_5STAGE (default), "
+                          "1=PROFILE_6STAGE_SPLIT_FETCH")
+    compare = ap.add_mutually_exclusive_group()
+    compare.add_argument("--compare-strategies", action="store_true",
+                          help="run every benchmark under both hazard strategies (at --pipeline-profile) and report the delta")
+    compare.add_argument("--compare-profiles", action="store_true",
+                          help="run every benchmark under both pipeline profiles (at --hazard-strategy) and report the delta")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -144,27 +160,45 @@ def main():
         print(f"No bench_*.s programs found under {args.programs_dir}")
         sys.exit(1)
 
-    strategies = (0, 1) if args.compare_strategies else (args.hazard_strategy,)
-    all_results = {s: [] for s in strategies}
+    if args.compare_strategies:
+        axis, axis_label = "strategy", "HAZARD_STRATEGY"
+        keys = (0, 1)
+        pairs = [(s, args.pipeline_profile) for s in keys]
+    elif args.compare_profiles:
+        axis, axis_label = "profile", "PIPELINE_PROFILE"
+        keys = (0, 1)
+        pairs = [(args.hazard_strategy, p) for p in keys]
+    else:
+        axis, axis_label = None, None
+        keys = (args.hazard_strategy,)  # single run, keyed arbitrarily by hazard_strategy
+        pairs = [(args.hazard_strategy, args.pipeline_profile)]
+
+    all_results = {k: [] for k in keys}
     with tempfile.TemporaryDirectory() as work_dir:
-        for strategy in strategies:
-            if args.compare_strategies:
+        for key, (strategy, profile) in zip(keys, pairs):
+            if axis == "strategy":
                 print(f"--- HAZARD_STRATEGY={strategy} ({'forwarding' if strategy == 0 else 'stall-only'}) ---")
+            elif axis == "profile":
+                print(f"--- PIPELINE_PROFILE={profile} "
+                      f"({'PROFILE_5STAGE' if profile == 0 else 'PROFILE_6STAGE_SPLIT_FETCH'}) ---")
             for prog_s in progs:
                 name = os.path.splitext(os.path.basename(prog_s))[0]
                 mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
-                result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size, strategy)
+                result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size,
+                                         strategy, profile)
                 if err:
                     print(f"FAIL  {name}: {err}")
-                    all_results[strategy].append((name, None))
+                    all_results[key].append((name, None))
                 else:
                     print(f"{name:<20} instructions={result['instructions']:<6} "
                           f"cycles={result['cycles']:<6} IPC={result['ipc']:.3f}")
-                    all_results[strategy].append((name, result))
+                    all_results[key].append((name, result))
             print()
 
-    if args.compare_strategies:
-        print("=== comparison: forwarding (HS=0) vs. stall-only (HS=1) ===")
+    if axis is not None:
+        label0 = "forwarding (HS=0)" if axis == "strategy" else "PROFILE_5STAGE (PP=0)"
+        label1 = "stall-only (HS=1)" if axis == "strategy" else "PROFILE_6STAGE_SPLIT_FETCH (PP=1)"
+        print(f"=== comparison: {label0} vs. {label1} ===")
         by_name_0 = dict(all_results[0])
         by_name_1 = dict(all_results[1])
         for name, r0 in all_results[0]:
