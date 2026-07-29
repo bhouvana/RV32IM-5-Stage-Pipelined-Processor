@@ -49,9 +49,10 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     except Exception as e:  # noqa: BLE001
         return False, f"ISS error: {e}"
 
-    # Multi-cycle divisions dominate runtime -- budget generously: every
-    # instruction could in principle be a division (~33 cycles), plus margin.
-    max_time = (len(words) * 40 + 200) * 10
+    # Multi-cycle divisions/fdiv.s/fsqrt.s dominate runtime -- budget
+    # generously: every instruction could in principle be one (fdiv.s is
+    # the longest at ~51 iterations, docs/adr/0019 Phase C4), plus margin.
+    max_time = (len(words) * 70 + 200) * 10
     dump_v = os.path.join(work_dir, f"r{seed}.v")
     out_path = os.path.join(work_dir, f"r{seed}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
@@ -76,8 +77,14 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
 
     with open(out_path) as f:
         vals = [int(l.strip()) & 0xFFFFFFFF for l in f if l.strip()]
+    # Layout matches dump_regs_template.v exactly: 32 int regs, 128 mem
+    # bytes, 32 float regs, fflags, frm (docs/adr/0019-f-extension.md
+    # Phase C9).
     rtl_regs = vals[:32]
     rtl_mem = vals[32:160]
+    rtl_fregs = vals[160:192]
+    rtl_fflags = vals[192]
+    rtl_frm = vals[193]
 
     mismatches = []
     for i in range(32):
@@ -86,6 +93,13 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     for i in range(128):
         if rtl_mem[i] != iss.mem[i]:
             mismatches.append(f"mem[{i}]: RTL={rtl_mem[i]:#x} ISS={iss.mem[i]:#x}")
+    for i in range(32):
+        if rtl_fregs[i] != iss.fregs[i]:
+            mismatches.append(f"f{i}: RTL={rtl_fregs[i]:#010x} ISS={iss.fregs[i]:#010x}")
+    if rtl_fflags != iss.fflags:
+        mismatches.append(f"fflags: RTL={rtl_fflags:#x} ISS={iss.fflags:#x}")
+    if rtl_frm != iss.frm:
+        mismatches.append(f"frm: RTL={rtl_frm:#x} ISS={iss.frm:#x}")
 
     if mismatches:
         return False, "; ".join(mismatches[:8]) + (" ..." if len(mismatches) > 8 else "")

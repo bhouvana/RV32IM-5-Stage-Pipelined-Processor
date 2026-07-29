@@ -29,11 +29,35 @@ OPCODE_AUIPC = 0b0010111
 OPCODE_CUSTOM = 0b0101010
 OPCODE_SYSTEM = 0b1110011
 
+# docs/adr/0019-f-extension.md (Phase C9).
+OPCODE_FP = 0b1010011
+OPCODE_LOAD_FP = 0b0000111
+OPCODE_STORE_FP = 0b0100111
+OPCODE_MADD, OPCODE_MSUB, OPCODE_NMSUB, OPCODE_NMADD = 0b1000011, 0b1000111, 0b1001011, 0b1001111
+MADD_NAMES = {OPCODE_MADD: "fmadd.s", OPCODE_MSUB: "fmsub.s", OPCODE_NMSUB: "fnmsub.s", OPCODE_NMADD: "fnmadd.s"}
+
+FUNCT5_FADD, FUNCT5_FSUB, FUNCT5_FMUL, FUNCT5_FDIV = 0b00000, 0b00001, 0b00010, 0b00011
+FUNCT5_FSQRT = 0b01011
+FUNCT5_FSGNJ = 0b00100
+FUNCT5_FMINMAX = 0b00101
+FUNCT5_FCMP = 0b10100
+FUNCT5_FCVT_W_S = 0b11000
+FUNCT5_FCVT_S_W = 0b11010
+FUNCT5_FMV_X_W_FCLASS = 0b11100
+FUNCT5_FMV_W_X = 0b11110
+
+RM_NAMES = {0b000: "rne", 0b001: "rtz", 0b010: "rdn", 0b011: "rup", 0b100: "rmm", 0b111: "dyn"}
+
 FUNCT7_BASE = 0b0000000
 FUNCT7_ALT = 0b0100000
 FUNCT7_MULDIV = 0b0000001
 
-CSR_NAMES = {0x300: "mstatus", 0x305: "mtvec", 0x340: "mscratch", 0x341: "mepc", 0x342: "mcause"}
+CSR_NAMES = {0x300: "mstatus", 0x305: "mtvec", 0x340: "mscratch", 0x341: "mepc", 0x342: "mcause",
+             0x001: "fflags", 0x002: "frm", 0x003: "fcsr"}
+
+
+def rm_name(rm):
+    return RM_NAMES.get(rm, f"rm?{rm}")
 
 
 def sext(v, bits):
@@ -133,5 +157,45 @@ def disasm(word):
         if f3 & 0b100:  # *i variants: rs1's field position is a 5-bit zero-extended uimm
             return f"{mn} x{rd},{csr_name(csr_addr)},{rs1}"
         return f"{mn} x{rd},{csr_name(csr_addr)},x{rs1}"
+
+    if op == OPCODE_LOAD_FP:
+        return f"flw f{rd},{imm_i}(x{rs1})"
+
+    if op == OPCODE_STORE_FP:
+        imm_s = sext(((word >> 25) << 5) | ((word >> 7) & 0x1F), 12)
+        return f"fsw f{rs2},{imm_s}(x{rs1})"
+
+    if op in MADD_NAMES:
+        rs3 = (word >> 27) & 0x1F
+        return f"{MADD_NAMES[op]} f{rd},f{rs1},f{rs2},f{rs3},{rm_name(f3)}"
+
+    if op == OPCODE_FP:
+        funct5 = (word >> 27) & 0x1F
+        if funct5 in (FUNCT5_FADD, FUNCT5_FSUB, FUNCT5_FMUL, FUNCT5_FDIV):
+            mn = {FUNCT5_FADD: "fadd.s", FUNCT5_FSUB: "fsub.s",
+                  FUNCT5_FMUL: "fmul.s", FUNCT5_FDIV: "fdiv.s"}[funct5]
+            return f"{mn} f{rd},f{rs1},f{rs2},{rm_name(f3)}"
+        if funct5 == FUNCT5_FSQRT:
+            return f"fsqrt.s f{rd},f{rs1},{rm_name(f3)}"
+        if funct5 == FUNCT5_FSGNJ:
+            mn = {0b000: "fsgnj.s", 0b001: "fsgnjn.s", 0b010: "fsgnjx.s"}.get(f3, "fsgnj?")
+            return f"{mn} f{rd},f{rs1},f{rs2}"
+        if funct5 == FUNCT5_FMINMAX:
+            mn = {0b000: "fmin.s", 0b001: "fmax.s"}.get(f3, "fminmax?")
+            return f"{mn} f{rd},f{rs1},f{rs2}"
+        if funct5 == FUNCT5_FCMP:
+            mn = {0b000: "fle.s", 0b001: "flt.s", 0b010: "feq.s"}.get(f3, "fcmp?")
+            return f"{mn} x{rd},f{rs1},f{rs2}"
+        if funct5 == FUNCT5_FCVT_W_S:
+            mn = "fcvt.wu.s" if rs2 == 0b00001 else "fcvt.w.s"
+            return f"{mn} x{rd},f{rs1},{rm_name(f3)}"
+        if funct5 == FUNCT5_FCVT_S_W:
+            mn = "fcvt.s.wu" if rs2 == 0b00001 else "fcvt.s.w"
+            return f"{mn} f{rd},x{rs1},{rm_name(f3)}"
+        if funct5 == FUNCT5_FMV_X_W_FCLASS:
+            return f"fclass.s x{rd},f{rs1}" if f3 == 0b001 else f"fmv.x.w x{rd},f{rs1}"
+        if funct5 == FUNCT5_FMV_W_X:
+            return f"fmv.w.x f{rd},x{rs1}"
+        return f"op-fp?(funct5={funct5:#07b})"
 
     return f"0x{word:08x}?"

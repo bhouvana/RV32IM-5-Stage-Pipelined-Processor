@@ -34,13 +34,15 @@
 // strategy.md; 0 or 1, see riscvpipeline.v's HAZARD_STRATEGY parameter), and
 // __PIPELINE_PROFILE__ (docs/adr/0018-variable-pipeline-depth.md; 0 or 1,
 // see riscvpipeline.v's PIPELINE_PROFILE parameter) are substituted per run.
-// Dumps final architectural register state (all 32 registers) as one decimal
-// value per line, for comparison against sim/tools/iss.py's own final state
-// on the same program -- the ISS itself doesn't model pipeline
-// microarchitecture at all, so it's equally valid as a reference regardless
-// of which hazard strategy or pipeline profile the RTL used. Not part of
-// sim/run_tests.sh's tb_*.v glob (different shape -- generated per-run, not
-// a fixed named test).
+// Dumps final architectural state as one decimal value per line, for
+// comparison against sim/tools/iss.py's own final state on the same
+// program -- the ISS itself doesn't model pipeline microarchitecture at
+// all, so it's equally valid as a reference regardless of which hazard
+// strategy or pipeline profile the RTL used. Not part of sim/run_tests.sh's
+// tb_*.v glob (different shape -- generated per-run, not a fixed named
+// test). Layout: 32 integer regs, 128 data memory bytes, 32 float regs
+// (docs/adr/0019-f-extension.md Phase C9), fflags, frm -- in that order,
+// matching sim/tools/run_random_tests.py's own unpacking.
 module dump_regs;
     reg clk = 0;
     reg start = 0;
@@ -61,6 +63,10 @@ module dump_regs;
             $fdisplay(fd, "%0d", dut.m_Register.regs[i]);
         for (i = 0; i < 128; i = i + 1)
             $fdisplay(fd, "%0d", dut.m_DataMemory.data_memory[i]);
+        for (i = 0; i < 32; i = i + 1)
+            $fdisplay(fd, "%0d", dut.m_FRegister.regs[i]);
+        $fdisplay(fd, "%0d", dut.m_CSR.fflags);
+        $fdisplay(fd, "%0d", dut.m_CSR.frm);
         $fclose(fd);
         $finish;
     end

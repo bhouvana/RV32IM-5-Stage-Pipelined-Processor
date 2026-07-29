@@ -28,6 +28,21 @@ def reg(tok):
     return n
 
 
+FREG_RE = re.compile(r"^f(\d+)$")
+
+
+def freg(tok):
+    # docs/adr/0019-f-extension.md (Phase C9). No x0-equivalent here --
+    # FRegister.v hardwires nothing, f0 is a completely ordinary register.
+    m = FREG_RE.match(tok.strip())
+    if not m:
+        raise ValueError(f"expected float register (f0-f31), got {tok!r}")
+    n = int(m.group(1))
+    if not (0 <= n <= 31):
+        raise ValueError(f"float register out of range: {tok!r}")
+    return n
+
+
 def imm(tok, bits, signed=True):
     v = tok if isinstance(tok, int) else int(tok.strip(), 0)
     lo = -(1 << (bits - 1)) if signed else 0
@@ -85,6 +100,44 @@ BRANCH = {  # mnemonic: funct3 -- beq/bne/blt/bge/ble/bgt/bltu/bgeu (ble/bgt cus
 }
 LOAD = {"lb": 0b000, "lh": 0b001, "lw": 0b010, "lbu": 0b100, "lhu": 0b101}
 STORE = {"sb": 0b000, "sh": 0b001, "sw": 0b010}
+
+# RV32F (docs/adr/0019-f-extension.md, Phase C9). Encodings mirror
+# design/riscv_defs.vh exactly -- that file is the single source of truth
+# this tooling extension is checked against, same as the base ISA tables
+# above are checked against design/Control.v/ALUCtrl.v.
+OP_FP = 0b1010011
+OP_LOAD_FP = 0b0000111
+OP_STORE_FP = 0b0100111
+OP_MADD, OP_MSUB, OP_NMSUB, OP_NMADD = 0b1000011, 0b1000111, 0b1001011, 0b1001111
+MADD_OPCODES = {"fmadd.s": OP_MADD, "fmsub.s": OP_MSUB, "fnmsub.s": OP_NMSUB, "fnmadd.s": OP_NMADD}
+
+FUNCT5_FADD, FUNCT5_FSUB, FUNCT5_FMUL, FUNCT5_FDIV = 0b00000, 0b00001, 0b00010, 0b00011
+FUNCT5_FSQRT = 0b01011
+FUNCT5_FSGNJ = 0b00100
+FUNCT5_FMINMAX = 0b00101
+FUNCT5_FCMP = 0b10100
+FUNCT5_FCVT_W_S = 0b11000
+FUNCT5_FCVT_S_W = 0b11010
+FUNCT5_FMV_X_W_FCLASS = 0b11100
+FUNCT5_FMV_W_X = 0b11110
+
+FP_ARITH = {"fadd.s": FUNCT5_FADD, "fsub.s": FUNCT5_FSUB, "fmul.s": FUNCT5_FMUL, "fdiv.s": FUNCT5_FDIV}
+FP_SGNJ = {"fsgnj.s": 0b000, "fsgnjn.s": 0b001, "fsgnjx.s": 0b010}
+FP_MINMAX = {"fmin.s": 0b000, "fmax.s": 0b001}
+FP_CMP = {"fle.s": 0b000, "flt.s": 0b001, "feq.s": 0b010}
+# Trailing optional rounding-mode operand (real RISC-V assembler
+# convention): defaults to `dyn` (read fcsr's live frm, docs/adr/0019
+# Phase C8) when omitted, same as every real RV32F assembler.
+RM_NAMES = {"rne": 0b000, "rtz": 0b001, "rdn": 0b010, "rup": 0b011, "rmm": 0b100, "dyn": 0b111}
+
+
+def parse_rm(args, idx):
+    if len(args) > idx and args[idx].strip():
+        name = args[idx].strip().lower()
+        if name not in RM_NAMES:
+            raise ValueError(f"unknown rounding mode {name!r}")
+        return RM_NAMES[name]
+    return RM_NAMES["dyn"]
 
 
 def r_type(mn, rd, rs1, rs2):
@@ -154,6 +207,68 @@ def jal(rd, offset_bytes):
 def ctz(rd, rs1):
     # custom op: opcode 0101010, funct7=0100000 (FUNCT7_ALT), funct3=111 (see design/ALUCtrl.v ALUCtl=10101)
     return (FUNCT7_ALT << 25) | (0 << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | OP_CUSTOM
+
+
+def fp_r_type(funct5, rd, rs1, rs2, rm):
+    return (funct5 << 27) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | OP_FP
+
+
+def fp_sqrt(rd, rs1, rm):
+    return (FUNCT5_FSQRT << 27) | (0 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | OP_FP
+
+
+def fp_sgnj(mn, rd, rs1, rs2):
+    return (FUNCT5_FSGNJ << 27) | (rs2 << 20) | (rs1 << 15) | (FP_SGNJ[mn] << 12) | (rd << 7) | OP_FP
+
+
+def fp_minmax(mn, rd, rs1, rs2):
+    return (FUNCT5_FMINMAX << 27) | (rs2 << 20) | (rs1 << 15) | (FP_MINMAX[mn] << 12) | (rd << 7) | OP_FP
+
+
+def fp_cmp(mn, rd, rs1, rs2):
+    return (FUNCT5_FCMP << 27) | (rs2 << 20) | (rs1 << 15) | (FP_CMP[mn] << 12) | (rd << 7) | OP_FP
+
+
+def fp_cvt_w_s(unsigned, rd, rs1, rm):
+    rs2 = 0b00001 if unsigned else 0b00000
+    return (FUNCT5_FCVT_W_S << 27) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | OP_FP
+
+
+def fp_cvt_s_w(unsigned, rd, rs1, rm):
+    rs2 = 0b00001 if unsigned else 0b00000
+    return (FUNCT5_FCVT_S_W << 27) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | OP_FP
+
+
+def fp_mv_x_w(rd, rs1):
+    return (FUNCT5_FMV_X_W_FCLASS << 27) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | OP_FP
+
+
+def fp_class(rd, rs1):
+    return (FUNCT5_FMV_X_W_FCLASS << 27) | (rs1 << 15) | (0b001 << 12) | (rd << 7) | OP_FP
+
+
+def fp_mv_w_x(rd, rs1):
+    return (FUNCT5_FMV_W_X << 27) | (rs1 << 15) | (rd << 7) | OP_FP
+
+
+def flw(rd, offs, rs1):
+    imm12 = imm(offs, 12, signed=True)
+    return (u(imm12, 12) << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | OP_LOAD_FP
+
+
+def fsw(rs2, offs, rs1):
+    imm12 = imm(offs, 12, signed=True)
+    hi = (imm12 >> 5) & 0x7F
+    lo = imm12 & 0x1F
+    return (hi << 25) | (rs2 << 20) | (rs1 << 15) | (0b010 << 12) | (lo << 7) | OP_STORE_FP
+
+
+def fp_r4_type(opcode, rd, rs1, rs2, rs3, rm):
+    # docs/adr/0019-f-extension.md (Phase C9). opcode[3:2] selects which of
+    # fmadd.s/fmsub.s/fnmsub.s/fnmadd.s -- bit4 is 0 for all four (see
+    # riscvpipeline.v's own Phase C9 bugfix comment for the story of
+    # getting this bit position right).
+    return (rs3 << 27) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | opcode
 
 
 def csr_lookup(csr):
@@ -255,6 +370,55 @@ def assemble(lines):
             # for -- e.g. an opcode this core doesn't implement, to exercise
             # the illegal-instruction trap (docs/adr/0011-csr-and-exceptions.md).
             words.append(u(int(args[0], 0), 32))
+
+        # docs/adr/0019-f-extension.md (Phase C9): RV32F mnemonics.
+        elif mn == "flw":
+            rd = freg(args[0])
+            m = re.match(r"(-?\w+)\((x\d+)\)", args[1])
+            words.append(flw(rd, m.group(1), reg(m.group(2))))
+        elif mn == "fsw":
+            rs2 = freg(args[0])
+            m = re.match(r"(-?\w+)\((x\d+)\)", args[1])
+            words.append(fsw(rs2, m.group(1), reg(m.group(2))))
+        elif mn in FP_ARITH:
+            rd, rs1, rs2 = freg(args[0]), freg(args[1]), freg(args[2])
+            rm = parse_rm(args, 3)
+            words.append(fp_r_type(FP_ARITH[mn], rd, rs1, rs2, rm))
+        elif mn == "fsqrt.s":
+            rd, rs1 = freg(args[0]), freg(args[1])
+            rm = parse_rm(args, 2)
+            words.append(fp_sqrt(rd, rs1, rm))
+        elif mn in FP_SGNJ:
+            rd, rs1, rs2 = freg(args[0]), freg(args[1]), freg(args[2])
+            words.append(fp_sgnj(mn, rd, rs1, rs2))
+        elif mn in FP_MINMAX:
+            rd, rs1, rs2 = freg(args[0]), freg(args[1]), freg(args[2])
+            words.append(fp_minmax(mn, rd, rs1, rs2))
+        elif mn in FP_CMP:
+            rd, rs1, rs2 = reg(args[0]), freg(args[1]), freg(args[2])  # writes the INTEGER file
+            words.append(fp_cmp(mn, rd, rs1, rs2))
+        elif mn in ("fcvt.w.s", "fcvt.wu.s"):
+            rd, rs1 = reg(args[0]), freg(args[1])  # writes the INTEGER file
+            rm = parse_rm(args, 2)
+            words.append(fp_cvt_w_s(mn == "fcvt.wu.s", rd, rs1, rm))
+        elif mn in ("fcvt.s.w", "fcvt.s.wu"):
+            rd, rs1 = freg(args[0]), reg(args[1])  # reads the INTEGER file
+            rm = parse_rm(args, 2)
+            words.append(fp_cvt_s_w(mn == "fcvt.s.wu", rd, rs1, rm))
+        elif mn == "fmv.x.w":
+            rd, rs1 = reg(args[0]), freg(args[1])
+            words.append(fp_mv_x_w(rd, rs1))
+        elif mn == "fclass.s":
+            rd, rs1 = reg(args[0]), freg(args[1])
+            words.append(fp_class(rd, rs1))
+        elif mn == "fmv.w.x":
+            rd, rs1 = freg(args[0]), reg(args[1])
+            words.append(fp_mv_w_x(rd, rs1))
+        elif mn in MADD_OPCODES:
+            rd, rs1, rs2, rs3 = freg(args[0]), freg(args[1]), freg(args[2]), freg(args[3])
+            rm = parse_rm(args, 4)
+            words.append(fp_r4_type(MADD_OPCODES[mn], rd, rs1, rs2, rs3, rm))
+
         else:
             raise ValueError(f"unknown mnemonic {mn!r} in line: {line!r}")
     return words
