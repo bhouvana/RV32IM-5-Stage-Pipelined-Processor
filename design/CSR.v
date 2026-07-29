@@ -161,24 +161,58 @@ module CSR #(
             frm      <= 3'b0;
         end
         else begin
-            // Independent of the trap/mret/csrrX chain below: fflags is
-            // sticky hardware-accumulated state, set as a side effect of
-            // *every* F-extension instruction retiring (docs/adr/0019
-            // Phase C8), not something only a real csrrX instruction can
-            // change. Never actually simultaneous with the CSR_ADDR_FFLAGS
-            // write case in the chain below (an instruction is either a
-            // float op or a real csrrX op, never both), so there's no
-            // meaningful precedence to reason about between the two.
+            // docs/adr/0020-soc-integration.md (Phase D11). Each register
+            // below is updated by its own independent if/else-if chain,
+            // not one shared chain covering every register at once --
+            // found necessary (by a real 60-seed random-cross-check
+            // mismatch, not by design review) once D9 made trap_taken
+            // includable for reasons entirely unrelated to whatever
+            // instruction currently sits in EX (an interrupt). Before D9,
+            // trap_taken/mret_taken were only ever true for the *same*
+            // instruction csr_write_en could be true for, and that
+            // instruction is never both (an opcode is either ecall/ebreak/
+            // illegal/mret or a real csrrX, never both) -- so one shared
+            // "trap_taken > mret_taken > csr_write_en" chain correctly
+            // treated them as mutually exclusive. An interrupt breaks that:
+            // it can fire on the exact same cycle an *unrelated*, perfectly
+            // legitimate csrrX instruction elsewhere in EX is retiring its
+            // own CSR write. A shared chain would silently drop that write
+            // whenever a same-cycle interrupt happened to also be taken
+            // (found via mcause/mstatus.MIE-swap being fine but an
+            // ordinary mtvec/mscratch/fflags/frm/mie write vanishing on
+            // exactly that cycle). Splitting by register fixes this while
+            // preserving the *genuine* collisions (trap_taken/mret_taken
+            // racing an ordinary write to the specific registers they
+            // themselves also touch -- mstatus/mepc/mcause) exactly as
+            // before, trap/mret still winning there.
             if (fp_flags_we)
                 fflags <= fflags | fp_flags_in;
+            else if (csr_write_en && (csr_addr == `CSR_ADDR_FFLAGS || csr_addr == `CSR_ADDR_FCSR))
+                fflags <= new_val[4:0];
+
+            if (csr_write_en && csr_addr == `CSR_ADDR_FRM)
+                frm <= new_val[2:0];
+            else if (csr_write_en && csr_addr == `CSR_ADDR_FCSR)
+                frm <= new_val[7:5];
 
             if (trap_taken) begin
-                mepc   <= trap_pc;
-                // docs/adr/0020-soc-integration.md (Phase D9). mcause[31] is
-                // the spec's interrupt-vs-exception bit; trap_cause itself
-                // never sets it (riscv_defs.vh's MCAUSE_*/MCAUSE_INT_*
-                // constants are all small values, well under bit31).
+                mepc <= trap_pc;
+            end
+            else if (csr_write_en && csr_addr == `CSR_ADDR_MEPC)
+                mepc <= new_val;
+
+            if (trap_taken) begin
+                // docs/adr/0020-soc-integration.md (Phase D9). mcause[31]
+                // is the spec's interrupt-vs-exception bit; trap_cause
+                // itself never sets it (riscv_defs.vh's MCAUSE_*/
+                // MCAUSE_INT_* constants are all small values, well under
+                // bit31).
                 mcause <= {trap_is_interrupt, trap_cause[30:0]};
+            end
+            else if (csr_write_en && csr_addr == `CSR_ADDR_MCAUSE)
+                mcause <= new_val;
+
+            if (trap_taken) begin
                 mstatus[7] <= mstatus[3];  // MPIE <= MIE
                 mstatus[3] <= 1'b0;        // MIE  <= 0 (traps disabled while handling this one)
             end
@@ -186,20 +220,20 @@ module CSR #(
                 mstatus[3] <= mstatus[7];  // MIE  <= MPIE
                 mstatus[7] <= 1'b1;        // MPIE <= 1 (spec default)
             end
-            else if (csr_write_en) begin
-                case (csr_addr)
-                    `CSR_ADDR_MSTATUS:  mstatus  <= mstatus_masked;  // only MIE/MPIE are real
-                    `CSR_ADDR_MIE:      mie      <= mie_masked;      // only MTIE/MEIE are real
-                    `CSR_ADDR_MTVEC:    mtvec    <= new_val;
-                    `CSR_ADDR_MSCRATCH: mscratch <= new_val;
-                    `CSR_ADDR_MEPC:     mepc     <= new_val;
-                    `CSR_ADDR_MCAUSE:   mcause   <= new_val;
-                    `CSR_ADDR_FFLAGS:   fflags   <= new_val[4:0];
-                    `CSR_ADDR_FRM:      frm      <= new_val[2:0];
-                    `CSR_ADDR_FCSR:     {frm, fflags} <= new_val[7:0];
-                    default: ; // unimplemented CSR writes are silently dropped, not trapped
-                endcase
-            end
+            else if (csr_write_en && csr_addr == `CSR_ADDR_MSTATUS)
+                mstatus <= mstatus_masked;  // only MIE/MPIE are real
+
+            // mie/mtvec/mscratch are never touched by trap_taken/mret_taken
+            // at all -- no collision to arbitrate, a real csrrX write is
+            // the only source, ever.
+            if (csr_write_en && csr_addr == `CSR_ADDR_MIE)
+                mie <= mie_masked;  // only MTIE/MEIE are real
+
+            if (csr_write_en && csr_addr == `CSR_ADDR_MTVEC)
+                mtvec <= new_val;
+
+            if (csr_write_en && csr_addr == `CSR_ADDR_MSCRATCH)
+                mscratch <= new_val;
         end
     end
 

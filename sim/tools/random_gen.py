@@ -108,9 +108,14 @@ def const_to_reg_instrs(rd, bits32):
 
 def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
     """interrupt: None (default -- every existing caller's behavior,
-    completely unaffected), or one of "timer"/"uart" to additionally arm
-    that interrupt source and inject it somewhere during the random body.
-    docs/adr/0020-soc-integration.md (Phase D10).
+    completely unaffected), or one of "timer"/"uart"/"both" to additionally
+    arm that interrupt source (or, for "both", arm and pend both sources
+    simultaneously -- docs/adr/0020-soc-integration.md Phase D11 -- so the
+    real interrupt taken must be the external one, MEI-over-MTI priority,
+    D9's own already-proven redirect condition, now exercised under a
+    random program body instead of only a directed test) and inject it
+    somewhere during the random body. docs/adr/0020-soc-integration.md
+    (Phase D10).
 
     The injected handler is deliberately architecturally inert -- `csrrw
     x0, mie, x0` (disarm both sources, preventing an immediate re-trigger
@@ -140,9 +145,12 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
         # Common: addi+csrrw(mtvec)=2, addi+csrrw(mie)=2, csrrsi(mstatus)=1
         # -> 5. Timer-specific: TIMER_BASE's lui+addi(2), the mtimecmp
         # constant (up to 2, lui+addi) + its sw(1) -> up to 5. UART-specific:
-        # MMIO_BASE's lui(1) + enable-value addi(1) + its sw(1) -> 3. Handler
-        # (both): csrrw(mie<-0) + mret -> 2.
-        interrupt_prefix_cost = 5 + (5 if interrupt == "timer" else 3) + 2
+        # MMIO_BASE's lui(1) + enable-value addi(1) + its sw(1) -> 3. "both"
+        # needs both sources armed -- their own lui's each target a
+        # different register (x1 vs x2), so neither can be shared -> up to
+        # 5 + 3 = 8. Handler (all cases): csrrw(mie<-0) + mret -> 2.
+        source_cost = {"timer": 5, "uart": 3, "both": 8}[interrupt]
+        interrupt_prefix_cost = 5 + source_cost + 2
     budget = 1 + 2 * len(FLOAT_SEED_BITS) + n_instrs + 1 + interrupt_prefix_cost
     if budget > mem_size // 4:
         raise ValueError(f"n_instrs={n_instrs} would overflow the {mem_size}-byte budget "
@@ -167,8 +175,8 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
         seed_lines.append(f"fmv.w.x f{fr}, x30")
     labels_at = {}  # instruction index -> label name, resolved into text at the end
 
-    # docs/adr/0020-soc-integration.md (Phase D10). mstatus/mepc/mcause are
-    # mutated by the interrupt itself (mstatus's MIE/MPIE swap at trap
+    # docs/adr/0020-soc-integration.md (Phase D10/D11). mstatus/mepc/mcause
+    # are mutated by the interrupt itself (mstatus's MIE/MPIE swap at trap
     # entry/mret, mepc, mcause) -- since the RTL's real hardware timing and
     # the ISS's own externally-scheduled firing point deliberately don't
     # agree on the exact instruction boundary (see this function's own
@@ -176,13 +184,21 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
     # three CSRs would observe different values on either side of
     # wherever each side's interrupt actually landed, a genuine and
     # unavoidable divergence -- not a bug in the redirect logic itself.
-    # mtvec/mscratch are untouched by trap/mret and stay safe. Same
-    # "exclude what can't be made safe to compare" principle this
-    # generator already applies to ecall/ebreak/mret/illegal instructions
-    # (see the module docstring), just for CSR *reads* instead of control
-    # flow.
+    # mtvec is a *different* hazard, found the same way (D11, by running,
+    # not by review): it isn't mutated by the interrupt itself, but a
+    # csrrw/csrrs/csrrc targeting it *writes* a new redirect target -- and
+    # since the redirect only actually fires later, at a real cycle the two
+    # engines don't agree on, RTL and ISS can each still be holding
+    # whatever pre-rewrite/post-rewrite mtvec value happened to be current
+    # at their own (different) firing moments, sending the interrupt to two
+    # different addresses and unraveling everything downstream from there.
+    # Only mscratch (genuinely inert -- no control-flow role at all) stays
+    # safe. Same "exclude what can't be made safe to compare" principle
+    # this generator already applies to ecall/ebreak/mret/illegal
+    # instructions (see the module docstring), just for CSR *reads*/*writes*
+    # instead of control flow.
     csr_names_pool = CSR_NAMES if interrupt is None else [
-        n for n in CSR_NAMES if n not in ("mstatus", "mepc", "mcause")]
+        n for n in CSR_NAMES if n not in ("mstatus", "mepc", "mcause", "mtvec")]
 
     # Build a flat instruction list first (as dicts), then assign forward-only
     # branch/jump targets once every instruction's final index is known.
@@ -374,6 +390,32 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
             "csrrsi x0, mstatus, 8",
         ]
         cause = 0x8000000B
+    elif interrupt == "both":
+        # docs/adr/0020-soc-integration.md (Phase D11). Both sources armed
+        # and pended simultaneously -- the real interrupt taken must be the
+        # external one, MEI-over-MTI priority (D9's own already-proven
+        # redirect condition), so the ISS is told to expect that cause
+        # directly rather than derive it, the same way this generator
+        # doesn't re-derive div/rem or float special-case results either
+        # (design/*.v and iss.py are independently checked against each
+        # other, not against a from-scratch re-implementation of the
+        # priority logic here).
+        mtimecmp_est = 100 + interrupt_k * 10
+        prefix = [
+            "lui   x1, 0x10000",      # x1 = UART_BASE
+            "lui   x2, 0x10000",
+            "addi  x2, x2, 16",       # x2 = TIMER_BASE
+            "addi  x5, x0, __MTVEC_PLACEHOLDER__",
+            "csrrw x0, mtvec, x5",
+            "addi  x6, x0, -1920",    # MIE_MTIE_BIT|MIE_MEIE_BIT, sign-extended (harmless, same masking reasoning)
+            "csrrw x0, mie, x6",
+        ]
+        prefix.extend(const_to_reg_instrs(7, mtimecmp_est))
+        prefix.append("sw    x7, 4(x2)")
+        prefix.append("addi  x8, x0, 1")
+        prefix.append("sw    x8, 12(x1)")   # CONTROL.rx_irq_enable <- 1
+        prefix.append("csrrsi x0, mstatus, 8")
+        cause = 0x8000000B
     else:
         raise ValueError(f"unknown interrupt source {interrupt!r}")
 
@@ -393,7 +435,7 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--n", type=int, default=16)
     ap.add_argument("--mem-size", type=int, default=128)
-    ap.add_argument("--interrupt", choices=["timer", "uart"], default=None)
+    ap.add_argument("--interrupt", choices=["timer", "uart", "both"], default=None)
     ap.add_argument("-o", "--output")
     args = ap.parse_args()
     text, interrupt_info = gen_program(args.seed, args.n, mem_size=args.mem_size, interrupt=args.interrupt)

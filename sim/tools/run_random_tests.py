@@ -69,7 +69,7 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     with open(template) as f:
         tpl = f.read()
     uart_stimulus = ""
-    if interrupt == "uart":
+    if interrupt in ("uart", "both"):
         # Starts almost immediately and completes in ~40 cycles
         # (CLKS_PER_BIT=4 * 10 bit periods) -- comfortably early and fast
         # relative to max_time, landing well within the generously-margined
@@ -140,9 +140,10 @@ def main():
     # docs/adr/0020-soc-integration.md (Phase D10). Opt-in, not default-on --
     # every existing invocation (no --interrupt) behaves exactly as before,
     # against the original dump_regs_template.v at mem_size=128.
-    ap.add_argument("--interrupt", choices=["timer", "uart"], default=None,
-                     help="opt-in interrupt-injection mode (docs/adr/0020 Phase D10): "
-                          "arm and fire the given source once during each generated program")
+    ap.add_argument("--interrupt", choices=["timer", "uart", "both"], default=None,
+                     help="opt-in interrupt-injection mode (docs/adr/0020 Phase D10/D11): "
+                          "arm and fire the given source once during each generated program "
+                          "(\"both\" arms and pends both simultaneously, exercising MEI-over-MTI priority)")
     ap.add_argument("--mem-size", type=int, default=None,
                      help="override InstructionMemory/DataMemory size in bytes; "
                           "defaults to 128 normally, 256 when --interrupt is set "
