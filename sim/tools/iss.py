@@ -42,6 +42,13 @@ def sext(v, bits):
 CSR_MSTATUS, CSR_MTVEC, CSR_MSCRATCH, CSR_MEPC, CSR_MCAUSE = 0x300, 0x305, 0x340, 0x341, 0x342
 MCAUSE_ILLEGAL_INSTRUCTION, MCAUSE_BREAKPOINT, MCAUSE_ECALL_FROM_M = 2, 3, 11
 
+# docs/adr/0020-soc-integration.md (Phase D10). Matches design/riscv_defs.vh's
+# MCAUSE_INT_MACHINE_TIMER/MCAUSE_INT_MACHINE_EXTERNAL (7/11) with bit31 (the
+# interrupt-vs-exception bit) set -- the two interrupt causes an externally
+# scheduled trap() call below can raise.
+MCAUSE_INT_MACHINE_TIMER = 0x80000007
+MCAUSE_INT_MACHINE_EXTERNAL = 0x8000000B
+
 
 # ==========================================================================
 # docs/adr/0019-f-extension.md (Phase C9): RV32F reference model. Independent
@@ -489,8 +496,15 @@ def f_cvt_from_int(a_bits, rm, unsigned):
 class ISS:
     def __init__(self, mem_size=128):
         self.regs = [0] * 32
-        self.regs[2] = 128  # sp reset default, matches design/Register.v
+        # sp reset default -- matches design/Register.v's SP_INIT parameter,
+        # which riscvpipeline.v ties directly to MEM_SIZE_BYTES, not a fixed
+        # 128 (docs/adr/0020-soc-integration.md Phase D10 caught this: the
+        # non-interrupt corpus never varies mem_size away from 128, so this
+        # was silently correct by coincidence until interrupt-mode runs
+        # actually changed it).
+        self.regs[2] = mem_size
         self.mem = bytearray(mem_size)
+        self.mem_mask = mem_size - 1  # mem_size is always a power of 2 (128, 256, ...)
         self.pc = 0
         self.halted = False
         # CSR state (docs/adr/0011-csr-and-exceptions.md) -- only the 5
@@ -505,6 +519,24 @@ class ISS:
         self.fregs = [0] * 32
         self.frm = 0
         self.fflags = 0
+        # docs/adr/0020-soc-integration.md (Phase D10). Externally scheduled
+        # interrupt injection, set via schedule_interrupt() below -- None
+        # (default) means no interrupt-mode testing is active, run() behaves
+        # exactly as it always has. This is deliberately NOT a real timing
+        # model (the ISS has no notion of cycles): the RTL side independently
+        # arms real hardware (a genuinely reachable MTIMECMP, or the test
+        # rig's own driven UART byte) that will, with a generous timing
+        # margin, actually fire somewhere during the same window this fires
+        # in on the ISS side. The two sides deliberately do NOT need to agree
+        # on the *exact* instruction boundary -- see random_gen.py's
+        # interrupt-mode docstring for why a minimal, architecturally-inert
+        # handler (mie<-0 then mret, no register/memory footprint at all)
+        # makes the final compared state independent of exactly which
+        # instruction got interrupted, as long as it fires (at most) once.
+        self.pending_interrupt = None
+
+    def schedule_interrupt(self, after_steps, cause):
+        self.pending_interrupt = {"after": after_steps, "cause": cause}
 
     def wr(self, rd, val):
         if rd != 0:
@@ -562,10 +594,25 @@ class ISS:
         self.pc = self.csr[CSR_MEPC]
 
     def load_mem_byte(self, addr):
-        return self.mem[addr & 0x7F]
+        # docs/adr/0020-soc-integration.md (Phase D10). MMIO_BASE (design/
+        # riscv_defs.vh, 0x1000_0000) and above is real peripheral address
+        # space on the RTL side (WbDecoder routes it away from RAM
+        # entirely) -- this ISS has no peripheral model at all (interrupt
+        # firing is scheduled externally, not derived from simulated
+        # peripheral state, see schedule_interrupt), so an MMIO address must
+        # NOT alias into self.mem via the mask below the way an ordinary
+        # RAM address does, or a real MMIO store/load would corrupt (or a
+        # load would silently fabricate) unrelated compared memory state.
+        # Reads at an unmodeled address are simply 0, the same convention
+        # csr_read already uses for an unimplemented CSR.
+        if addr >= 0x10000000:
+            return 0
+        return self.mem[addr & self.mem_mask]
 
     def store_mem_byte(self, addr, val):
-        self.mem[addr & 0x7F] = val & 0xFF
+        if addr >= 0x10000000:
+            return
+        self.mem[addr & self.mem_mask] = val & 0xFF
 
     def step(self, word):
         if word == 0:
@@ -895,6 +942,23 @@ class ISS:
         byte_len = len(words) * 4
         steps = 0
         while self.pc < byte_len and steps < max_steps:
+            # docs/adr/0020-soc-integration.md (Phase D10). Externally
+            # scheduled interrupt injection -- checked *before* the
+            # self-loop-halt detection below, deliberately: if `after_steps`
+            # happens to land exactly on (or past) the halt loop, the
+            # interrupt must still fire rather than the halt check breaking
+            # out first and silently skipping it. Single-shot by
+            # construction (pending_interrupt is cleared the instant it
+            # fires) -- no separate re-trigger-prevention logic needed on
+            # this side the way the RTL's own handler needs one (mip is a
+            # real level signal there; this is just a one-time scheduled
+            # event here).
+            if (self.pending_interrupt is not None
+                    and steps >= self.pending_interrupt["after"]
+                    and ((self.csr[CSR_MSTATUS] >> 3) & 1)):
+                self.trap(self.pending_interrupt["cause"])
+                self.pending_interrupt = None
+                continue
             word = words[self.pc // 4]
             if word & 0x7F == 0b1101111:  # jal
                 b20 = (word >> 31) & 1

@@ -106,16 +106,49 @@ def const_to_reg_instrs(rd, bits32):
     return lines
 
 
-def gen_program(seed, n_instrs=16, base_addr=32):
-    # Budget check, not just documentation: InstructionMemory is 128 bytes
-    # (32 instructions) -- 1 (base addi) + 2*len(FLOAT_SEED_BITS) (seeding)
-    # + n_instrs + 1 (trailing jal) must not exceed that, or asm.py's
-    # write_mem raises before this is ever a silent problem.
-    budget = 1 + 2 * len(FLOAT_SEED_BITS) + n_instrs + 1
-    if budget > 32:
-        raise ValueError(f"n_instrs={n_instrs} would overflow the 32-instruction budget "
-                          f"(base+seed+jal already use {budget - n_instrs})")
+def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
+    """interrupt: None (default -- every existing caller's behavior,
+    completely unaffected), or one of "timer"/"uart" to additionally arm
+    that interrupt source and inject it somewhere during the random body.
+    docs/adr/0020-soc-integration.md (Phase D10).
+
+    The injected handler is deliberately architecturally inert -- `csrrw
+    x0, mie, x0` (disarm both sources, preventing an immediate re-trigger
+    once mstatus.MIE is restored -- mip is a real level signal on the RTL
+    side, not edge-triggered) then `mret`, touching no GP/FP register and
+    no memory. This is *why* the RTL and the ISS's own externally-scheduled
+    firing point (see iss.py's schedule_interrupt) don't need to agree on
+    the exact instruction boundary the interrupt lands on: since nothing
+    the handler does is part of the compared final state, and D9's own
+    redirect logic already guarantees no instruction is skipped or
+    re-executed, the final architectural state after the whole program
+    runs is identical regardless of exactly which cycle interrupted it --
+    only *that* it fires (at most once) somewhere before the program's own
+    halt loop is what this generator arranges, not precisely *when*. The
+    RTL's own timing (a real, generously-margined MTIMECMP for the timer
+    source, or the test rig's own driven UART byte for the external source)
+    only needs to land somewhere in that same broad window, not at a
+    specific cycle.
+    """
+    # Budget check, not just documentation: InstructionMemory is mem_size
+    # bytes -- 1 (base addi) + 2*len(FLOAT_SEED_BITS) (seeding) + n_instrs +
+    # 1 (trailing jal), plus interrupt mode's own prefix+handler, must not
+    # exceed that, or asm.py's write_mem raises before this is ever a
+    # silent problem.
+    interrupt_prefix_cost = 0
+    if interrupt is not None:
+        # Common: addi+csrrw(mtvec)=2, addi+csrrw(mie)=2, csrrsi(mstatus)=1
+        # -> 5. Timer-specific: TIMER_BASE's lui+addi(2), the mtimecmp
+        # constant (up to 2, lui+addi) + its sw(1) -> up to 5. UART-specific:
+        # MMIO_BASE's lui(1) + enable-value addi(1) + its sw(1) -> 3. Handler
+        # (both): csrrw(mie<-0) + mret -> 2.
+        interrupt_prefix_cost = 5 + (5 if interrupt == "timer" else 3) + 2
+    budget = 1 + 2 * len(FLOAT_SEED_BITS) + n_instrs + 1 + interrupt_prefix_cost
+    if budget > mem_size // 4:
+        raise ValueError(f"n_instrs={n_instrs} would overflow the {mem_size}-byte budget "
+                          f"(everything else already uses {budget - n_instrs} instructions)")
     rnd = random.Random(seed)
+    interrupt_k = rnd.randint(1, n_instrs) if interrupt is not None else None
     lines = [f"addi x{BASE_REG}, x0, {base_addr}"]
     # docs/adr/0019-f-extension.md (Phase C9): seed a subset of float
     # registers with curated "interesting" bit patterns before any
@@ -133,6 +166,23 @@ def gen_program(seed, n_instrs=16, base_addr=32):
         seed_lines.extend(const_to_reg_instrs(30, bits))
         seed_lines.append(f"fmv.w.x f{fr}, x30")
     labels_at = {}  # instruction index -> label name, resolved into text at the end
+
+    # docs/adr/0020-soc-integration.md (Phase D10). mstatus/mepc/mcause are
+    # mutated by the interrupt itself (mstatus's MIE/MPIE swap at trap
+    # entry/mret, mepc, mcause) -- since the RTL's real hardware timing and
+    # the ISS's own externally-scheduled firing point deliberately don't
+    # agree on the exact instruction boundary (see this function's own
+    # docstring), a random instruction that happens to *read* one of these
+    # three CSRs would observe different values on either side of
+    # wherever each side's interrupt actually landed, a genuine and
+    # unavoidable divergence -- not a bug in the redirect logic itself.
+    # mtvec/mscratch are untouched by trap/mret and stay safe. Same
+    # "exclude what can't be made safe to compare" principle this
+    # generator already applies to ecall/ebreak/mret/illegal instructions
+    # (see the module docstring), just for CSR *reads* instead of control
+    # flow.
+    csr_names_pool = CSR_NAMES if interrupt is None else [
+        n for n in CSR_NAMES if n not in ("mstatus", "mepc", "mcause")]
 
     # Build a flat instruction list first (as dicts), then assign forward-only
     # branch/jump targets once every instruction's final index is known.
@@ -165,14 +215,14 @@ def gen_program(seed, n_instrs=16, base_addr=32):
             mn = rnd.choice(["lb", "lh", "lw", "lbu", "lhu"])
             rd = rnd.choice(GP_REGS)
             width = {"lb": 1, "lbu": 1, "lh": 2, "lhu": 2, "lw": 4}[mn]
-            max_off = 128 - base_addr - width
+            max_off = mem_size - base_addr - width
             off = rnd.randrange(0, max_off + 1, width) if max_off >= 0 else 0
             instrs.append(f"{mn} x{rd}, {off}(x{BASE_REG})")
         elif kind == "store":
             mn = rnd.choice(["sb", "sh", "sw"])
             rs2 = rnd.choice(GP_REGS)
             width = {"sb": 1, "sh": 2, "sw": 4}[mn]
-            max_off = 128 - base_addr - width
+            max_off = mem_size - base_addr - width
             off = rnd.randrange(0, max_off + 1, width) if max_off >= 0 else 0
             instrs.append(f"{mn} x{rs2}, {off}(x{BASE_REG})")
         elif kind == "branch":
@@ -180,7 +230,7 @@ def gen_program(seed, n_instrs=16, base_addr=32):
             rs1, rs2 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
             instrs.append(("branch", mn, rs1, rs2))
         elif kind == "csr":
-            csr = rnd.choice(CSR_NAMES)
+            csr = rnd.choice(csr_names_pool)
             rd = rnd.choice(GP_REGS)
             if rnd.random() < 0.5:
                 mn = rnd.choice(CSR_REG_OP)
@@ -231,12 +281,12 @@ def gen_program(seed, n_instrs=16, base_addr=32):
             instrs.append(f"{mn} f{rd}, f{rs1}, f{rs2}, f{rs3}, {rm}")
         elif kind == "fload":
             rd = rnd.choice(FREGS)
-            max_off = 128 - base_addr - 4
+            max_off = mem_size - base_addr - 4
             off = rnd.randrange(0, max_off + 1, 4) if max_off >= 0 else 0
             instrs.append(f"flw f{rd}, {off}(x{BASE_REG})")
         elif kind == "fstore":
             rs2 = rnd.choice(FREGS)
-            max_off = 128 - base_addr - 4
+            max_off = mem_size - base_addr - 4
             off = rnd.randrange(0, max_off + 1, 4) if max_off >= 0 else 0
             instrs.append(f"fsw f{rs2}, {off}(x{BASE_REG})")
         elif kind == "fcsr":
@@ -285,7 +335,56 @@ def gen_program(seed, n_instrs=16, base_addr=32):
     # (correctly, after docs/adr/0011-csr-and-exceptions.md) now traps.
     out.append("__halt:")
     out.append("jal x0, __halt")
-    return "\n".join(out) + "\n"
+
+    if interrupt is None:
+        return "\n".join(out) + "\n", None
+
+    # docs/adr/0020-soc-integration.md (Phase D10). Prefix arms the chosen
+    # source and enables interrupts; the handler (placed after the halt
+    # loop, only ever reached via a real hardware redirect, never by
+    # straight-line fall-through) is architecturally inert -- see this
+    # function's own docstring for why. `mtvec` is patched in once the
+    # prefix's own final instruction count is known -- same "placeholder,
+    # then substitute the resolved address" approach the D9 directed test
+    # programs used.
+    core_instr_count = sum(1 for l in out if not l.rstrip().endswith(":"))
+    if interrupt == "timer":
+        mtimecmp_est = 100 + interrupt_k * 10  # generous, not precise -- see docstring
+        prefix = [
+            "lui   x2, 0x10000",
+            "addi  x2, x2, 16",       # x2 = TIMER_BASE
+            "addi  x5, x0, __MTVEC_PLACEHOLDER__",
+            "csrrw x0, mtvec, x5",
+            "addi  x6, x0, 128",      # MIE_MTIE_BIT
+            "csrrw x0, mie, x6",
+        ]
+        prefix.extend(const_to_reg_instrs(7, mtimecmp_est))
+        prefix.append("sw    x7, 4(x2)")
+        prefix.append("csrrsi x0, mstatus, 8")
+        cause = 0x80000007
+    elif interrupt == "uart":
+        prefix = [
+            "lui   x1, 0x10000",      # x1 = UART_BASE
+            "addi  x5, x0, __MTVEC_PLACEHOLDER__",
+            "csrrw x0, mtvec, x5",
+            "addi  x6, x0, -2048",    # MIE_MEIE_BIT, sign-extended (harmless -- CSR.v's mie_masked only reads bits 7/11)
+            "csrrw x0, mie, x6",
+            "addi  x8, x0, 1",
+            "sw    x8, 12(x1)",       # CONTROL.rx_irq_enable <- 1
+            "csrrsi x0, mstatus, 8",
+        ]
+        cause = 0x8000000B
+    else:
+        raise ValueError(f"unknown interrupt source {interrupt!r}")
+
+    prefix_instr_count = sum(1 for l in prefix if not l.rstrip().endswith(":"))
+    handler_addr = (prefix_instr_count + core_instr_count) * 4
+    prefix = [l.replace("__MTVEC_PLACEHOLDER__", str(handler_addr)) for l in prefix]
+    handler = ["handler:", "csrrw x0, mie, x0", "mret"]
+
+    full = prefix + out + handler
+    interrupt_info = {"after": interrupt_k, "cause": cause}
+    return "\n".join(full) + "\n", interrupt_info
 
 
 if __name__ == "__main__":
@@ -293,9 +392,14 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--n", type=int, default=16)
+    ap.add_argument("--mem-size", type=int, default=128)
+    ap.add_argument("--interrupt", choices=["timer", "uart"], default=None)
     ap.add_argument("-o", "--output")
     args = ap.parse_args()
-    text = gen_program(args.seed, args.n)
+    text, interrupt_info = gen_program(args.seed, args.n, mem_size=args.mem_size, interrupt=args.interrupt)
+    if interrupt_info is not None:
+        print(f"# interrupt scheduled after instruction {interrupt_info['after']}, "
+              f"cause={interrupt_info['cause']:#010x}")
     if args.output:
         with open(args.output, "w") as f:
             f.write(text)

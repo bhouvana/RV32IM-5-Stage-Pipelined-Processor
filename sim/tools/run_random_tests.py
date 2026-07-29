@@ -31,19 +31,29 @@ def load_words(mem_path):
     return words
 
 
-def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0):
+def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0,
+            mem_size=128, interrupt=None):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
+    text, interrupt_info = gen_program(seed, n_instrs, mem_size=mem_size, interrupt=interrupt)
     with open(prog_s, "w") as f:
-        f.write(gen_program(seed, n_instrs))
+        f.write(text)
 
     asm_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asm.py")
-    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem, "--size", str(mem_size)],
+                        capture_output=True, text=True)
     if r.returncode != 0:
         return False, f"assembler error: {r.stderr.strip()}"
 
     words = load_words(prog_mem)
-    iss = ISS()
+    iss = ISS(mem_size=mem_size)
+    # docs/adr/0020-soc-integration.md (Phase D10). Matches the RTL's own
+    # real (armed but not precisely timed) hardware interrupt with an
+    # externally scheduled one on the ISS side -- see gen_program's own
+    # docstring for why the two don't need to agree on the exact
+    # instruction boundary.
+    if interrupt_info is not None:
+        iss.schedule_interrupt(interrupt_info["after"], interrupt_info["cause"])
     try:
         iss.run(words, max_steps=5000)
     except Exception as e:  # noqa: BLE001
@@ -58,9 +68,18 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
     with open(template) as f:
         tpl = f.read()
+    uart_stimulus = ""
+    if interrupt == "uart":
+        # Starts almost immediately and completes in ~40 cycles
+        # (CLKS_PER_BIT=4 * 10 bit periods) -- comfortably early and fast
+        # relative to max_time, landing well within the generously-margined
+        # "somewhere before the program's own halt loop" safety window
+        # gen_program's docstring describes.
+        uart_stimulus = "repeat (5) @(posedge clk);\n        drive_rx_byte(8'hA5);"
     tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
               .replace("__OUT_FILE__", out_path).replace("__HAZARD_STRATEGY__", str(hazard_strategy))
-              .replace("__PIPELINE_PROFILE__", str(pipeline_profile)))
+              .replace("__PIPELINE_PROFILE__", str(pipeline_profile)).replace("__MEM_SIZE__", str(mem_size))
+              .replace("__UART_STIMULUS__", uart_stimulus))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
@@ -77,20 +96,20 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
 
     with open(out_path) as f:
         vals = [int(l.strip()) & 0xFFFFFFFF for l in f if l.strip()]
-    # Layout matches dump_regs_template.v exactly: 32 int regs, 128 mem
-    # bytes, 32 float regs, fflags, frm (docs/adr/0019-f-extension.md
-    # Phase C9).
+    # Layout matches dump_regs_template.v/dump_regs_interrupt_template.v
+    # exactly: 32 int regs, mem_size mem bytes, 32 float regs, fflags, frm
+    # (docs/adr/0019-f-extension.md Phase C9).
     rtl_regs = vals[:32]
-    rtl_mem = vals[32:160]
-    rtl_fregs = vals[160:192]
-    rtl_fflags = vals[192]
-    rtl_frm = vals[193]
+    rtl_mem = vals[32:32 + mem_size]
+    rtl_fregs = vals[32 + mem_size:32 + mem_size + 32]
+    rtl_fflags = vals[32 + mem_size + 32]
+    rtl_frm = vals[32 + mem_size + 33]
 
     mismatches = []
     for i in range(32):
         if rtl_regs[i] != iss.regs[i]:
             mismatches.append(f"x{i}: RTL={rtl_regs[i]:#x} ISS={iss.regs[i]:#x}")
-    for i in range(128):
+    for i in range(mem_size):
         if rtl_mem[i] != iss.mem[i]:
             mismatches.append(f"mem[{i}]: RTL={rtl_mem[i]:#x} ISS={iss.mem[i]:#x}")
     for i in range(32):
@@ -118,10 +137,23 @@ def main():
     ap.add_argument("--pipeline-profile", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's PIPELINE_PROFILE (docs/adr/0018): "
                           "0=5-stage (default), 1=6-stage split-fetch")
+    # docs/adr/0020-soc-integration.md (Phase D10). Opt-in, not default-on --
+    # every existing invocation (no --interrupt) behaves exactly as before,
+    # against the original dump_regs_template.v at mem_size=128.
+    ap.add_argument("--interrupt", choices=["timer", "uart"], default=None,
+                     help="opt-in interrupt-injection mode (docs/adr/0020 Phase D10): "
+                          "arm and fire the given source once during each generated program")
+    ap.add_argument("--mem-size", type=int, default=None,
+                     help="override InstructionMemory/DataMemory size in bytes; "
+                          "defaults to 128 normally, 256 when --interrupt is set "
+                          "(room for the extra prefix/handler instructions)")
     args = ap.parse_args()
 
+    mem_size = args.mem_size if args.mem_size is not None else (256 if args.interrupt else 128)
+
     here = os.path.dirname(os.path.abspath(__file__))
-    template = os.path.join(here, "..", "tb", "dump_regs_template.v")
+    template_name = "dump_regs_interrupt_template.v" if args.interrupt else "dump_regs_template.v"
+    template = os.path.join(here, "..", "tb", template_name)
 
     passed = 0
     failed = 0
@@ -129,7 +161,8 @@ def main():
         for i in range(args.count):
             seed = args.seed_start + i
             ok, msg = run_one(seed, args.n_instrs, work_dir, args.iverilog_dir, template,
-                              args.hazard_strategy, args.pipeline_profile)
+                              args.hazard_strategy, args.pipeline_profile,
+                              mem_size=mem_size, interrupt=args.interrupt)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")
