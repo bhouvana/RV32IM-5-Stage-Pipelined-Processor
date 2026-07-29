@@ -1,4 +1,4 @@
-<title>RV32IM · 5-Stage Pipelined RISC-V Core</title>
+<title>RV32IM(F) · 5-Stage Pipelined RISC-V Core</title>
 <style>
   :root {
     --bg-deep: #080b10;
@@ -354,14 +354,15 @@
 
 <div class="hero">
   <div class="shell hero-inner">
-    <p class="eyebrow">RV32IM · Verilog · Icarus-verified</p>
+    <p class="eyebrow">RV32IM(F) · Verilog · Icarus-verified</p>
     <h1>A 5-stage pipelined<br>RISC-V core, <em>proven</em><br>signal by signal.</h1>
     <p class="lede">
       In-order Fetch&nbsp;→ Decode&nbsp;→ Execute&nbsp;→ Memory&nbsp;→ Writeback, with hardware
-      forwarding, hazard detection, a real multi-cycle divider, and machine-mode CSRs/exceptions —
-      checked against an independent instruction-set simulator, not just directed tests.
-      Every number on this page, including the trace viewer at the bottom, is read directly off
-      <code>design/riscvpipeline.v</code> in simulation. Nothing here is illustrated.
+      forwarding, hazard detection, a real multi-cycle divider, full single-precision floating point,
+      machine-mode CSRs/exceptions, real asynchronous interrupts, and an on-chip Wishbone-style bus
+      with UART and timer peripherals — checked against an independent instruction-set simulator, not
+      just directed tests. Every number on this page, including the trace viewer at the bottom, is read
+      directly off <code>design/riscvpipeline.v</code> in simulation. Nothing here is illustrated.
     </p>
     <div class="hero-actions">
       <a class="btn primary" href="#viewer">Watch it execute →</a>
@@ -412,10 +413,10 @@
   </div>
 
   <div class="readout">
-    <div class="stat"><div class="v">25<span class="unit">/25</span></div><div class="l">directed tests passing</div></div>
-    <div class="stat"><div class="v">136<span class="unit">/136</span></div><div class="l">assertion checks passing</div></div>
-    <div class="stat"><div class="v">350<span class="unit">+</span></div><div class="l">random programs vs. reference ISS</div></div>
-    <div class="stat"><div class="v">16</div><div class="l">ADRs — every real bug documented</div></div>
+    <div class="stat"><div class="v">47<span class="unit">/47</span></div><div class="l">directed tests passing</div></div>
+    <div class="stat"><div class="v">655<span class="unit">/655</span></div><div class="l">assertion checks passing</div></div>
+    <div class="stat"><div class="v">1000<span class="unit">+</span></div><div class="l">random programs vs. reference ISS</div></div>
+    <div class="stat"><div class="v">20</div><div class="l">ADRs — every real bug documented</div></div>
     <div class="stat"><div class="v">0</div><div class="l">iverilog -Wall warnings</div></div>
   </div>
 </div>
@@ -425,10 +426,12 @@
   <section class="block" id="architecture">
     <h2>Five stages, real interlocks</h2>
     <p class="intro">
-      Separated by four pipeline registers (<code>reg1</code>–<code>reg4</code>). Hazards are handled
-      in hardware, not papered over in software: a forwarding unit resolves most RAW hazards in the
-      same cycle, a hazard-detection unit stalls the one case forwarding can't fix (load-use), and
-      control hazards flush speculatively-fetched instructions on a resolved branch or trap.
+      Separated by four pipeline registers (<code>reg1</code>–<code>reg4</code>), in the default
+      5-stage profile (a split-fetch 6-stage alternate is also available, elaboration-time swappable).
+      Hazards are handled in hardware, not papered over in software: a forwarding unit resolves most RAW
+      hazards in the same cycle (integer and float each get their own forwarding network), a
+      hazard-detection unit stalls the one case forwarding can't fix (load-use), and control hazards
+      flush speculatively-fetched instructions on a resolved branch, jump, trap, or interrupt.
     </p>
     <div class="stage-grid">
       <div class="stage-card">
@@ -446,22 +449,63 @@
       <div class="stage-card">
         <div class="num">03</div>
         <h3>EX</h3>
-        <p>ALU, branch resolution, and the forwarding muxes that short-circuit EX/MEM and MEM/WB results back in.</p>
-        <div class="modules"><code>ALU.v</code><code>Forward.v</code><code>Divider.v</code></div>
+        <p>ALU, branch resolution, forwarding muxes, multi-cycle divide, the float ALU/divide/sqrt/FMA units, and the interrupt-detection point.</p>
+        <div class="modules"><code>ALU.v</code><code>Forward.v</code><code>Divider.v</code><code>FALU.v</code><code>CSR.v</code></div>
       </div>
       <div class="stage-card">
         <div class="num">04</div>
         <h3>MEM</h3>
-        <p>Synchronous-read BRAM-style data memory, byte/halfword/word aligned, with its own retimed interlock.</p>
-        <div class="modules"><code>DataMemoryBRAM.v</code></div>
+        <p>A Wishbone-style bus decodes each access to data memory, the UART, or the timer — not one flat device.</p>
+        <div class="modules"><code>WbDecoder.v</code><code>DataMemoryBRAM.v</code><code>Uart.v</code><code>Timer.v</code></div>
       </div>
       <div class="stage-card">
         <div class="num">05</div>
         <h3>WB</h3>
-        <p>Selects ALU result, memory data, or PC+4 (for <code>jal</code>/<code>jalr</code>) back into the register file.</p>
-        <div class="modules"><code>Register.v</code><code>Mux4to1.v</code></div>
+        <p>Selects ALU result, float result, memory data, or PC+4 (for <code>jal</code>/<code>jalr</code>) back into the integer or float register file.</p>
+        <div class="modules"><code>Register.v</code><code>FRegister.v</code><code>Mux4to1.v</code></div>
       </div>
     </div>
+  </section>
+
+  <section class="block tight" id="rv32f">
+    <h2>Full RV32F, not a reduced subset</h2>
+    <p class="intro">
+      <code>fadd.s</code>/<code>fsub.s</code>/<code>fmul.s</code>/<code>fdiv.s</code>/<code>fsqrt.s</code>,
+      the <code>fmadd.s</code>/<code>fmsub.s</code>/<code>fnmsub.s</code>/<code>fnmadd.s</code> fused
+      multiply-add family (rounded once, not twice), sign-injection, min/max, comparisons, conversions,
+      and a live <code>fflags</code>/<code>frm</code> — with full static and dynamic rounding-mode
+      support. A separate 32-register float file gets its own full forwarding network from day one, not
+      a stall-only placeholder.
+    </p>
+    <div class="vgrid">
+      <div class="vcard"><div class="k">FRegister.v</div><div class="d">32×32 float register file, no x0-equivalent — every register is ordinary and forwardable.</div></div>
+      <div class="vcard"><div class="k">FALU.v / FDivider.v / FSqrt.v</div><div class="d">Combinational float ALU plus multi-cycle divide/sqrt units, verified against an exact-rational-arithmetic Python reference model.</div></div>
+      <div class="vcard"><div class="k">FMADDUnit.v</div><div class="d">Fused multiply-add — the full unrounded product is aligned against the addend and rounded exactly once.</div></div>
+      <div class="vcard"><div class="k">FForward.v</div><div class="d">A dedicated float forwarding network (three read ports, for the FMA family's three operands) — not bolted onto the integer one.</div></div>
+    </div>
+  </section>
+
+  <section class="block tight" id="soc">
+    <h2>A real bus, real peripherals, real interrupts</h2>
+    <p class="intro">
+      Data memory used to be the only addressable device, reached with no bus in front of it at all.
+      It now sits behind a classic Wishbone-style handshake, alongside a cycle-accurate UART (real
+      bit-shifted 8N1 serial framing, not a behavioral shortcut) and a CLINT-style timer — both capable
+      of raising a real, correctly-prioritized hardware interrupt.
+    </p>
+    <div class="vgrid">
+      <div class="vcard"><div class="k">WbDecoder.v / RamWishboneAdapter.v</div><div class="d">A parameterized address decoder/mux, plus a thin bus wrapper around the existing memory that changes not one line of the already-verified module.</div></div>
+      <div class="vcard"><div class="k">Uart.v</div><div class="d">Real start/8-data/stop-bit serial framing shifted one bit at a time, with RX midpoint sampling — standard receiver practice.</div></div>
+      <div class="vcard"><div class="k">Timer.v</div><div class="d">A free-running RISC-V CLINT-style <code>mtime</code>/<code>mtimecmp</code> machine-timer peripheral.</div></div>
+      <div class="vcard"><div class="k">Interrupt redirect</div><div class="d"><code>mie</code>/<code>mip</code>, spec-mandated external-over-timer priority, and an interrupt-detection point genuinely independent of whatever instruction is executing — unlike every synchronous exception this core already had.</div></div>
+    </div>
+    <p class="intro" style="margin-top:18px">
+      Verifying an unpredictably-timed asynchronous event against a sequential reference simulator,
+      without real cycle-accurate co-simulation, turned out to be the hardest part of this whole
+      project — see <code>docs/adr/0020-soc-integration.md</code> for the full story, including a real
+      <code>CSR.v</code> correctness bug that only became possible once the interrupt redirect made trap
+      entry independent of what's executing, and wasn't caught until a 100-seed random sweep.
+    </p>
   </section>
 
   <section class="block tight" id="verification">
@@ -470,23 +514,25 @@
       Directed tests catch what you thought to test for. This core is also cross-checked against
       <code>sim/tools/iss.py</code>, an independent instruction-set simulator with no shared code path
       to the RTL — constrained-random programs run on both, and any divergence is a real bug.
-      That process alone has found and fixed a dozen-plus RTL bugs that no directed test caught.
+      That process alone has found and fixed dozens of RTL bugs that no directed test caught.
     </p>
     <div class="vgrid">
-      <div class="vcard"><div class="k">Directed suite</div><div class="d">25 self-checking tests, 136 checks — ISA coverage, forwarding, hazards, CSR/exception handling, branch resolution.</div></div>
-      <div class="vcard"><div class="k">Random cross-check</div><div class="d">350+ constrained-random programs matched bit-for-bit against the independent ISS reference model.</div></div>
+      <div class="vcard"><div class="k">Directed suite</div><div class="d">47 self-checking tests, 655 checks — ISA coverage, forwarding, hazards, float arithmetic, CSR/exception handling, branch resolution, bus/UART/timer behavior, interrupt redirect correctness.</div></div>
+      <div class="vcard"><div class="k">Random cross-check</div><div class="d">1000+ constrained-random programs matched bit-for-bit against the independent ISS reference model — including an opt-in mode that fires a real, unpredictably-timed interrupt mid-program while the ISS independently schedules its own.</div></div>
       <div class="vcard"><div class="k">RTL assertions</div><div class="d">4 embedded invariants (forwarding-select legality, stall/flush consistency, x0 hard-wired to zero, store-forwarding correctness) — verified to actually fire by deliberately reintroducing the bug each one guards against.</div></div>
       <div class="vcard"><div class="k">Functional coverage</div><div class="d">Per-opcode / per-branch-direction counters closed a real gap: <code>bne</code> was untested by any directed program until coverage caught it.</div></div>
     </div>
   </section>
 
   <section class="block tight" id="hazards">
-    <h2>Forwarding is measured, not assumed</h2>
+    <h2>Two research-platform toggles, measured not assumed</h2>
     <p class="intro">
-      The hazard unit is swappable at elaboration time (<code>HAZARD_STRATEGY</code> parameter,
-      zero cost when unused) between the default forwarding unit and <code>HazardNoForward.v</code>,
-      which stalls on every RAW hazard instead. Running the benchmark kernels under both quantifies
-      exactly what forwarding buys this core.
+      Two independent axes are swappable at elaboration time, zero cost when unused, each independently
+      benchmarked against the hand-written kernels.
+    </p>
+    <p class="intro">
+      <strong>Hazard strategy</strong> (<code>HAZARD_STRATEGY</code> parameter): the default forwarding
+      unit vs. <code>HazardNoForward.v</code>, which stalls on every RAW hazard instead.
     </p>
     <div class="hz-compare">
       <div class="hz-legend">
@@ -516,6 +562,42 @@
           <div class="hz-bar-track"><div class="hz-bar-fill nofwd" style="width:100%"></div></div>
         </div>
         <div class="pct">+30.8%</div>
+      </div>
+    </div>
+
+    <p class="intro" style="margin-top:28px">
+      <strong>Pipeline depth</strong> (<code>PIPELINE_PROFILE</code> parameter): the default 5-stage
+      structure vs. <code>PROFILE_6STAGE_SPLIT_FETCH</code>, a new IF1/IF2 relay register ahead of the
+      existing IF/ID boundary.
+    </p>
+    <div class="hz-compare">
+      <div class="hz-legend">
+        <span><i style="background:var(--forward)"></i>5-stage</span>
+        <span><i style="background:var(--stall)"></i>6-stage split-fetch</span>
+      </div>
+      <div class="hz-row">
+        <div class="name">bench_fib</div>
+        <div class="hz-bars">
+          <div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:87.8%"></div></div>
+          <div class="hz-bar-track"><div class="hz-bar-fill nofwd" style="width:100%"></div></div>
+        </div>
+        <div class="pct">+14.0%</div>
+      </div>
+      <div class="hz-row">
+        <div class="name">bench_bubble_sort</div>
+        <div class="hz-bars">
+          <div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:91.5%"></div></div>
+          <div class="hz-bar-track"><div class="hz-bar-fill nofwd" style="width:100%"></div></div>
+        </div>
+        <div class="pct">+9.3%</div>
+      </div>
+      <div class="hz-row">
+        <div class="name">bench_sum_array</div>
+        <div class="hz-bars">
+          <div class="hz-bar-track"><div class="hz-bar-fill fwd" style="width:89.5%"></div></div>
+          <div class="hz-bar-track"><div class="hz-bar-fill nofwd" style="width:100%"></div></div>
+        </div>
+        <div class="pct">+11.8%</div>
       </div>
     </div>
   </section>
@@ -550,7 +632,8 @@
       <div class="tool-item"><span class="dot done"></span><div><span class="t">Pipeline trace viewer<span class="status-pill done">shipped</span></span><div class="s">This page's viewer, below — real per-cycle DUT signals, nothing reconstructed.</div></div></div>
       <div class="tool-item"><span class="dot done"></span><div><span class="t">Independent ISS + step debugger<span class="status-pill done">shipped</span></span><div class="s">Instant single-instruction stepping (<code>step</code>/<code>break</code>/<code>regs</code>/<code>disas</code>) for fast iteration, backed by the same reference model random-testing trusts.</div></div></div>
       <div class="tool-item"><span class="dot done"></span><div><span class="t">Compiled-C toolchain infrastructure<span class="status-pill done">shipped</span></span><div class="s">Real <code>riscv-none-elf-gcc</code>, a Harvard-architecture linker script, and an ELF→memory-image converter — verified end-to-end on a known-answer smoke test.</div></div></div>
-      <div class="tool-item"><span class="dot wip"></span><div><span class="t">CoreMark / Dhrystone ports<span class="status-pill wip">in progress</span></span><div class="s">Bare-metal ports of both industry-standard benchmarks are underway on top of the toolchain above.</div></div></div>
+      <div class="tool-item"><span class="dot done"></span><div><span class="t">Dhrystone port<span class="status-pill done">shipped</span></span><div class="s">Fully verified correct — all 6 documented expected values match exactly (462,126 cycles, <code>Number_Of_Runs=500</code>).</div></div></div>
+      <div class="tool-item"><span class="dot wip"></span><div><span class="t">CoreMark port<span class="status-pill wip">in progress</span></span><div class="s">Completes correctly at reduced size (<code>TOTAL_DATA_SIZE=400</code>, 37,323 cycles, no hang) — the standard, citable <code>TOTAL_DATA_SIZE=2000</code> configuration hasn't completed a clean run yet.</div></div></div>
       <div class="tool-item"><span class="dot wip"></span><div><span class="t">FPGA bring-up<span class="status-pill wip">in progress</span></span><div class="s">Vendor-neutral top level and constraints template exist (<code>fpga/</code>); real hardware validation is the next open milestone.</div></div></div>
     </div>
   </section>
