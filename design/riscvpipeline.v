@@ -736,12 +736,23 @@ endgenerate
     // OP-FP's funct5 (inst[31:27]) occupies the exact bits R-type's funct7
     // does, so it's already sitting in funct7_regde's top 5 bits -- no new
     // reg2 field needed to carry it. rm (rounding mode) is likewise already
-    // funct3_regde; RM_DYN (rm==111) resolution against fcsr's live frm is
-    // Phase C8's job -- until then it falls through to FALU.v's own
-    // documented defensive RNE fallback, a real (if temporary) known gap,
-    // not a silent miscompute.
+    // funct3_regde; RM_DYN (rm==111) resolution against fcsr's live frm
+    // happens right below (docs/adr/0019 Phase C8) -- FALU.v/FMADDUnit.v/
+    // FDivider.v/FSqrt.v all expect an already-resolved rm, by design (see
+    // FALU.v's own header comment).
     wire [4:0] funct5_regde = funct7_regde[6:2];
     wire [1:0] fma_op_regde = opcode_regde[4:3];  // negate-product/negate-addend -- see FMADDUnit.v's header comment
+    // docs/adr/0019-f-extension.md (Phase C8). frm_live comes from CSR.v
+    // (instantiated below); resolving RM_DYN here, once, before any FPU
+    // unit sees it, is what lets every one of those modules stay ignorant
+    // of `fcsr`/CSR.v entirely. Safe to apply this substitution
+    // unconditionally to funct3_regde even though that same field doubles
+    // as a sub-op selector for FSGNJ/FMINMAX/FCMP/FMV_X_W_FCLASS (funct3
+    // values 000/001/010 there): those families never legitimately encode
+    // funct3==111 (RM_DYN's own encoding) at all -- it's a reserved
+    // encoding for them -- so the substitution only ever fires for
+    // instructions where funct3 genuinely means "rounding mode".
+    wire [2:0] fpu_rm = (funct3_regde == `RM_DYN) ? frm_live : funct3_regde;
     // rs1 is the one operand that's sometimes INTEGER despite an OP-FP
     // opcode (fcvt.s.w/fcvt.s.wu/fmv.w.x) -- rs2/rs3 are float whenever
     // they're real operands at all for this core's op set.
@@ -758,7 +769,7 @@ endgenerate
     wire [4:0] falu_flags;
     FALU m_FALU(
         .funct5(funct5_regde),
-        .funct3(funct3_regde),
+        .funct3(fpu_rm),
         .rs2_sel(readReg2_regde),   // inst[24:20] doubles as a real rs2 index or an op-selector, same bits either way
         .a(fpu_operand_a),
         .b(freadData2_final),
@@ -770,7 +781,7 @@ endgenerate
     wire [4:0] fmadd_flags;
     FMADDUnit m_FMADDUnit(
         .op(fma_op_regde),
-        .rm(funct3_regde),
+        .rm(fpu_rm),
         .a(freadData1_final),
         .b(freadData2_final),
         .c(freadData3_final),
@@ -792,7 +803,7 @@ endgenerate
         .clk(clk),
         .rst(start),
         .start(isFpDiv_regde),
-        .rm(funct3_regde),
+        .rm(fpu_rm),
         .a(fpu_operand_a),
         .b(freadData2_final),
         .busy(fdiv_busy),
@@ -807,7 +818,7 @@ endgenerate
         .clk(clk),
         .rst(start),
         .start(isFpSqrt_regde),
-        .rm(funct3_regde),
+        .rm(fpu_rm),
         .a(fpu_operand_a),
         .busy(fsqrt_busy),
         .done(fsqrt_done),
@@ -832,6 +843,25 @@ endgenerate
                             isFpDiv_regde ? fdiv_result   :
                             isFpSqrt_regde? fsqrt_result  :
                                             falu_result;    // every other OP-FP op
+
+    // docs/adr/0019-f-extension.md (Phase C8): same shape as fp_result,
+    // for the exception flags each unit computed alongside its result --
+    // ORed into CSR.v's sticky fflags on the exact cycle this instruction
+    // actually commits (see fp_flags_we below), not before.
+    wire [4:0] fp_flags = isFma_regde    ? fmadd_flags :
+                          isFpDiv_regde  ? fdiv_flags   :
+                          isFpSqrt_regde ? fsqrt_flags  :
+                                           falu_flags;
+    // isOpFp_regde covers feq.s/flt.s/fle.s/fcvt.w.s/fcvt.wu.s too (they
+    // still route through FALU.v and can still raise NV/NX despite writing
+    // the *integer* file) -- fmv.x.w/fmv.w.x/fclass.s also pass through
+    // here but FALU.v always reports 5'b0 flags for those (pure bit
+    // manipulation, nothing to flag). Gated by !reg2_hold for exactly the
+    // same reason CSR.v's own csr_write_en/trap_taken/mret_taken are
+    // (see m_CSR's instantiation comment below): an instruction held in EX
+    // across multiple cycles (e.g. mem_stall from an unrelated older load)
+    // must only commit its flags once, not once per held cycle.
+    wire fp_flags_we = (isOpFp_regde || isFma_regde) && !reg2_hold;
 
     // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md). DataMemoryBRAM's
     // read is registered: a load's `readData` isn't valid until the cycle
@@ -903,6 +933,7 @@ endgenerate
     wire [XLEN-1:0] csr_wdata = funct3_regde[2] ? {{(XLEN-5){1'b0}}, inst_regde[19:15]} : readData1_final;
     wire [XLEN-1:0] csr_old_val;
     wire [XLEN-1:0] mtvec_val, mepc_val;
+    wire [2:0] frm_live;  // docs/adr/0019 Phase C8 -- CSR.v's live frm, for RM_DYN resolution above
 
     // csr_write_en/trap_taken/mret_taken must NOT simply be isCsr_regde/
     // exception_taken/isMret_regde directly: those are combinational, live
@@ -935,6 +966,9 @@ endgenerate
     .trap_pc(pc_o_regde),
     .trap_cause(trap_cause),
     .mret_taken(isMret_regde && !reg2_hold),
+    .fp_flags_we(fp_flags_we),
+    .fp_flags_in(fp_flags),
+    .frm_val(frm_live),
     .mtvec_val(mtvec_val),
     .mepc_val(mepc_val)
     );
