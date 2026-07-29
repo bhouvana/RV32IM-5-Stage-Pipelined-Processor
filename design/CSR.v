@@ -4,15 +4,26 @@
 
 // Machine-mode-only CSR file (docs/adr/0011-csr-and-exceptions.md), plus
 // (docs/adr/0019-f-extension.md, Phase C8) the F-extension's fflags/frm/
-// fcsr. Seven CSRs total: mstatus (MIE/MPIE only -- no S/U mode, so every
-// other field is hardwired 0), mtvec, mscratch, mepc, mcause, fflags, frm
+// fcsr, plus (docs/adr/0020-soc-integration.md, Phase D7) mie/mip. Nine
+// CSRs total: mstatus (MIE/MPIE only -- no S/U mode, so every other field
+// is hardwired 0), mie, mtvec, mscratch, mepc, mcause, mip, fflags, frm
 // (fcsr is not separate storage -- it's just {frm, fflags} packed into one
 // address, same "one more view onto the same bits" relationship the real
-// spec defines). No S-mode/U-mode, no PMP, no real interrupts (this design
-// has no interrupt input lines) -- this exists to handle and return from
-// the three synchronous exceptions this core can raise (illegal
-// instruction, ecall, ebreak), not to be a spec-complete privileged
+// spec defines). No S-mode/U-mode, no PMP -- this core is M-mode only
+// throughout, same scope docs/adr/0011 originally drew for exceptions, now
+// extended to the two interrupt sources docs/adr/0020 adds (a timer and
+// one external device, UART RX) rather than a spec-complete privileged
 // architecture.
+//
+// mie/mip only ever have two real bits each (`MIE_MTIE_BIT`/`MIE_MEIE_BIT`,
+// riscv_defs.vh) -- machine software-interrupt (MSIP) is not implemented
+// (no second hart exists to send one), and no S-mode/U-mode delegation
+// bits exist either. mip is read-only from software's perspective (its
+// two real bits, MTIP/MEIP, are hardware-driven straight from
+// Timer.v's/the PLIC-lite's own live pending signals -- see
+// `timer_pending`/`ext_pending` below); a csrrX write to its address is
+// silently dropped, the same "unimplemented CSR writes are silently
+// dropped" default every other unimplemented address already gets.
 module CSR #(
     parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md.
                             // csr_addr stays a fixed 12 bits regardless -- the
@@ -54,11 +65,29 @@ module CSR #(
     input [4:0] fp_flags_in,
     output [2:0] frm_val,
 
+    // docs/adr/0020-soc-integration.md (Phase D7/D8). Live hardware pending
+    // state -- Timer.v's own `pending` output and the PLIC-lite's single
+    // external source (Uart.v's `rx_irq`) -- feeding mip's two real,
+    // read-only bits. Tied to 1'b0 by riscvpipeline.v until D8 wires the
+    // real peripherals in; CSR.v's own interface needs no further changes
+    // at that point.
+    input timer_pending,
+    input ext_pending,
+
+    // docs/adr/0020-soc-integration.md (Phase D9). Not consumed by
+    // riscvpipeline.v's redirect logic until D9 -- exposed now so D9 can
+    // just wire these into its interrupt-detection condition without
+    // CSR.v's own interface changing again.
+    output mstatus_mie,  // mstatus[3], the global trap/interrupt enable
+    output mie_mtie,     // mie's machine-timer-interrupt enable bit
+    output mie_meie,     // mie's machine-external-interrupt enable bit
+
     output [XLEN-1:0] mtvec_val,  // trap target for the redirect mux
     output [XLEN-1:0] mepc_val    // mret target for the redirect mux
 );
 
     reg [XLEN-1:0] mstatus;  // only bit3 (MIE) and bit7 (MPIE) are real; rest hardwired 0
+    reg [XLEN-1:0] mie;      // only `MIE_MTIE_BIT`/`MIE_MEIE_BIT` are real; rest hardwired 0
     reg [XLEN-1:0] mtvec;
     reg [XLEN-1:0] mscratch;
     reg [XLEN-1:0] mepc;
@@ -66,17 +95,27 @@ module CSR #(
     reg [4:0] fflags;  // {NV, DZ, OF, UF, NX} -- sticky, OR-accumulated, not overwritten by hardware
     reg [2:0] frm;
 
+    // Read-only, hardware-driven -- not a reg, no reset/write case needed
+    // (see the module header for why a csrrX write to this address is
+    // simply dropped, the same as any other unimplemented CSR).
+    wire [XLEN-1:0] mip = ({XLEN{1'b0}} | (timer_pending << `MIE_MTIE_BIT) | (ext_pending << `MIE_MEIE_BIT));
+
     assign mtvec_val = mtvec;
     assign mepc_val = mepc;
     assign frm_val = frm;
+    assign mstatus_mie = mstatus[3];
+    assign mie_mtie = mie[`MIE_MTIE_BIT];
+    assign mie_meie = mie[`MIE_MEIE_BIT];
 
     always @(*) begin
         case (csr_addr)
             `CSR_ADDR_MSTATUS:  csr_rdata = mstatus;
+            `CSR_ADDR_MIE:      csr_rdata = mie;
             `CSR_ADDR_MTVEC:    csr_rdata = mtvec;
             `CSR_ADDR_MSCRATCH: csr_rdata = mscratch;
             `CSR_ADDR_MEPC:     csr_rdata = mepc;
             `CSR_ADDR_MCAUSE:   csr_rdata = mcause;
+            `CSR_ADDR_MIP:      csr_rdata = mip;
             `CSR_ADDR_FFLAGS:   csr_rdata = {{(XLEN-5){1'b0}}, fflags};
             `CSR_ADDR_FRM:      csr_rdata = {{(XLEN-3){1'b0}}, frm};
             `CSR_ADDR_FCSR:     csr_rdata = {{(XLEN-8){1'b0}}, frm, fflags};
@@ -93,9 +132,16 @@ module CSR #(
     // to back the rest of the real mstatus layout).
     wire [XLEN-1:0] mstatus_masked = ({XLEN{1'b0}} | (new_val[3] << 3) | (new_val[7] << 7));
 
+    // Only the two real mie bits survive a write; every other bit is
+    // hardwired 0 (see the module header -- no MSIP, no S/U-mode
+    // delegation bits).
+    wire [XLEN-1:0] mie_masked = ({XLEN{1'b0}} |
+        (new_val[`MIE_MTIE_BIT] << `MIE_MTIE_BIT) | (new_val[`MIE_MEIE_BIT] << `MIE_MEIE_BIT));
+
     always @(posedge clk) begin
         if (~rst) begin
             mstatus  <= {XLEN{1'b0}};
+            mie      <= {XLEN{1'b0}};
             mtvec    <= {XLEN{1'b0}};
             mscratch <= {XLEN{1'b0}};
             mepc     <= {XLEN{1'b0}};
@@ -128,6 +174,7 @@ module CSR #(
             else if (csr_write_en) begin
                 case (csr_addr)
                     `CSR_ADDR_MSTATUS:  mstatus  <= mstatus_masked;  // only MIE/MPIE are real
+                    `CSR_ADDR_MIE:      mie      <= mie_masked;      // only MTIE/MEIE are real
                     `CSR_ADDR_MTVEC:    mtvec    <= new_val;
                     `CSR_ADDR_MSCRATCH: mscratch <= new_val;
                     `CSR_ADDR_MEPC:     mepc     <= new_val;

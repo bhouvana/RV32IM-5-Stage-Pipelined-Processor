@@ -994,9 +994,20 @@ endgenerate
     .fp_flags_we(fp_flags_we),
     .fp_flags_in(fp_flags),
     .frm_val(frm_live),
+    // docs/adr/0020-soc-integration.md (Phase D7). Tied to 1'b0 until D8
+    // wires Timer.v's/the PLIC-lite's real pending signals in -- CSR.v's
+    // own interface needs no further changes at that point. mstatus_mie/
+    // mie_mtie/mie_meie are similarly unconsumed until D9's interrupt
+    // redirect logic exists; exposed now so D9 doesn't touch CSR.v again.
+    .timer_pending(1'b0),
+    .ext_pending(1'b0),
+    .mstatus_mie(mstatus_mie),
+    .mie_mtie(mie_mtie),
+    .mie_meie(mie_meie),
     .mtvec_val(mtvec_val),
     .mepc_val(mepc_val)
     );
+    wire mstatus_mie, mie_mtie, mie_meie;
 
     // What EX "produces" this cycle: an F-extension result (docs/adr/0019)
     // on any OP-FP/FMA op -- checked first since isOpFp_regde/isFma_regde

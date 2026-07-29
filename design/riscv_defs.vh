@@ -93,16 +93,31 @@
 
 // CSR addresses (standard RISC-V machine-mode assignments)
 `define CSR_ADDR_MSTATUS  12'h300
+`define CSR_ADDR_MIE      12'h304
 `define CSR_ADDR_MTVEC    12'h305
 `define CSR_ADDR_MSCRATCH 12'h340
 `define CSR_ADDR_MEPC     12'h341
 `define CSR_ADDR_MCAUSE   12'h342
+`define CSR_ADDR_MIP      12'h344
 
-// mcause values this core can actually raise (exceptions only -- interrupt
-// bit, mcause[31], is always 0 here since nothing generates interrupts)
+// mcause values this core can actually raise. Exceptions: mcause[31]=0,
+// the values below in the low bits. docs/adr/0020-soc-integration.md
+// (Phase D7) adds the two interrupt causes this core can now also raise
+// (mcause[31]=1 -- see CSR.v's trap_is_interrupt input) using the same
+// spec-assigned low-bit codes as the exception ones, since the interrupt
+// bit itself is what disambiguates them, not a disjoint numbering.
 `define MCAUSE_ILLEGAL_INSTRUCTION 32'd2
 `define MCAUSE_BREAKPOINT          32'd3
 `define MCAUSE_ECALL_FROM_M        32'd11
+
+// mie/mip bit positions (standard RISC-V machine-mode assignments) --
+// only these two bits are real in this core; every other mie/mip bit is
+// hardwired 0 (no software interrupt: no second hart to send one: no
+// S-mode/U-mode delegation: this core is M-mode only throughout).
+`define MIE_MTIE_BIT 7   // machine timer interrupt enable/pending
+`define MIE_MEIE_BIT 11  // machine external interrupt enable/pending
+`define MCAUSE_INT_MACHINE_TIMER    32'd7
+`define MCAUSE_INT_MACHINE_EXTERNAL 32'd11
 
 // ---- RV32F (docs/adr/0019-f-extension.md, Phase C of the redesign) ----
 // Encoding constants only in this commit -- no RTL consumes any of these
