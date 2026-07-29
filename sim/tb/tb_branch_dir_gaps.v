@@ -28,6 +28,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 // Closes the "each of blt/bge/ble/bgt/bltu/bgeu only has one branch
 // direction covered" gap flagged in ARCHITECTURE.md section 15 / the
@@ -36,7 +37,7 @@ module tb_branch_dir_gaps;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/branch_dir_gaps.mem")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/branch_dir_gaps.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;

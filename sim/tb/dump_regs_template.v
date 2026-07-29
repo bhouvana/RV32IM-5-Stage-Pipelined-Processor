@@ -30,6 +30,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 // Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__,
 // __MAX_TIME__, __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-
@@ -52,7 +53,7 @@ module dump_regs;
     integer fd;
 
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
-                .PIPELINE_PROFILE(__PIPELINE_PROFILE__)) dut(.clk(clk), .start(start));
+                .PIPELINE_PROFILE(__PIPELINE_PROFILE__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

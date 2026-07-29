@@ -28,6 +28,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 // docs/adr/0019-f-extension.md (Phase C8): fcsr (frm + fflags) fully live.
 // Covers: RM_DYN resolution actually reading CSR.v's live frm (same
@@ -43,7 +44,7 @@ module tb_float_fcsr;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/float_fcsr.mem")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/float_fcsr.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;

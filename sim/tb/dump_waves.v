@@ -28,6 +28,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 // Dumps every signal in the DUT (recursively, $dumpvars(0, dut)) to a real
 // VCD file for viewing in a waveform tool (GTKWave, or any other VCD
@@ -41,7 +42,7 @@ module dump_waves;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/demo.mem")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/demo.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

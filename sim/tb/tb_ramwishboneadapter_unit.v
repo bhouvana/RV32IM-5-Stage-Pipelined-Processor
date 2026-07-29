@@ -1,4 +1,5 @@
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 `include "DataMemoryBRAM.v"
 
 // docs/adr/0020-soc-integration.md (Phase D2). Standalone unit test for

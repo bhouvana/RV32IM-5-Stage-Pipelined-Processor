@@ -28,13 +28,14 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 module tb_store_load;
     `include "check_tasks.vh"
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/store_load.mem")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/store_load.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

@@ -57,11 +57,19 @@ module PIPELINED #(
     // Splitting EX/MEM (branch-resolve-early, cache-miss stalls) remains
     // explicitly out of scope -- the genuinely larger redesign docs/adr/0016
     // already deferred, not attempted here either.
-    parameter PIPELINE_PROFILE = 0
+    parameter PIPELINE_PROFILE = 0,
+    // docs/adr/0020-soc-integration.md (Phase D5). Uart.v's bit-shift-timing
+    // divisor -- small by default so every existing/simulation test stays
+    // fast (the framing logic itself doesn't care about the actual value,
+    // only that it counts correctly, so a small divisor is just as valid a
+    // correctness test as a realistic one). A real FPGA target instantiation
+    // would override this to match a real baud rate against a real clock
+    // frequency (e.g. 115200 baud at 50MHz needs 434).
+    parameter UART_CLKS_PER_BIT = 4
 )(
     input clk,
     input start,
-    output [XLEN-1:0] debug_x10   // read-only tap on x10/a0 (docs/adr/0012-fpga-
+    output [XLEN-1:0] debug_x10,   // read-only tap on x10/a0 (docs/adr/0012-fpga-
                                 // readiness.md) -- a bare-metal test program's
                                 // natural "write your result here" register
                                 // under the standard RISC-V calling
@@ -69,6 +77,13 @@ module PIPELINED #(
                                 // testbench (an unconnected output changes
                                 // nothing about existing behavior); fpga/top.v
                                 // is the first consumer.
+    // docs/adr/0020-soc-integration.md (Phase D5). Real UART serial pins,
+    // the same "tap for external use, unconnected changes nothing" shape
+    // as debug_x10 above -- every existing testbench that doesn't
+    // instantiate its own external UART peer simply leaves rx idle-high
+    // (matching a real disconnected serial line) and ignores tx.
+    output uart_tx,
+    input  uart_rx
 );
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
@@ -1189,13 +1204,18 @@ end
                     // see mem_stall's own comment below for why it is deliberately NOT
                     // consumed here.
 
-    wire [0:0] wb_s_cyc, wb_s_stb, wb_s_ack;
+    // docs/adr/0020-soc-integration.md (Phase D5). NUM_SLAVES=2: slave 0
+    // (index 0) is RAM, slave 1 is Uart.v -- indices/BASE/SIZE must stay
+    // in lockstep across the three flattened buses below (the same
+    // convention WbDecoder.v's own header comment documents).
+    wire [1:0] wb_s_cyc, wb_s_stb, wb_s_ack;
     wire wb_s_we;
     wire [XLEN-1:0] wb_s_addr, wb_s_data_o;
     wire [3:0] wb_s_sel;
-    wire [XLEN-1:0] wb_s_data_i;
+    wire [2*XLEN-1:0] wb_s_data_i;
 
-    WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(1), .BASE({32'd0}), .SIZE({MEM_SIZE_BYTES})) m_WbDecoder(
+    WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(2),
+                .BASE({`UART_BASE, 32'd0}), .SIZE({`UART_SIZE, MEM_SIZE_BYTES})) m_WbDecoder(
         .m_cyc(lsu_cyc), .m_stb(lsu_stb), .m_we(lsu_we),
         .m_addr(ALUOut_regem), .m_data_o(readData2_regem), .m_sel(lsu_sel),
         .m_data_i(readData), .m_ack(lsu_ack),
@@ -1210,6 +1230,15 @@ end
         .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
         .funct3(funct3_regem),
         .s_data_i(wb_s_data_i[0*XLEN +: XLEN]), .s_ack(wb_s_ack[0])
+    );
+
+    wire uart_rx_irq;  // reserved for D8's mip.MEIP wiring
+    Uart #(.CLKS_PER_BIT(UART_CLKS_PER_BIT)) m_Uart(
+        .clk(clk), .rst(start),
+        .s_cyc(wb_s_cyc[1]), .s_stb(wb_s_stb[1]), .s_we(wb_s_we),
+        .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
+        .s_data_i(wb_s_data_i[1*XLEN +: XLEN]), .s_ack(wb_s_ack[1]),
+        .tx(uart_tx), .rx(uart_rx), .rx_irq(uart_rx_irq)
     );
 //
 wire memtoReg_regwb;

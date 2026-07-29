@@ -28,12 +28,13 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 module tb_shift_mask;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/shift_mask.mem")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/shift_mask.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;

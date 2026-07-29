@@ -29,6 +29,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 // Template for real compiled-C programs (docs/ROADMAP.md Phase 10 --
 // CoreMark/Dhrystone, following up on the hand-written sim/benchmarks/
@@ -57,7 +58,7 @@ module c_bench_run;
         .DATA_INIT_FILE("__DATA_INIT_FILE__"),
         .MEM_SIZE_BYTES(__MEM_SIZE__),
         .HAZARD_STRATEGY(__HAZARD_STRATEGY__)
-    ) dut(.clk(clk), .start(start));
+    ) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

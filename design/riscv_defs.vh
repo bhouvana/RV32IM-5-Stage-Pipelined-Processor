@@ -198,4 +198,12 @@
 // in D5/D8) is defined relative to.
 `define MMIO_BASE 32'h1000_0000
 
+// docs/adr/0020-soc-integration.md (Phase D5). Uart.v's own 4-register
+// window (TXDATA/RXDATA/STATUS/CONTROL at word offsets 0/4/8/12, decoded
+// on s_addr[3:2] inside Uart.v itself) -- 16 bytes is exactly that window,
+// not a rounder/larger number reserved speculatively for registers that
+// don't exist yet.
+`define UART_BASE `MMIO_BASE  // the first, and today only, peripheral
+`define UART_SIZE 32'd16
+
 `endif

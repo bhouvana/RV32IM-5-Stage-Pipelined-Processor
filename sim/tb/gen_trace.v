@@ -28,6 +28,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 `include "reg1a.v"
 
 // Emits one CSV row per cycle to trace.csv -- every field here is read
@@ -53,7 +54,7 @@ module gen_trace;
     integer fd;
     integer cycle;
 
-    PIPELINED #(.INIT_FILE("sim/programs/demo.mem"), .PIPELINE_PROFILE(PIPELINE_PROFILE)) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/demo.mem"), .PIPELINE_PROFILE(PIPELINE_PROFILE)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

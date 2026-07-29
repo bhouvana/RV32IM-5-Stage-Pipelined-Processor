@@ -28,6 +28,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 // Ad hoc cycle-by-cycle trace tool, not a directed test (excluded from
 // sim/run_tests.sh's tb_*.v glob on purpose). Point INIT_FILE and the
@@ -38,7 +39,7 @@ module trace_debug;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/store_load.mem")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/store_load.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

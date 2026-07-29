@@ -28,6 +28,7 @@
 `include "CSR.v"
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
+`include "Uart.v"
 
 // docs/adr/0019-f-extension.md (Phase C6): first end-to-end exercise of the
 // live float datapath -- fmv.w.x/fmv.x.w (bit-pattern moves), fadd.s/fmul.s
@@ -40,7 +41,7 @@ module tb_float_basic;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/float_basic.mem")) dut(.clk(clk), .start(start));
+    PIPELINED #(.INIT_FILE("sim/programs/float_basic.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;
