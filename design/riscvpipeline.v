@@ -741,7 +741,17 @@ endgenerate
     // FDivider.v/FSqrt.v all expect an already-resolved rm, by design (see
     // FALU.v's own header comment).
     wire [4:0] funct5_regde = funct7_regde[6:2];
-    wire [1:0] fma_op_regde = opcode_regde[4:3];  // negate-product/negate-addend -- see FMADDUnit.v's header comment
+    // docs/adr/0019-f-extension.md (Phase C9 bugfix): MADD/MSUB/NMSUB/NMADD
+    // (7'b1000011/1000111/1001011/1001111) are distinguished by bits[3:2],
+    // NOT bits[4:3] -- bit4 is 0 for all four, so the original [4:3] slice
+    // silently aliased fmadd.s with fmsub.s (both decoded as op=00) and
+    // fnmsub.s with fnmadd.s (both decoded as op=01), each pair collapsing
+    // to whichever op the *lower* opcode of the pair actually meant. Found
+    // building sim/tools/iss.py's independent float model (C9) -- none of
+    // C6/C7/C8's directed tests happened to exercise fmsub.s/fnmsub.s/
+    // fnmadd.s, only fmadd.s, which has op=00 either way and so never
+    // surfaced the bug.
+    wire [1:0] fma_op_regde = opcode_regde[3:2];  // negate-product/negate-addend -- see FMADDUnit.v's header comment
     // docs/adr/0019-f-extension.md (Phase C8). frm_live comes from CSR.v
     // (instantiated below); resolving RM_DYN here, once, before any FPU
     // unit sees it, is what lets every one of those modules stay ignorant

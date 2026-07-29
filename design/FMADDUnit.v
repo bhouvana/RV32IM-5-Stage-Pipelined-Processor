@@ -10,8 +10,12 @@
 //
 // op[1:0] selects which of the four ops, using the exact encoding RISC-V's
 // own opcode assignment already provides: OPCODE_MADD/MSUB/NMSUB/NMADD's
-// bits[4:3] are 00/01/10/11 in that order, so the caller can pass
-// `opcode[4:3]` directly. op[1]=negate the product, op[0]=negate the addend:
+// bits[3:2] are 00/01/10/11 in that order (bit4, easy to assume is part of
+// this pair, is 0 for all four -- riscvpipeline.v's first wiring pass used
+// [4:3] and got away with it only because fmadd.s's own op happens to be
+// 00 regardless; caught by sim/tools/iss.py's independent model, Phase C9),
+// so the caller passes `opcode[3:2]` directly. op[1]=negate the product,
+// op[0]=negate the addend:
 //   fmadd.s  (op=00): +(rs1*rs2) + rs3
 //   fmsub.s  (op=01): +(rs1*rs2) - rs3
 //   fnmsub.s (op=10): -(rs1*rs2) + rs3
