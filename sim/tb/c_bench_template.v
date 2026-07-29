@@ -24,6 +24,7 @@
 `include "Hazard.v"
 `include "HazardNoForward.v"
 `include "Forward.v"
+`include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
 

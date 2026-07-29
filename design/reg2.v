@@ -45,7 +45,8 @@
     funct7_regde <= 0; \
     funct3_regde <= 0; \
     readReg1_regde <= 0; \
-    readReg2_regde <= 0;
+    readReg2_regde <= 0; \
+    readReg3_regde <= 0;
 
 `define PASS_DECODE_CONTEXT \
     pc_o_regde <= pc_o_regfd; \
@@ -58,7 +59,8 @@
     funct7_regde <= funct7; \
     funct3_regde <= funct3; \
     readReg1_regde <= readReg1; \
-    readReg2_regde <= readReg2;
+    readReg2_regde <= readReg2; \
+    readReg3_regde <= readReg3;
 
 module reg2 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
@@ -106,6 +108,12 @@ module reg2 #(
                   // put in EX until the divider finishes with it.
     input [$clog2(NUM_REGS)-1:0] readReg1,
     input [$clog2(NUM_REGS)-1:0] readReg2,
+    // docs/adr/0019-f-extension.md (Phase C7): rs3's index (inst[31:27]),
+    // latched the same "always read, harmless when unused" way readReg1/
+    // readReg2 already are -- only the R4-type FMADD family has a real rs3,
+    // but FForward.v needs this index for every instruction to correctly
+    // report "no forward" (index 0) rather than an accidental stale match.
+    input [$clog2(NUM_REGS)-1:0] readReg3,
     input jump,
     input jalr,
     input lui,
@@ -137,6 +145,7 @@ module reg2 #(
     output reg [2:0] funct3_regde,
     output reg [$clog2(NUM_REGS)-1:0] readReg1_regde,
     output reg [$clog2(NUM_REGS)-1:0] readReg2_regde,
+    output reg [$clog2(NUM_REGS)-1:0] readReg3_regde,
     output reg jump_regde,
     output reg jalr_regde,
     output reg lui_regde,

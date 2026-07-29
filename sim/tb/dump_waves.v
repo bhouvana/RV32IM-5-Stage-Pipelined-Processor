@@ -23,6 +23,7 @@
 `include "reg4.v"
 `include "Hazard.v"
 `include "Forward.v"
+`include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
 
