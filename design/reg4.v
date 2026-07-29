@@ -15,6 +15,7 @@ module reg4 #(
     input rst,
     input memtoReg_regem,
     input regWrite_regem,
+    input fRegWrite_regem,  // docs/adr/0019-f-extension.md: writes FRegister.v, not Register.v
     input [XLEN-1:0] readData,
     input [XLEN-1:0] ALUOut_regem,
     input [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
@@ -32,6 +33,7 @@ module reg4 #(
                   // match it would otherwise have had (see the ADR).
     output reg memtoReg_regwb,
     output reg regWrite_regwb,
+    output reg fRegWrite_regwb,
     output reg [XLEN-1:0] readData_regwb,
     output reg [XLEN-1:0] ALUOut_regwb,
     output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regwb,
@@ -45,6 +47,7 @@ begin
     begin
     memtoReg_regwb <= 0;
     regWrite_regwb <= 0;
+    fRegWrite_regwb <= 0;
     readData_regwb <= 0;
     ALUOut_regwb <= 0;
     write_to_Reg_regwb <=0;
@@ -60,6 +63,7 @@ begin
     begin
     memtoReg_regwb <= memtoReg_regem;
     regWrite_regwb <= regWrite_regem;
+    fRegWrite_regwb <= fRegWrite_regem;
     readData_regwb <= readData;
     ALUOut_regwb <= ALUOut_regem;
     write_to_Reg_regwb <= write_to_Reg_regem;

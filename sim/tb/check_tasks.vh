@@ -63,6 +63,27 @@ task check_val;
     end
 endtask
 
+task check_freg;
+    // docs/adr/0019-f-extension.md: same shape as check_reg, but reads
+    // FRegister.v's array instead of Register.v's -- bit-pattern compare is
+    // deliberate (IEEE `==` would be wrong for NaN/-0.0, not a concern
+    // rehashed here since these are directed non-NaN vectors).
+    input [4:0] regnum;
+    input [31:0] expected;
+    input [511:0] label;
+    reg [31:0] actual;
+    begin
+        actual = dut.m_FRegister.regs[regnum];
+        total_checks = total_checks + 1;
+        if (actual !== expected) begin
+            total_fails = total_fails + 1;
+            $display("  FAIL  %0s: f%0d = 0x%08h, expected 0x%08h", label, regnum, actual, expected);
+        end else begin
+            $display("  pass  %0s: f%0d = 0x%08h", label, regnum, actual);
+        end
+    end
+endtask
+
 task report;
     input [255:0] test_name;
     begin

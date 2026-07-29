@@ -11,6 +11,7 @@ module reg3 #(
     input rst,
     input memtoReg_regde,
     input regWrite_regde,
+    input fRegWrite_regde,  // docs/adr/0019-f-extension.md: writes FRegister.v, not Register.v
     input memRead_regde,
     input memWrite_regde,
     input [XLEN-1:0] ALUOut,
@@ -28,6 +29,7 @@ module reg3 #(
 
     output reg memtoReg_regem,
     output reg regWrite_regem,
+    output reg fRegWrite_regem,
     output reg memRead_regem,
     output reg memWrite_regem,
     output reg [XLEN-1:0] ALUOut_regem,
@@ -44,6 +46,7 @@ if(~rst)
     begin
     memtoReg_regem <=0;
     regWrite_regem <=0;
+    fRegWrite_regem <=0;
     memRead_regem <=0;
     memWrite_regem <=0;
     ALUOut_regem <=0;
@@ -61,6 +64,7 @@ else
     begin
     memtoReg_regem <=memtoReg_regde;
     regWrite_regem <=regWrite_regde;
+    fRegWrite_regem <=fRegWrite_regde;
     memRead_regem <=memRead_regde;
     memWrite_regem <=memWrite_regde;
     ALUOut_regem <=ALUOut;

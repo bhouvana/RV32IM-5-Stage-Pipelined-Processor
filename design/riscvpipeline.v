@@ -87,6 +87,7 @@ wire [1:0] ALUOp;
 wire memWrite;
 wire ALUSrc;
 wire regWrite;
+wire fRegWrite;    // docs/adr/0019-f-extension.md: writes FRegister.v instead of Register.v
 wire [REG_ADDR_WIDTH-1:0] readReg1;
 wire [REG_ADDR_WIDTH-1:0] readReg2;
 wire [REG_ADDR_WIDTH-1:0] writeReg;
@@ -275,7 +276,8 @@ wire [6:0] funct7_control;
         .isEcall(isEcall),
         .isEbreak(isEbreak),
         .isMret(isMret),
-        .illegalOpcode(illegalOpcode)
+        .illegalOpcode(illegalOpcode),
+        .fRegWrite(fRegWrite)
     );
 //
     ImmGen #(.Width(XLEN)) m_ImmGen(
@@ -294,6 +296,54 @@ wire [6:0] funct7_control;
         .readData1(readData1),
         .readData2(readData2)
     );
+
+    // docs/adr/0019-f-extension.md (Phase C6): parallel float register file.
+    // Always instantiated and always reading rs1/rs2/rs3's bit positions
+    // regardless of instruction type -- harmless when unused, the same
+    // convention Register.v's own readReg1/readReg2 already follow.
+    // writeReg/writeData are shared verbatim with Register.v above: the two
+    // files' own regWrite/fRegWrite enables are mutually exclusive by
+    // construction (Control.v never sets both for the same instruction), so
+    // sharing the destination-index and write-value wires is safe, not a
+    // race -- exactly one of the two actually commits a write each cycle.
+    wire [XLEN-1:0] freadData1, freadData2, freadData3;
+    FRegister #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_FRegister(
+        .clk(clk),
+        .rst(start),
+        .regWrite(fRegWrite_regwb),
+        .readReg1(inst_regfd[19:15]),
+        .readReg2(inst_regfd[24:20]),
+        .readReg3(inst_regfd[31:27]),
+        .writeReg(write_to_Reg_regwb),
+        .writeData(writeData_regwb),
+        .readData1(freadData1),
+        .readData2(freadData2),
+        .readData3(freadData3)
+    );
+
+    // Opcode/funct5 classification, ID stage (inst_regfd) -- computed
+    // directly from the raw instruction bits rather than as new Control.v
+    // output ports, since these are needed in more than one place (register-
+    // read routing here, the conservative float-hazard stall below) and are
+    // cheap, pure combinational functions of bits Control.v already receives
+    // anyway. A second, one-cycle-later copy exists at the EX stage
+    // (inst_regde-based, see below) for actual execution dispatch -- the
+    // same "decode the same thing twice, one cycle apart" shape
+    // Control.v/ALUCtrl.v already use.
+    wire [6:0] opcode_fd = inst_regfd[6:0];
+    wire isOpFp_fd = (opcode_fd == `OPCODE_FP);
+    wire isStoreFp_fd = (opcode_fd == `OPCODE_STORE_FP);
+    wire isFma_fd = (opcode_fd == `OPCODE_MADD) || (opcode_fd == `OPCODE_MSUB) ||
+                    (opcode_fd == `OPCODE_NMSUB) || (opcode_fd == `OPCODE_NMADD);
+    // Any float-destination instruction still in flight (reg2/reg3/reg4)
+    // makes this a hazard for *any* float-reading instruction now in ID --
+    // deliberately not narrowed to an actual register-index match the way
+    // Hazard.v/Forward.v do for the integer file: a maximally conservative
+    // stall-on-any-overlap is the safer choice for a step meant to be fully
+    // replaced by Phase C7's real forwarding network, not a permanent
+    // design. Correctness first; Phase C7 recovers the performance.
+    wire float_hazard_stall = (isOpFp_fd || isStoreFp_fd || isFma_fd) &&
+                              (fRegWrite_regde || fRegWrite_regem || fRegWrite_regwb);
 
     // Hazard strategy select (docs/adr/0016-swappable-hazard-strategy.md) --
     // elaboration-time choice between the two hazard units; whichever one
@@ -330,11 +380,15 @@ wire [6:0] funct7_control;
     wire memWrite_regde;
     wire ALUSrc_regde;
     wire regWrite_regde;
+    wire fRegWrite_regde;
     wire [1:0] ALUOp_regde;
     wire [REG_ADDR_WIDTH-1:0] writeReg_regde;
     wire [XLEN-1:0] pc_o_regde;
     wire [XLEN-1:0] readData1_regde;
     wire [XLEN-1:0] readData2_regde;
+    wire [XLEN-1:0] freadData1_regde;
+    wire [XLEN-1:0] freadData2_regde;
+    wire [XLEN-1:0] freadData3_regde;
     wire [XLEN-1:0] imm_regde;
     wire [XLEN-1:0] inst_regde;
     wire [REG_ADDR_WIDTH-1:0] readReg1_regde;
@@ -360,6 +414,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .memWrite(memWrite),
     .ALUSrc(ALUSrc),
     .regWrite(regWrite),
+    .fRegWrite(fRegWrite),
     .writeReg(inst_regfd[11:7]),
     .funct7(funct7_control),
     .funct3(funct3_control),
@@ -367,9 +422,14 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .pc_o_regfd(pc_o_regfd),
     .readData1(readData1),
     .readData2(readData2),
+    .freadData1(freadData1),
+    .freadData2(freadData2),
+    .freadData3(freadData3),
     .imm(imm),
     .inst_regfd(inst_regfd),
-    .flush(flush),
+    .flush(flush | float_hazard_stall),  // docs/adr/0019: bubble reg2 while a float RAW hazard clears, same
+                                          // "insert a nop, real instruction retries from IF/ID" shape as
+                                          // Hazard.v's own load-use flush
     .branch_taken(branch_taken),
     .hold(reg2_hold),   // multi-cycle divide interlock (docs/adr/0009) OR MEM-stage
                          // interlock (docs/adr/0013) -- either way, ID/EX must not
@@ -392,11 +452,15 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .memWrite_regde(memWrite_regde),
     .ALUSrc_regde(ALUSrc_regde),
     .regWrite_regde(regWrite_regde),
+    .fRegWrite_regde(fRegWrite_regde),
     .ALUOp_regde(ALUOp_regde),
     .write_to_Reg_regde(write_to_Reg_regde),
     .pc_o_regde(pc_o_regde),
     .readData1_regde(readData1_regde),
     .readData2_regde(readData2_regde),
+    .freadData1_regde(freadData1_regde),
+    .freadData2_regde(freadData2_regde),
+    .freadData3_regde(freadData3_regde),
     .imm_regde(imm_regde),
     .inst_regde(inst_regde),
     .funct7_regde(funct7_regde),
@@ -585,6 +649,114 @@ endgenerate
     // it never affects normal single-cycle execution.
     wire div_stall = isDivRem && !div_done;
 
+    // ==========================================================================
+    // F-extension execute (docs/adr/0019-f-extension.md, Phase C6). Opcode/
+    // funct5 classification, EX stage (inst_regde) -- see the ID-stage
+    // (inst_regfd-based) copy above for why this is computed twice, one
+    // cycle apart, rather than threaded as a dedicated Control.v output.
+    // ==========================================================================
+    wire [6:0] opcode_regde = inst_regde[6:0];
+    wire isOpFp_regde = (opcode_regde == `OPCODE_FP);
+    wire isLoadFp_regde = (opcode_regde == `OPCODE_LOAD_FP);
+    wire isStoreFp_regde = (opcode_regde == `OPCODE_STORE_FP);
+    wire isFma_regde = (opcode_regde == `OPCODE_MADD) || (opcode_regde == `OPCODE_MSUB) ||
+                       (opcode_regde == `OPCODE_NMSUB) || (opcode_regde == `OPCODE_NMADD);
+    // OP-FP's funct5 (inst[31:27]) occupies the exact bits R-type's funct7
+    // does, so it's already sitting in funct7_regde's top 5 bits -- no new
+    // reg2 field needed to carry it. rm (rounding mode) is likewise already
+    // funct3_regde; RM_DYN (rm==111) resolution against fcsr's live frm is
+    // Phase C8's job -- until then it falls through to FALU.v's own
+    // documented defensive RNE fallback, a real (if temporary) known gap,
+    // not a silent miscompute.
+    wire [4:0] funct5_regde = funct7_regde[6:2];
+    wire [1:0] fma_op_regde = opcode_regde[4:3];  // negate-product/negate-addend -- see FMADDUnit.v's header comment
+    // rs1 is the one operand that's sometimes INTEGER despite an OP-FP
+    // opcode (fcvt.s.w/fcvt.s.wu/fmv.w.x) -- rs2/rs3 are float whenever
+    // they're real operands at all for this core's op set.
+    wire rs1_is_float_regde = isOpFp_regde &&
+        !(funct5_regde == `FUNCT5_FCVT_S_W || funct5_regde == `FUNCT5_FMV_W_X);
+    wire fpu_uses_a_regde = rs1_is_float_regde || isFma_regde;
+    wire [XLEN-1:0] fpu_operand_a = fpu_uses_a_regde ? freadData1_regde : readData1_final;
+
+    wire [31:0] falu_result;
+    wire [4:0] falu_flags;
+    FALU m_FALU(
+        .funct5(funct5_regde),
+        .funct3(funct3_regde),
+        .rs2_sel(readReg2_regde),   // inst[24:20] doubles as a real rs2 index or an op-selector, same bits either way
+        .a(fpu_operand_a),
+        .b(freadData2_regde),
+        .result(falu_result),
+        .flags(falu_flags)
+    );
+
+    wire [31:0] fmadd_result;
+    wire [4:0] fmadd_flags;
+    FMADDUnit m_FMADDUnit(
+        .op(fma_op_regde),
+        .rm(funct3_regde),
+        .a(freadData1_regde),
+        .b(freadData2_regde),
+        .c(freadData3_regde),
+        .result(fmadd_result),
+        .flags(fmadd_flags)
+    );
+
+    // Multi-cycle fdiv.s/fsqrt.s (docs/adr/0019 Phase C4), wired in with the
+    // exact same busy/done interlock shape div_stall already established
+    // above -- `start` tied to the level condition, not a pulse, relying on
+    // each unit's own internal `start && !busy && !done` guard the same way
+    // Divider.v's does.
+    wire isFpDiv_regde = isOpFp_regde && (funct5_regde == `FUNCT5_FDIV);
+    wire isFpSqrt_regde = isOpFp_regde && (funct5_regde == `FUNCT5_FSQRT);
+    wire fdiv_busy, fdiv_done;
+    wire [31:0] fdiv_result;
+    wire [4:0] fdiv_flags;
+    FDivider m_FDivider(
+        .clk(clk),
+        .rst(start),
+        .start(isFpDiv_regde),
+        .rm(funct3_regde),
+        .a(fpu_operand_a),
+        .b(freadData2_regde),
+        .busy(fdiv_busy),
+        .done(fdiv_done),
+        .result(fdiv_result),
+        .flags(fdiv_flags)
+    );
+    wire fsqrt_busy, fsqrt_done;
+    wire [31:0] fsqrt_result;
+    wire [4:0] fsqrt_flags;
+    FSqrt m_FSqrt(
+        .clk(clk),
+        .rst(start),
+        .start(isFpSqrt_regde),
+        .rm(funct3_regde),
+        .a(fpu_operand_a),
+        .busy(fsqrt_busy),
+        .done(fsqrt_done),
+        .result(fsqrt_result),
+        .flags(fsqrt_flags)
+    );
+
+    // True from the cycle an fdiv.s/fsqrt.s enters EX until (not including)
+    // the cycle its result becomes valid -- mirrors div_stall exactly, one
+    // more OR term alongside it wherever the pipeline freezes/holds for a
+    // still-computing multi-cycle EX operation.
+    wire fp_stall = (isFpDiv_regde && !fdiv_done) || (isFpSqrt_regde && !fsqrt_done);
+
+    // What the F-extension's own execute step produced this cycle,
+    // regardless of which of the four units actually computed it -- muxed
+    // into ex_result below alongside the existing CSR/div/ALU sources.
+    // flw/fsw deliberately do NOT go through this mux: their address is
+    // computed by the existing ALU path exactly like lw/sw (Control.v sets
+    // ALUSrc/ALUOp for them the same way), so ALUOut already holds the right
+    // value for those two ops without any change here.
+    wire [31:0] fp_result = isFma_regde   ? fmadd_result :
+                            isFpDiv_regde ? fdiv_result   :
+                            isFpSqrt_regde? fsqrt_result  :
+                                            falu_result;    // every other OP-FP op
+
     // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md). DataMemoryBRAM's
     // read is registered: a load's `readData` isn't valid until the cycle
     // *after* its address/memRead are presented, one cycle later than the old
@@ -619,12 +791,16 @@ endgenerate
         else mem_stall_done_r <= mem_stall;
     end
 
-    assign pc_stall = stall | div_stall | mem_stall;
+    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_hazard_stall;
 
     // reg2's own hold condition, factored out for reuse below (CSR.v's write
     // gating needs to know exactly the same thing reg2 does: "is this
-    // instruction's stay in EX not over yet".
-    wire reg2_hold = div_stall | mem_stall;
+    // instruction's stay in EX not over yet". fp_stall joins div_stall/
+    // mem_stall here the same way it joins them in pc_stall above --
+    // float_hazard_stall deliberately does NOT: that stall's cause (a
+    // hazard against an *older* in-flight instruction) is resolved in ID,
+    // not EX, so it has no business holding reg2's own occupant in place.
+    wire reg2_hold = div_stall | mem_stall | fp_stall;
 
     wire [XLEN-1:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
 
@@ -685,13 +861,20 @@ endgenerate
     .mepc_val(mepc_val)
     );
 
-    // What EX "produces" this cycle: the CSR's old value on a real csrrX op,
+    // What EX "produces" this cycle: an F-extension result (docs/adr/0019)
+    // on any OP-FP/FMA op -- checked first since isOpFp_regde/isFma_regde
+    // are mutually exclusive with isCsr_regde/isDivRem by construction (an
+    // instruction is never both) -- the CSR's old value on a real csrrX op,
     // the divider's result on div/rem (valid only when div_done, but only
     // consumed downstream on that exact cycle -- see reg3_bubble below),
-    // the ALU's result otherwise. No forwarding correction needed for CSR
-    // reads either (same reasoning as lui/auipc, docs/adr/0009): ex_result
-    // is already correct by the time reg3 latches it.
-    wire [XLEN-1:0] ex_result = isCsr_regde ? csr_old_val : (isDivRem ? div_result : ALUOut);
+    // the ALU's result otherwise (this last case is also what flw/fsw use,
+    // since their address is computed by the ordinary ALU path, not routed
+    // through fp_result -- see fp_result's own comment above). No
+    // forwarding correction needed for CSR reads either (same reasoning as
+    // lui/auipc, docs/adr/0009): ex_result is already correct by the time
+    // reg3 latches it.
+    wire [XLEN-1:0] ex_result = (isOpFp_regde || isFma_regde) ? fp_result :
+                                 isCsr_regde ? csr_old_val : (isDivRem ? div_result : ALUOut);
 
     assign unconditional_redirect = jump_regde | exception_taken | isMret_regde;
     assign redirect_target = exception_taken ? mtvec_val :
@@ -766,6 +949,7 @@ endgenerate
 wire [REG_ADDR_WIDTH-1:0] write_to_Reg_regde;
 wire memtoReg_regem;
 wire regWrite_regem;
+wire fRegWrite_regem;
 wire memRead_regem;
 wire memWrite_regem;
 wire [XLEN-1:0] ALUOut_regem;
@@ -785,9 +969,14 @@ wire [2:0] funct3_regem;
     // bit is 0) makes this show up correctly everywhere downstream expects
     // "one instruction, one completion": the register file, forwarding,
     // and the pipeline viewer's trace. See docs/adr/0009-multicycle-divider.md.
-    wire reg3_bubble = div_stall;
+    // fp_stall joins div_stall here for the exact same reason: while an
+    // fdiv.s/fsqrt.s is still computing, reg2/EX keeps presenting that same
+    // instruction cycle after cycle, and without bubbling, reg3 would latch
+    // its (fRegWrite=1) control signals on every one of those cycles too.
+    wire reg3_bubble = div_stall | fp_stall;
     wire memtoReg_to_reg3      = reg3_bubble ? 1'b0 : memtoReg_regde;
     wire regWrite_to_reg3      = reg3_bubble ? 1'b0 : regWrite_regde;
+    wire fRegWrite_to_reg3     = reg3_bubble ? 1'b0 : fRegWrite_regde;
     wire memRead_to_reg3       = reg3_bubble ? 1'b0 : memRead_regde;
     wire memWrite_to_reg3      = reg3_bubble ? 1'b0 : memWrite_regde;
     wire jump_to_reg3          = reg3_bubble ? 1'b0 : jump_regde;
@@ -798,16 +987,17 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
     .rst(start),
     .memtoReg_regde(memtoReg_to_reg3),
     .regWrite_regde(regWrite_to_reg3),
+    .fRegWrite_regde(fRegWrite_to_reg3),
     .memRead_regde(memRead_to_reg3),
     .memWrite_regde(memWrite_to_reg3),
     .ALUOut(ex_result),
-    // Store data must come from the forwarded value (readData2_final), not
-    // the raw decode-stage readData2_regde: Forward.v/Mux4to1 already
-    // compute the correct EX/MEM- or MEM/WB-forwarded rs2 value for the ALU
-    // path, but store data is a separate path to reg3/DataMemory that was
-    // bypassing it entirely -- a `sw` whose data register was written 1-2
-    // instructions earlier stored stale data. See docs/adr/0003-store-data-forwarding.md.
-    .readData2_regde(readData2_final),
+    // Store data must come from the forwarded value (readData2_final) for
+    // sw, or the (not-yet-forwarded, see the ID-stage float-hazard-stall
+    // comment above for why) freadData2_regde for fsw -- docs/adr/0003's
+    // lesson (store data is a separate path to reg3/DataMemory, easy to
+    // silently leave on the raw/stale decode-stage value) applies to the
+    // float case just as much as the original integer one it was found for.
+    .readData2_regde(isStoreFp_regde ? freadData2_regde : readData2_final),
     .write_to_Reg_regde(destReg_to_reg3),
     .jump_regde(jump_to_reg3),
     .pc_plus4_regde(pc_plus4_regde),
@@ -819,6 +1009,7 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
 
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
+    .fRegWrite_regem(fRegWrite_regem),
     .memRead_regem(memRead_regem),
     .memWrite_regem(memWrite_regem),
     .ALUOut_regem(ALUOut_regem),
@@ -833,7 +1024,8 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
 // unconditionally every cycle for a store (its docs/adr/0013 `hold` input
 // only ever fires on a load, mem_stall being gated on memRead_regem, which
 // is mutually exclusive with memWrite_regem), so readData2_regem this cycle
-// must equal readData2_final as it was one cycle ago. This is exactly the
+// must equal (readData2_final, or fsw's freadData2_regde -- see reg3's own
+// instantiation above) as it was one cycle ago. This is exactly the
 // property docs/adr/0003-store-data-forwarding.md's bug violated (reg3 was
 // wired to the raw readData2_regde instead of the forwarded value) --
 // this assertion would have caught that wiring mistake immediately instead
@@ -841,7 +1033,7 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
 `ifdef ASSERT_ON
 reg [XLEN-1:0] expected_store_data;
 always @(posedge clk) begin
-    expected_store_data <= readData2_final;
+    expected_store_data <= (isStoreFp_regde ? freadData2_regde : readData2_final);
     if (start && memWrite_regem && (readData2_regem !== expected_store_data))
         begin
             $display("ASSERTION FAILED @t=%0t: reg3 store-data mismatch: readData2_regem=%0d, expected (last cycle's forwarded readData2_final)=%0d",
@@ -872,6 +1064,7 @@ end
 //
 wire memtoReg_regwb;
 wire regWrite_regwb;
+wire fRegWrite_regwb;
 wire [XLEN-1:0] readData_regwb;
 wire [XLEN-1:0] ALUOut_regwb;
 wire [XLEN-1:0] readData_regem;
@@ -886,6 +1079,7 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .rst(start),
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
+    .fRegWrite_regem(fRegWrite_regem),
     .readData(readData),
     .ALUOut_regem(ALUOut_regem),
     .write_to_Reg_regem(write_to_Reg_regem),
@@ -903,6 +1097,7 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
                         // case, caught by random cross-checking.
     .memtoReg_regwb(memtoReg_regwb),
     .regWrite_regwb(regWrite_regwb),
+    .fRegWrite_regwb(fRegWrite_regwb),
     .readData_regwb(readData_regwb),
     .ALUOut_regwb(ALUOut_regwb),
     .write_to_Reg_regwb(write_to_Reg_regwb),

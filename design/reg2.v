@@ -21,6 +21,7 @@
     memWrite_regde <= 0; \
     ALUSrc_regde <= 0; \
     regWrite_regde <= 0; \
+    fRegWrite_regde <= 0; \
     ALUOp_regde <= 0; \
     write_to_Reg_regde <= 0; \
     jump_regde <= 0; \
@@ -37,6 +38,9 @@
     pc_o_regde <= 0; \
     readData1_regde <= 0; \
     readData2_regde <= 0; \
+    freadData1_regde <= 0; \
+    freadData2_regde <= 0; \
+    freadData3_regde <= 0; \
     imm_regde <= 0; \
     funct7_regde <= 0; \
     funct3_regde <= 0; \
@@ -47,6 +51,9 @@
     pc_o_regde <= pc_o_regfd; \
     readData1_regde <= readData1; \
     readData2_regde <= readData2; \
+    freadData1_regde <= freadData1; \
+    freadData2_regde <= freadData2; \
+    freadData3_regde <= freadData3; \
     imm_regde <= imm; \
     funct7_regde <= funct7; \
     funct3_regde <= funct3; \
@@ -65,6 +72,7 @@ module reg2 #(
     input memWrite,
     input ALUSrc,
     input regWrite,
+    input fRegWrite,  // docs/adr/0019-f-extension.md: writes FRegister.v instead of Register.v
     input [$clog2(NUM_REGS)-1:0] writeReg,
     input [6:0] funct7,
     input [2:0] funct3,
@@ -72,6 +80,20 @@ module reg2 #(
     input [XLEN-1:0] pc_o_regfd,
     input [XLEN-1:0] readData1,
     input [XLEN-1:0] readData2,
+    // docs/adr/0019-f-extension.md (Phase C6): FRegister.v's own three read
+    // ports, kept entirely separate from readData1/readData2 above rather
+    // than muxed/shared -- these are NOT yet forwarded (that's Phase C7;
+    // for now a conservative stall, not forwarding, protects float RAW
+    // hazards). Deliberately not routed through Forward.v/MuxN's existing
+    // integer-only forwarding network at all: that network's hazard
+    // detection is keyed on plain 5-bit register *indices*, which can't
+    // tell an integer register apart from a float one that happens to
+    // share the same index -- keeping the two paths fully separate avoids
+    // that cross-file ambiguity by construction instead of needing extra
+    // logic to rule it out.
+    input [XLEN-1:0] freadData1,
+    input [XLEN-1:0] freadData2,
+    input [XLEN-1:0] freadData3,
     input [XLEN-1:0] imm,
     input [XLEN-1:0] inst_regfd,
     input flush,
@@ -100,11 +122,15 @@ module reg2 #(
     output reg memWrite_regde,
     output reg ALUSrc_regde,
     output reg regWrite_regde,
+    output reg fRegWrite_regde,
     output reg [1:0] ALUOp_regde,
     output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regde,
     output reg [XLEN-1:0] pc_o_regde,
     output reg [XLEN-1:0] readData1_regde,
     output reg [XLEN-1:0] readData2_regde,
+    output reg [XLEN-1:0] freadData1_regde,
+    output reg [XLEN-1:0] freadData2_regde,
+    output reg [XLEN-1:0] freadData3_regde,
     output reg [XLEN-1:0] imm_regde,
     output reg [XLEN-1:0] inst_regde,
     output reg [6:0] funct7_regde,
@@ -177,6 +203,7 @@ begin
         memWrite_regde <= memWrite;
         ALUSrc_regde <= ALUSrc;
         regWrite_regde <= regWrite;
+        fRegWrite_regde <= fRegWrite;
         ALUOp_regde <= ALUOp;
         write_to_Reg_regde <= writeReg;
         jump_regde <= jump;

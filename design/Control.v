@@ -36,9 +36,17 @@ module Control (
     output reg isEcall,
     output reg isEbreak,
     output reg isMret,
-    output reg illegalOpcode  // opcode itself unrecognized -- see riscvpipeline.v for the
+    output reg illegalOpcode, // opcode itself unrecognized -- see riscvpipeline.v for the
                                // other exception source (ALUCtl==ILLEGAL, a recognized
                                // opcode with an unrecognized funct7/funct3)
+    // docs/adr/0019-f-extension.md (Phase C6). `regWrite` keeps its
+    // existing meaning (write Register.v, the integer file) unchanged --
+    // `fRegWrite` is the parallel signal for writing FRegister.v instead,
+    // since several float ops (feq.s/flt.s/fle.s/fclass.s/fcvt.w.s/
+    // fcvt.wu.s/fmv.x.w) write an *integer* destination despite reading
+    // float operands, and are the reason this can't just be "regWrite
+    // means whichever file this op happens to target."
+    output reg fRegWrite
     );
 
 always@(*)begin
@@ -59,6 +67,7 @@ always@(*)begin
     isEbreak  = 0;
     isMret    = 0;
     illegalOpcode = 0;
+    fRegWrite = 0;
 
 
 case(opcode)
@@ -164,6 +173,43 @@ case(opcode)
             isCsr = 1;
             regWrite = 1;  // rd <- CSR's old value (see riscvpipeline.v's ex_result override)
         end
+    end
+
+    // docs/adr/0019-f-extension.md (Phase C6). funt7 (inst[31:25]) already
+    // carries OP-FP's funct5 (inst[31:27]) in its top 5 bits regardless --
+    // no new Control.v input needed to sub-decode it. rs1IsFloat/
+    // rs2IsFloat/rdIsFloat aren't Control.v outputs at all: riscvpipeline.v
+    // derives them directly from opcode/funt7 the same way this case
+    // statement does here, since they're needed in more places (ID-stage
+    // register-read routing, not just here) than a single new port each
+    // would conveniently thread through.
+    `OPCODE_FP:
+    begin
+        case (funt7[6:2])
+            `FUNCT5_FCMP, `FUNCT5_FCVT_W_S, `FUNCT5_FMV_X_W_FCLASS:
+                regWrite = 1;   // reads float operand(s), writes an INTEGER dest
+            default:
+                fRegWrite = 1;  // fadd.s/fsub.s/fmul.s/fdiv.s/fsqrt.s/fsgnj*/fmin/fmax/fcvt.s.w*/fmv.w.x
+        endcase
+    end
+
+    `OPCODE_LOAD_FP:  // flw: same shape as OPCODE_LOAD, but the loaded value goes to FRegister.v
+    begin
+        memRead  = 1;
+        memtoReg = 1;
+        ALUSrc   = 1;
+        fRegWrite = 1;
+    end
+
+    `OPCODE_STORE_FP:  // fsw: same shape as OPCODE_STORE (rs1 is still the INTEGER address base)
+    begin
+        memWrite = 1;
+        ALUSrc   = 1;
+    end
+
+    `OPCODE_MADD, `OPCODE_MSUB, `OPCODE_NMSUB, `OPCODE_NMADD:  // fmadd.s/fmsub.s/fnmsub.s/fnmadd.s
+    begin
+        fRegWrite = 1;
     end
 
     default:

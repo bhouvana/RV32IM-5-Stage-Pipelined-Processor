@@ -42,13 +42,15 @@ module ImmGen#(parameter Width = 32) (
                 imm = {1'b0,{20{inst[31]}}, inst[7], inst[30:25], inst[11:8]};
  
             end
-            7'b0000011://lw
+            7'b0000011,   //lw
+            7'b0000111:   //flw -- same I-type immediate shape as lw (docs/adr/0019-f-extension.md)
             begin
                 imm = {{20{inst[31]}},inst[31:20]};
             end
 
 
-            7'b0100011://sw
+            7'b0100011,   //sw
+            7'b0100111:   //fsw -- same S-type immediate shape as sw (docs/adr/0019-f-extension.md)
             begin
                 //imm[11:5] = inst[31:25];
                   //imm[4:0] =inst[11:7];
