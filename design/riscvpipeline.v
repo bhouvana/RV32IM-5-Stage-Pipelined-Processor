@@ -938,8 +938,10 @@ endgenerate
     wire [XLEN-1:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
 
     // CSR / synchronous exceptions (docs/adr/0011-csr-and-exceptions.md).
-    // M-mode only, no real interrupts -- illegal instruction, ecall, ebreak,
-    // and the csrrw/csrrs/csrrc(+i) instructions plus mret to act on them.
+    // M-mode only -- illegal instruction, ecall, ebreak, and the
+    // csrrw/csrrs/csrrc(+i) instructions plus mret to act on them. (Real
+    // asynchronous interrupts -- timer and UART RX -- are a separate
+    // detection point below, docs/adr/0020-soc-integration.md Phase D9.)
     // Both exception sources resolve in EX, same stage as branch/jal/jalr:
     // illegalOpcode_regde came from Control.v at decode time (an
     // unrecognized opcode, or SYSTEM/funct3=0 with an unrecognized
@@ -950,6 +952,82 @@ endgenerate
                               isEbreak_regde ? `MCAUSE_BREAKPOINT :
                               isEcall_regde  ? `MCAUSE_ECALL_FROM_M :
                               {XLEN{1'b0}};
+
+    // docs/adr/0020-soc-integration.md (Phase D9). Interrupt detection --
+    // independent of whatever instruction (if any) currently sits in EX,
+    // unlike the synchronous exceptions above. mip's two real bits are
+    // exactly Uart.v's rx_irq / Timer.v's pending (uart_rx_irq/
+    // timer_pending_w, wired below at the bus instantiation, D5/D8); mie's
+    // enable bits and mstatus.MIE are CSR.v's own live outputs (D7).
+    // Spec-mandated priority when both are pending and enabled: machine-
+    // external over machine-timer.
+    wire mei_pending = mie_meie & uart_rx_irq;
+    wire mti_pending = mie_mtie & timer_pending_w;
+
+    // Does EX's current occupant already want to redirect PC for its own
+    // reasons this cycle (a taken branch, jal/jalr, a synchronous
+    // exception, or mret)? If so, defer the interrupt one cycle rather
+    // than contest the same redirect_target mux this same cycle -- mip is
+    // level-pending (it doesn't clear itself), so nothing is lost, only
+    // recognized one cycle later once whatever's already redirecting
+    // finishes. Deliberately the *pre*-interrupt value of what becomes
+    // branch_taken/unconditional_redirect below, built from their raw
+    // constituent signals rather than those wires themselves (referencing
+    // them here would be a combinational self-reference).
+    wire other_redirect_taken = (branch_regde & zero) | jump_regde | exception_taken | isMret_regde;
+
+    // Gated on !pc_stall, not just !reg2_hold (docs/adr/0009/0013's
+    // multi-cycle div/mem/fp interlock) -- reg1.v's own squash-on-jump
+    // takes priority over its *own* stall input (see reg1.v: the
+    // branch_regde&zero|jump check is tested before stall), so asserting
+    // an interrupt's `jump` into reg1 during an ordinary Hazard.v load-use
+    // stall (`stall`, folded into pc_stall but NOT into reg2_hold) would
+    // incorrectly discard the very instruction that stall exists to hold
+    // in place -- not just a multi-cycle EX operation. Found by tracing
+    // reg1.v's own priority ordering before implementing this (the same
+    // "found by careful tracing, not assumed" standard docs/adr/0009/0013
+    // set), not by hitting the bug at runtime.
+    wire interrupt_taken = mstatus_mie & (mei_pending | mti_pending) & !pc_stall & !other_redirect_taken;
+    wire [XLEN-1:0] interrupt_cause = mei_pending ? `MCAUSE_INT_MACHINE_EXTERNAL : `MCAUSE_INT_MACHINE_TIMER;
+
+    // Tracks "is reg1's current output (pc_o_regfd/inst_regfd) a real
+    // fetched instruction, or a squash-produced bubble" -- mirrors reg1.v's
+    // own priority ordering exactly (squash > stall-hold > fresh latch) so
+    // it always agrees with what reg1 itself actually did last edge.
+    // redirect_squash_extend_r joins branch_taken here for the same reason
+    // reg1's own `jump` port does (docs/adr/0018): under
+    // PROFILE_6STAGE_SPLIT_FETCH the squash window is one cycle longer.
+    reg id_bubble_r;
+    always @(posedge clk) begin
+        if (~start)
+            id_bubble_r <= 1'b1;  // reg1 resets to a bubble too
+        else if (branch_taken | redirect_squash_extend_r)
+            id_bubble_r <= 1'b1;
+        else if (pc_stall)
+            id_bubble_r <= id_bubble_r;  // holds, same as reg1 itself
+        else
+            id_bubble_r <= 1'b0;
+    end
+
+    // mepc for an interrupt is the PC of the instruction that *would have
+    // executed next* -- normally reg1's current output (pc_o_regfd, the
+    // ID-stage instruction about to enter EX), which this same redirect
+    // squashes via reg2's own branch_taken port exactly like any other
+    // redirect -- deliberately NOT pc_o_regde (EX's *current* occupant,
+    // used by the exception path above): unlike a synchronous exception,
+    // this instruction did nothing wrong and is left to retire normally
+    // this same cycle; only what comes *after* it is deferred. Exception:
+    // if reg1's current output is itself a squash-produced bubble
+    // (id_bubble_r, above) rather than a real fetched instruction -- e.g.
+    // the cycle right after any other taken redirect -- pc_o_regfd is a
+    // meaningless 0 (reg1.v's own squash value), and the real "next
+    // instruction" is instead whatever pc_o (IF's own live PC) currently
+    // is, since that's exactly the address the redirect that produced the
+    // bubble already retargeted fetch to. Found by tracing the bubble
+    // timing through reg1.v before implementing this, the same way the
+    // !pc_stall gating above was -- not something any directed test
+    // happened to hit first.
+    wire [XLEN-1:0] interrupt_mepc = id_bubble_r ? pc_o : pc_o_regfd;
 
     // csrrwi/csrrsi/csrrci (funct3[2]=1) source their write data from a
     // zero-extended 5-bit immediate sitting in rs1's *field position*
@@ -987,18 +1065,28 @@ endgenerate
     .csr_op(funct3_regde[1:0]),
     .csr_wdata(csr_wdata),
     .csr_rdata(csr_old_val),
-    .trap_taken(exception_taken && !reg2_hold),
-    .trap_pc(pc_o_regde),
-    .trap_cause(trap_cause),
+    // docs/adr/0020-soc-integration.md (Phase D9). exception_taken and
+    // interrupt_taken are mutually exclusive by construction
+    // (other_redirect_taken, folded into interrupt_taken's own gating,
+    // already excludes exception_taken) -- the OR below is safe, exactly
+    // one of the two (or neither) is ever true on a given cycle.
+    // trap_pc/trap_cause mux the same way: pc_o_regde/trap_cause for a
+    // synchronous exception, interrupt_mepc/interrupt_cause for an
+    // interrupt (see their own definitions above for why these two
+    // deliberately differ from the exception path's values).
+    .trap_taken((exception_taken && !reg2_hold) || interrupt_taken),
+    .trap_pc(interrupt_taken ? interrupt_mepc : pc_o_regde),
+    .trap_cause(interrupt_taken ? interrupt_cause : trap_cause),
+    .trap_is_interrupt(interrupt_taken),
     .mret_taken(isMret_regde && !reg2_hold),
     .fp_flags_we(fp_flags_we),
     .fp_flags_in(fp_flags),
     .frm_val(frm_live),
-    // docs/adr/0020-soc-integration.md (Phase D8). timer_pending/
-    // ext_pending now wired to the real Timer.v/Uart.v (PLIC-lite) live
+    // docs/adr/0020-soc-integration.md (Phase D8, D9). timer_pending/
+    // ext_pending wired to the real Timer.v/Uart.v (PLIC-lite) live
     // signals declared below -- CSR.v's own interface needed no changes
     // for this, exactly as D7 anticipated. mstatus_mie/mie_mtie/mie_meie
-    // remain unconsumed until D9's interrupt redirect logic exists.
+    // now feed interrupt_taken's own condition above (D9).
     .timer_pending(timer_pending_w),
     .ext_pending(uart_rx_irq),
     .mstatus_mie(mstatus_mie),
@@ -1024,10 +1112,17 @@ endgenerate
     wire [XLEN-1:0] ex_result = (isOpFp_regde || isFma_regde) ? fp_result :
                                  isCsr_regde ? csr_old_val : (isDivRem ? div_result : ALUOut);
 
-    assign unconditional_redirect = jump_regde | exception_taken | isMret_regde;
-    assign redirect_target = exception_taken ? mtvec_val :
-                              isMret_regde    ? mepc_val :
-                                                 imm_sum;  // existing branch/jal/jalr target path
+    // docs/adr/0020-soc-integration.md (Phase D9). interrupt_taken joins
+    // the same squash machinery jal/jalr/exception/mret already use --
+    // reg1.jump/reg2.branch_taken don't need to know or care *why*
+    // unconditional_redirect fired, only that it did (see reg1.v/reg2.v).
+    // mtvec is a single, non-vectored trap target either way (this core
+    // has no vectored-interrupt mode), so interrupt_taken shares
+    // exception_taken's redirect_target arm.
+    assign unconditional_redirect = jump_regde | exception_taken | isMret_regde | interrupt_taken;
+    assign redirect_target = (exception_taken | interrupt_taken) ? mtvec_val :
+                              isMret_regde                        ? mepc_val :
+                                                                     imm_sum;  // existing branch/jal/jalr target path
 
     // Compiled in only with -DCOVERAGE (see sim/tools/coverage_report.py,
     // docs/ROADMAP.md V-5). Not a real statement/branch coverage tool (none

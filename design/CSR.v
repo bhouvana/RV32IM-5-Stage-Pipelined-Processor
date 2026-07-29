@@ -46,8 +46,18 @@ module CSR #(
     output reg [XLEN-1:0] csr_rdata,  // current value at csr_addr, combinational (old value, for rd)
 
     input trap_taken,
-    input [XLEN-1:0] trap_pc,     // faulting instruction's own PC -> mepc
-    input [XLEN-1:0] trap_cause,  // -> mcause
+    input [XLEN-1:0] trap_pc,     // faulting instruction's own PC (exception) or the PC of the
+                                    // instruction that would have executed next (interrupt) -> mepc
+    input [XLEN-1:0] trap_cause,  // low bits only (never bit31 set) -> mcause[30:0]
+    // docs/adr/0020-soc-integration.md (Phase D9). Set by riscvpipeline.v's
+    // interrupt_taken exactly when this trap is an interrupt rather than a
+    // synchronous exception -> mcause[31], the spec's own
+    // interrupt-vs-exception disambiguating bit. trap_cause's low bits are
+    // already the correct code either way (riscv_defs.vh's MCAUSE_* and
+    // MCAUSE_INT_* deliberately share the low-bit numbering space, per
+    // their own header comment) -- this bit is the only thing that tells
+    // them apart.
+    input trap_is_interrupt,
 
     input mret_taken,
 
@@ -74,10 +84,11 @@ module CSR #(
     input timer_pending,
     input ext_pending,
 
-    // docs/adr/0020-soc-integration.md (Phase D9). Not consumed by
-    // riscvpipeline.v's redirect logic until D9 -- exposed now so D9 can
-    // just wire these into its interrupt-detection condition without
-    // CSR.v's own interface changing again.
+    // docs/adr/0020-soc-integration.md (Phase D9). Consumed by
+    // riscvpipeline.v's interrupt-detection condition (mstatus_mie &
+    // ((mip.MEIP & mie.MEIE) | (mip.MTIP & mie.MTIE))) -- CSR.v's own
+    // interface needed no further changes to support it, exactly as D7
+    // anticipated.
     output mstatus_mie,  // mstatus[3], the global trap/interrupt enable
     output mie_mtie,     // mie's machine-timer-interrupt enable bit
     output mie_meie,     // mie's machine-external-interrupt enable bit
@@ -163,7 +174,11 @@ module CSR #(
 
             if (trap_taken) begin
                 mepc   <= trap_pc;
-                mcause <= trap_cause;
+                // docs/adr/0020-soc-integration.md (Phase D9). mcause[31] is
+                // the spec's interrupt-vs-exception bit; trap_cause itself
+                // never sets it (riscv_defs.vh's MCAUSE_*/MCAUSE_INT_*
+                // constants are all small values, well under bit31).
+                mcause <= {trap_is_interrupt, trap_cause[30:0]};
                 mstatus[7] <= mstatus[3];  // MPIE <= MIE
                 mstatus[3] <= 1'b0;        // MIE  <= 0 (traps disabled while handling this one)
             end

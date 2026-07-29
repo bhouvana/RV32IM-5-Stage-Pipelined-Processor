@@ -69,8 +69,10 @@ OP_AUIPC = 0b0010111
 OP_CUSTOM = 0b0101010
 OP_SYSTEM = 0b1110011
 
-CSR_ADDR = {  # standard RISC-V machine-mode addresses (docs/adr/0011-csr-and-exceptions.md)
-    "mstatus": 0x300, "mtvec": 0x305, "mscratch": 0x340, "mepc": 0x341, "mcause": 0x342,
+CSR_ADDR = {  # standard RISC-V machine-mode addresses (docs/adr/0011-csr-and-exceptions.md,
+              # docs/adr/0020-soc-integration.md Phase D7 for mie/mip)
+    "mstatus": 0x300, "mie": 0x304, "mtvec": 0x305, "mscratch": 0x340, "mepc": 0x341,
+    "mcause": 0x342, "mip": 0x344,
 }
 CSR_OP = {"csrrw": 0b001, "csrrs": 0b010, "csrrc": 0b011,
           "csrrwi": 0b101, "csrrsi": 0b110, "csrrci": 0b111}
