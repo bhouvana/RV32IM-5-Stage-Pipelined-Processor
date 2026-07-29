@@ -29,6 +29,7 @@
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
+`include "Timer.v"
 `include "reg1a.v"
 
 // Emits one CSV row per cycle to trace.csv -- every field here is read

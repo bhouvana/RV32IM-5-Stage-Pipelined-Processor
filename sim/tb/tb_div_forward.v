@@ -29,6 +29,7 @@
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
+`include "Timer.v"
 
 module tb_div_forward;
     reg clk = 0;

@@ -994,13 +994,13 @@ endgenerate
     .fp_flags_we(fp_flags_we),
     .fp_flags_in(fp_flags),
     .frm_val(frm_live),
-    // docs/adr/0020-soc-integration.md (Phase D7). Tied to 1'b0 until D8
-    // wires Timer.v's/the PLIC-lite's real pending signals in -- CSR.v's
-    // own interface needs no further changes at that point. mstatus_mie/
-    // mie_mtie/mie_meie are similarly unconsumed until D9's interrupt
-    // redirect logic exists; exposed now so D9 doesn't touch CSR.v again.
-    .timer_pending(1'b0),
-    .ext_pending(1'b0),
+    // docs/adr/0020-soc-integration.md (Phase D8). timer_pending/
+    // ext_pending now wired to the real Timer.v/Uart.v (PLIC-lite) live
+    // signals declared below -- CSR.v's own interface needed no changes
+    // for this, exactly as D7 anticipated. mstatus_mie/mie_mtie/mie_meie
+    // remain unconsumed until D9's interrupt redirect logic exists.
+    .timer_pending(timer_pending_w),
+    .ext_pending(uart_rx_irq),
     .mstatus_mie(mstatus_mie),
     .mie_mtie(mie_mtie),
     .mie_meie(mie_meie),
@@ -1215,18 +1215,19 @@ end
                     // see mem_stall's own comment below for why it is deliberately NOT
                     // consumed here.
 
-    // docs/adr/0020-soc-integration.md (Phase D5). NUM_SLAVES=2: slave 0
-    // (index 0) is RAM, slave 1 is Uart.v -- indices/BASE/SIZE must stay
-    // in lockstep across the three flattened buses below (the same
-    // convention WbDecoder.v's own header comment documents).
-    wire [1:0] wb_s_cyc, wb_s_stb, wb_s_ack;
+    // docs/adr/0020-soc-integration.md (Phase D8). NUM_SLAVES=3: slave 0
+    // is RAM, slave 1 is Uart.v, slave 2 is Timer.v -- indices/BASE/SIZE
+    // must stay in lockstep across the three flattened buses below (the
+    // same convention WbDecoder.v's own header comment documents).
+    wire [2:0] wb_s_cyc, wb_s_stb, wb_s_ack;
     wire wb_s_we;
     wire [XLEN-1:0] wb_s_addr, wb_s_data_o;
     wire [3:0] wb_s_sel;
-    wire [2*XLEN-1:0] wb_s_data_i;
+    wire [3*XLEN-1:0] wb_s_data_i;
 
-    WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(2),
-                .BASE({`UART_BASE, 32'd0}), .SIZE({`UART_SIZE, MEM_SIZE_BYTES})) m_WbDecoder(
+    WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(3),
+                .BASE({`TIMER_BASE, `UART_BASE, 32'd0}),
+                .SIZE({`TIMER_SIZE, `UART_SIZE, MEM_SIZE_BYTES})) m_WbDecoder(
         .m_cyc(lsu_cyc), .m_stb(lsu_stb), .m_we(lsu_we),
         .m_addr(ALUOut_regem), .m_data_o(readData2_regem), .m_sel(lsu_sel),
         .m_data_i(readData), .m_ack(lsu_ack),
@@ -1243,13 +1244,22 @@ end
         .s_data_i(wb_s_data_i[0*XLEN +: XLEN]), .s_ack(wb_s_ack[0])
     );
 
-    wire uart_rx_irq;  // reserved for D8's mip.MEIP wiring
+    wire uart_rx_irq;  // docs/adr/0020 Phase D8: the PLIC-lite's sole external source -> mip.MEIP
     Uart #(.CLKS_PER_BIT(UART_CLKS_PER_BIT)) m_Uart(
         .clk(clk), .rst(start),
         .s_cyc(wb_s_cyc[1]), .s_stb(wb_s_stb[1]), .s_we(wb_s_we),
         .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
         .s_data_i(wb_s_data_i[1*XLEN +: XLEN]), .s_ack(wb_s_ack[1]),
         .tx(uart_tx), .rx(uart_rx), .rx_irq(uart_rx_irq)
+    );
+
+    wire timer_pending_w;  // docs/adr/0020 Phase D8: -> mip.MTIP
+    Timer #(.XLEN(XLEN)) m_Timer(
+        .clk(clk), .rst(start),
+        .s_cyc(wb_s_cyc[2]), .s_stb(wb_s_stb[2]), .s_we(wb_s_we),
+        .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
+        .s_data_i(wb_s_data_i[2*XLEN +: XLEN]), .s_ack(wb_s_ack[2]),
+        .pending(timer_pending_w)
     );
 //
 wire memtoReg_regwb;

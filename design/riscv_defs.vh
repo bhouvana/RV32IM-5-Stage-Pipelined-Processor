@@ -221,4 +221,13 @@
 `define UART_BASE `MMIO_BASE  // the first, and today only, peripheral
 `define UART_SIZE 32'd16
 
+// docs/adr/0020-soc-integration.md (Phase D8). Timer.v's own 2-register
+// window (MTIME/MTIMECMP at word offsets 0/4, decoded on s_addr[2] inside
+// Timer.v itself) -- 8 bytes is exactly that window. Placed immediately
+// after UART's own 16-byte window, non-overlapping by construction (the
+// same "fixed, integrator-controlled map" WbDecoder.v's own header
+// comment already documents as assumed, not defensively checked).
+`define TIMER_BASE (`UART_BASE + `UART_SIZE)
+`define TIMER_SIZE 32'd8
+
 `endif

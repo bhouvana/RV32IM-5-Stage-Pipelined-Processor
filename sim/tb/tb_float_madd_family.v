@@ -29,6 +29,7 @@
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
+`include "Timer.v"
 
 // docs/adr/0019-f-extension.md (Phase C9): exercises all four R4-type
 // MADD-family ops (fmadd.s/fmsub.s/fnmsub.s/fnmadd.s), not just fmadd.s --

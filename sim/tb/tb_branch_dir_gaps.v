@@ -29,6 +29,7 @@
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
+`include "Timer.v"
 
 // Closes the "each of blt/bge/ble/bgt/bltu/bgeu only has one branch
 // direction covered" gap flagged in ARCHITECTURE.md section 15 / the

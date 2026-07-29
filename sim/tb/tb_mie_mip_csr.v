@@ -29,14 +29,18 @@
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
+`include "Timer.v"
 
-// docs/adr/0020-soc-integration.md (Phase D7): mie/mip's CSR-only plumbing
-// -- masking (only MTIE/MEIE survive a write to mie), csrrw-replaces-vs-
-// csrrs-ORs semantics against a real bit-position pair spread across the
-// 32-bit register (not adjacent low bits, unlike mscratch's own
-// tb_csr_ops.v coverage), and mip's read-only/write-dropped behavior.
-// No live interrupt redirect exists yet (D9) -- mip reads 0 throughout
-// since riscvpipeline.v ties timer_pending/ext_pending to 1'b0 until D8.
+// docs/adr/0020-soc-integration.md (Phase D7, updated for D8): mie/mip's
+// CSR-only plumbing -- masking (only MTIE/MEIE survive a write to mie),
+// csrrw-replaces-vs-csrrs-ORs semantics against a real bit-position pair
+// spread across the 32-bit register (not adjacent low bits, unlike
+// mscratch's own tb_csr_ops.v coverage), and mip's read-only/write-dropped
+// behavior. No live interrupt *redirect* exists yet (D9) -- but as of D8,
+// mip.MTIP is real, live-wired hardware state from Timer.v, which is
+// pending from reset onward here (this program never touches MTIMECMP,
+// and Timer.v resets with mtime=0/mtimecmp=0, so 0>=0 immediately) --
+// see the mip checks below for the exact expected pattern.
 module tb_mie_mip_csr;
     reg clk = 0;
     reg start = 0;
@@ -63,9 +67,16 @@ module tb_mie_mip_csr;
         check_reg(8, 32'h00000800, "csrrs x8,mie,0x80: x8 = old mie (0x800)");
         check_reg(9, 32'h00000880, "mie reads back 0x880 -- csrrs ORed, MTIE and MEIE both set");
 
-        check_reg(10, 32'h00000000, "mip reads 0 before any write attempt (nothing pending, D8 not wired yet)");
-        check_reg(11, 32'h00000000, "csrrw x11,mip,0x7ff: x11 = old mip (0)");
-        check_reg(12, 32'h00000000, "mip still reads 0 -- the write to a read-only CSR was silently dropped");
+        // docs/adr/0020-soc-integration.md (Phase D8): mip.MTIP now
+        // reflects Timer.v's real, live `pending` output -- Timer.v resets
+        // with mtime=0/mtimecmp=0, so pending (mtime >= mtimecmp) is true
+        // from the very first cycle onward (this program never touches
+        // MTIMECMP), matching tb_timer_unit.v's own "reset: pending true
+        // immediately" finding. mip.MEIP (UART) stays 0 -- nothing in this
+        // program touches the UART. 0x80 = MTIP alone.
+        check_reg(10, 32'h00000080, "mip reads 0x80 (MTIP live-pending from Timer.v since reset) before any write attempt");
+        check_reg(11, 32'h00000080, "csrrw x11,mip,0x7ff: x11 = old mip (0x80)");
+        check_reg(12, 32'h00000080, "mip still reads 0x80 -- the write to a read-only CSR was silently dropped, live MTIP unaffected");
 
         report("mie_mip_csr");
         $finish;

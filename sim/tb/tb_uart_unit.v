@@ -1,4 +1,5 @@
 `include "Uart.v"
+`include "Timer.v"
 
 // docs/adr/0020-soc-integration.md (Phase D4). Standalone unit test for
 // Uart.v, independent of the pipeline -- mirrors tb_fregister_unit.v's

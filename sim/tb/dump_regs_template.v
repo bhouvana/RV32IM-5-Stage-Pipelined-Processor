@@ -31,6 +31,7 @@
 `include "WbDecoder.v"
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
+`include "Timer.v"
 
 // Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__,
 // __MAX_TIME__, __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-
