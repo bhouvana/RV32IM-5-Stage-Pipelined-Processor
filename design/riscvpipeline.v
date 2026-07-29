@@ -1168,20 +1168,48 @@ end
 // ==========================================================================
 // MEM -- Memory Access
 // ==========================================================================
-    // Synchronous-read BRAM (docs/adr/0013-mem-stage-retiming.md), replacing
-    // the old combinational-read DataMemory.v -- readData is only valid the
-    // cycle *after* a load's address/memRead are presented, which is exactly
-    // what mem_stall (declared above, with the rest of the EX-stage hazard
-    // logic) exists to accommodate.
-    DataMemoryBRAM #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE)) m_DataMemory(
-    .rst(start),
-    .clk(clk),
-    .memWrite(memWrite_regem),
-    .memRead(memRead_regem),
-    .address(ALUOut_regem),
-    .writeData(readData2_regem),
-    .funct3(funct3_regem),
-    .readData(readData)
+    // docs/adr/0020-soc-integration.md (Phase D3). The LSU-to-bus
+    // translation ("WbMaster") is plain combinational wiring here rather
+    // than its own module -- it's a direct level-based re-expression of
+    // signals riscvpipeline.v already has (memRead_regem/memWrite_regem/
+    // ALUOut_regem/readData2_regem/funct3_regem), and this project avoids
+    // introducing a module for a passthrough nothing else will ever reuse
+    // (Phase B's own "avoid the premature abstraction trap" convention).
+    // `lsu_sel` is derived from funct3_regem's width bits for any future
+    // slave that cares about byte lanes (today's sole slave, RamWishbone-
+    // Adapter, doesn't -- see its own header comment for why it takes
+    // `funct3` as a side-band tag instead).
+    wire lsu_cyc = memRead_regem | memWrite_regem;
+    wire lsu_stb = lsu_cyc;
+    wire lsu_we  = memWrite_regem;
+    wire [3:0] lsu_sel = (funct3_regem[1:0] == 2'b00) ? (4'b0001 << ALUOut_regem[1:0]) :  // byte
+                          (funct3_regem[1:0] == 2'b01) ? (4'b0011 << ALUOut_regem[1:0]) :  // halfword
+                                                          4'b1111;                          // word
+    wire lsu_ack;  // reserved for a future variable-latency-peripheral generalization --
+                    // see mem_stall's own comment below for why it is deliberately NOT
+                    // consumed here.
+
+    wire [0:0] wb_s_cyc, wb_s_stb, wb_s_ack;
+    wire wb_s_we;
+    wire [XLEN-1:0] wb_s_addr, wb_s_data_o;
+    wire [3:0] wb_s_sel;
+    wire [XLEN-1:0] wb_s_data_i;
+
+    WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(1), .BASE({32'd0}), .SIZE({MEM_SIZE_BYTES})) m_WbDecoder(
+        .m_cyc(lsu_cyc), .m_stb(lsu_stb), .m_we(lsu_we),
+        .m_addr(ALUOut_regem), .m_data_o(readData2_regem), .m_sel(lsu_sel),
+        .m_data_i(readData), .m_ack(lsu_ack),
+        .s_cyc(wb_s_cyc), .s_stb(wb_s_stb), .s_we(wb_s_we),
+        .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
+        .s_data_i(wb_s_data_i), .s_ack(wb_s_ack)
+    );
+
+    RamWishboneAdapter #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE)) m_DataMemory(
+        .clk(clk), .rst(start),
+        .s_cyc(wb_s_cyc[0]), .s_stb(wb_s_stb[0]), .s_we(wb_s_we),
+        .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
+        .funct3(funct3_regem),
+        .s_data_i(wb_s_data_i[0*XLEN +: XLEN]), .s_ack(wb_s_ack[0])
     );
 //
 wire memtoReg_regwb;

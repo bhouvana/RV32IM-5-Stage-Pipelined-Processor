@@ -26,6 +26,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 module tb_mret_return;
     reg clk = 0;

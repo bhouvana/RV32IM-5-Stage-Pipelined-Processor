@@ -25,15 +25,19 @@ endtask
 task check_mem_word;
     // DataMemory stores bytes little-endian-at-address (byte0=address+0=LSB),
     // matching how DataMemory.v itself packs/unpacks writeData/readData.
+    // docs/adr/0020-soc-integration.md (Phase D3): one hierarchy level
+    // deeper than before -- m_DataMemory is now RamWishboneAdapter.v's
+    // Wishbone-wrapper instance name, with the real DataMemoryBRAM.v
+    // (and its data_memory array) inside it as m_ram.
     input [31:0] byte_addr;
     input [31:0] expected;
     input [511:0] label;
     reg [31:0] actual;
     begin
-        actual = { dut.m_DataMemory.data_memory[byte_addr+3],
-                   dut.m_DataMemory.data_memory[byte_addr+2],
-                   dut.m_DataMemory.data_memory[byte_addr+1],
-                   dut.m_DataMemory.data_memory[byte_addr+0] };
+        actual = { dut.m_DataMemory.m_ram.data_memory[byte_addr+3],
+                   dut.m_DataMemory.m_ram.data_memory[byte_addr+2],
+                   dut.m_DataMemory.m_ram.data_memory[byte_addr+1],
+                   dut.m_DataMemory.m_ram.data_memory[byte_addr+0] };
         total_checks = total_checks + 1;
         if (actual !== expected) begin
             total_fails = total_fails + 1;

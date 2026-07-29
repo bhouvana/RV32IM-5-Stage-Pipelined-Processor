@@ -26,6 +26,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // ALUCtl==ALUCTL_ILLEGAL (a *recognized* opcode with an unrecognized
 // funct7/funct3), as opposed to tb_illegal_instr.v's entirely-unrecognized-

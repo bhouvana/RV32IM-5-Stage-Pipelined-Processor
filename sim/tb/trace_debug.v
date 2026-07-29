@@ -26,6 +26,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // Ad hoc cycle-by-cycle trace tool, not a directed test (excluded from
 // sim/run_tests.sh's tb_*.v glob on purpose). Point INIT_FILE and the
@@ -52,6 +54,6 @@ module trace_debug;
                 $time, dut.pc_o, dut.inst_regfd, dut.regWrite, dut.ALUSrc, dut.memRead, dut.memWrite,
                 dut.memRead_regde, dut.memWrite_regde, dut.ALUOut, dut.readData1_final, dut.readData2_final, dut.imm_reg_val,
                 dut.ALUOut_regem, dut.memWrite_regem, dut.memRead_regem, dut.readData2_regem, dut.readData,
-                dut.m_DataMemory.data_memory[16], dut.m_DataMemory.data_memory[17], dut.m_DataMemory.data_memory[18], dut.m_DataMemory.data_memory[19]);
+                dut.m_DataMemory.m_ram.data_memory[16], dut.m_DataMemory.m_ram.data_memory[17], dut.m_DataMemory.m_ram.data_memory[18], dut.m_DataMemory.m_ram.data_memory[19]);
     end
 endmodule

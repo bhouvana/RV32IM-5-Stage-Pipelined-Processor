@@ -27,6 +27,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // Template for real compiled-C programs (docs/ROADMAP.md Phase 10 --
 // CoreMark/Dhrystone, following up on the hand-written sim/benchmarks/
@@ -81,7 +83,7 @@ module c_bench_run;
                 for (i = 0; i < 32; i = i + 1)
                     $fdisplay(fd, "%0d", dut.m_Register.regs[i]);
                 for (i = 0; i < __MEM_SIZE__; i = i + 1)
-                    $fdisplay(fd, "%0d", dut.m_DataMemory.data_memory[i]);
+                    $fdisplay(fd, "%0d", dut.m_DataMemory.m_ram.data_memory[i]);
                 $fclose(fd);
 
                 $finish;

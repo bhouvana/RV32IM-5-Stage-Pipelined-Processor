@@ -26,6 +26,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 `include "reg1a.v"
 
 // Emits one CSV row per cycle to trace.csv -- every field here is read

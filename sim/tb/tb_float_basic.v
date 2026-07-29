@@ -26,6 +26,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // docs/adr/0019-f-extension.md (Phase C6): first end-to-end exercise of the
 // live float datapath -- fmv.w.x/fmv.x.w (bit-pattern moves), fadd.s/fmul.s

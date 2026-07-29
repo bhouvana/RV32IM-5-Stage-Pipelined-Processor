@@ -28,6 +28,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__,
 // __MAX_TIME__, __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-
@@ -62,7 +64,7 @@ module dump_regs;
         for (i = 0; i < 32; i = i + 1)
             $fdisplay(fd, "%0d", dut.m_Register.regs[i]);
         for (i = 0; i < 128; i = i + 1)
-            $fdisplay(fd, "%0d", dut.m_DataMemory.data_memory[i]);
+            $fdisplay(fd, "%0d", dut.m_DataMemory.m_ram.data_memory[i]);
         for (i = 0; i < 32; i = i + 1)
             $fdisplay(fd, "%0d", dut.m_FRegister.regs[i]);
         $fdisplay(fd, "%0d", dut.m_CSR.fflags);

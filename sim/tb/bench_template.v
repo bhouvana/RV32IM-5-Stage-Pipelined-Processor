@@ -28,6 +28,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // Template for sim/tools/bench_runner.py (docs/ROADMAP.md Phase 10).
 // __INIT_FILE__/__MAX_TIME__/__OUT_FILE__/__MEM_SIZE__/__HAZARD_STRATEGY__/

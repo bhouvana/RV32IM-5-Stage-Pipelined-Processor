@@ -26,6 +26,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // Dumps every signal in the DUT (recursively, $dumpvars(0, dut)) to a real
 // VCD file for viewing in a waveform tool (GTKWave, or any other VCD

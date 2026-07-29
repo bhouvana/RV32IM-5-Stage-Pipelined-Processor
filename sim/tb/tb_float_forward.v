@@ -26,6 +26,8 @@
 `include "FForward.v"
 `include "Divider.v"
 `include "CSR.v"
+`include "WbDecoder.v"
+`include "RamWishboneAdapter.v"
 
 // docs/adr/0019-f-extension.md (Phase C7): exercises FForward.v's actual
 // forwarding paths with back-to-back dependent float instructions (no
