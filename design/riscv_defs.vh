@@ -183,4 +183,19 @@
 `define CSR_ADDR_FRM    12'h002
 `define CSR_ADDR_FCSR   12'h003
 
+// docs/adr/0020-soc-integration.md (Phase D1). Memory-mapped I/O base
+// address -- the boundary between RAM (address < MEM_SIZE_BYTES, riscv-
+// pipeline.v's own parameter, not a `` `define`` here since it's already a
+// per-instantiation-configurable RTL parameter) and peripherals. Chosen far
+// above any address this core's small test programs ever generate (every
+// existing directed/random test computes tiny offsets from a base near 0
+// or 32 -- docs/adr/0010's `random_gen.py`), so RAM and MMIO can never
+// collide even though nothing currently range-checks a load/store address
+// against RAM's own size. No consumers yet -- WbDecoder.v (D1) takes
+// per-slave base/size as elaboration parameters at its instantiation site,
+// not by reading this file directly; this constant is the single place a
+// future peripheral's own base address (`UART_BASE`, `TIMER_BASE`, added
+// in D5/D8) is defined relative to.
+`define MMIO_BASE 32'h1000_0000
+
 `endif
