@@ -1,0 +1,322 @@
+# Long-range vision: Generations 1-10
+
+This is the user-supplied master roadmap for where this core goes after the
+current RV32IMAF work closes out — confirmed 2026-08-02 as "the roadmap I'd
+follow." It is deliberately kept **separate from `docs/ROADMAP.md`**, which
+stays the authoritative, actively-maintained phased backlog for work that's
+actually scheduled (see "How this relates to `docs/ROADMAP.md` and the
+A-E/F-H phase letters" below for why, and for the reconciliation decision
+that governs how the two documents interact). Think of this file as the
+10-year plan; `docs/ROADMAP.md` as the current sprint.
+
+Numbered as **Generations**, not "Phases," specifically to avoid collision:
+this project already has two live phase-letter sequences (`docs/adr/0018`-
+`0021`'s Phase A-E, all complete, and the in-progress second wave's Phase
+F-H — MMU/caches/dual-issue). The source roadmap this file is built from
+used "Phase E" through "Phase N" for what's called Generation 1 (tail end)
+through Generation 10 below — those letters are **not** this project's
+Phase E/F/G/H and must never be conflated with them. Where a generation's
+own internal sub-item lettering is preserved from the source material
+(e.g. "G-B: MMU"), it's always written as "Gen `N`-`X`", never bare
+"Phase `X`", for exactly this reason.
+
+## How this relates to `docs/ROADMAP.md` and the A-E/F-H phase letters
+
+Confirmed with the user (2026-08-02, `AskUserQuestion`): **finish the
+current in-flight MMU work under its existing lettering first, then adopt
+this generational structure for everything after.** Concretely:
+
+- The project's own Phase A-E (variable pipeline depth, code-quality pass,
+  F-extension, SoC integration, branch prediction) are complete and are
+  **retroactively Generation 1's own foundational work** — no renaming, no
+  action needed, they already match what this file calls Generation 1
+  (RV32IMAF).
+- The project's own second-wave Phase F (Sv32 MMU) is **mid-flight right
+  now** (F1-F4 done, F5-F9 remaining — see `handoff.md`'s own "IN PROGRESS"
+  section for exact status) and **keeps its existing F1-F9 lettering to
+  completion**. Do not rename it to match this file's Generation 3 (which
+  also covers privilege/MMU/TLB/page-tables, see the open question below)
+  while it's still in progress.
+- The project's own second-wave Phase G (caches) and Phase H (dual-issue),
+  both already confirmed in scope with the user before this file existed,
+  **also keep their existing lettering** when their turn comes.
+- **Once Phase F-G-H all close out**, this project's phase-lettering
+  convention (A, B, C... reused per-session, ADR-numbered) retires in favor
+  of this file's Generation numbering for anything new. At that point:
+  update `docs/ROADMAP.md`'s own phase list to point here for what's next,
+  and open a new ADR closing out "the whole A-E/F-H arc" the same way
+  `docs/adr/0018` closed out Phase A and `docs/adr/0021` closed out Phase E.
+
+### Open question, not yet decided — flag before starting Generation 2
+
+The source roadmap's own Generation 1 (its "Phase E — Performance
+Architecture") scope is: dynamic branch prediction (done, this project's
+own Phase E) + variable-latency memory + an I-cache + a D-cache + hardware
+performance-monitoring CSRs + a performance profiler + formal verification
+— then a "RV32IMAF Research Processor v1.0" release closes it out.
+
+That is **not the same scope** as this project's own already-confirmed
+second wave (Phase F: MMU: Phase G: caches; Phase H: dual-issue) — the
+second wave adds a full Sv32 MMU and dual-issue, neither of which this
+file's own Generation 1 asked for, and the second wave's cache phase (G)
+was scoped as "I$+D$, set-associative, write-back" without the variable-
+latency-memory/HPC-CSR/profiler/formal-verification items this file's
+Generation 1 also wants. **Before declaring Generation 1 (v1.0) released,
+the user needs to decide**: does v1.0 mean "second wave (F/G/H) plus this
+file's E-B/E-E/E-F/E-G items", or does it mean something narrower? Don't
+assume either way — ask when Phase H closes out, not before (too far off
+to matter yet, and scope may shift by then anyway).
+
+A second, related open question for **Generation 3** (`G-B`/`G-C`/`G-D`:
+MMU/TLB/page tables) specifically: this project's in-progress Sv32 MMU
+(current Phase F) is built for the **RV32** core, ahead of the RV64
+migration this file's own Generation 2 calls for. Sv32's translation
+scheme (2-level page tables, 32-bit PTEs) is not what a real RV64 target
+would use (Sv39/Sv48, 3-4 level, 64-bit PTEs) — so Generation 3's own MMU
+work is very likely a **substantially new implementation**, not a rename
+or a straightforward reuse of Phase F's `Tlb.v`/`Ptw.v`, even though the
+architectural lessons (delegation, TLB tagging discipline, PTW-shares-bus-
+via-mux) should carry over directly. Don't assume Phase F's MMU "becomes"
+Generation 3's MMU without a real design pass when that generation starts.
+
+---
+
+## Generation 1 — RV32IMAF Research Processor (v1.0)
+
+*(source material: "Phase E — Performance Architecture"; this project's own
+Phase A-E already delivered the ISA/SoC/branch-prediction foundation this
+generation sits on top of, and the second-wave Phase F-H is currently
+extending it further — see the open question above for how these
+reconcile before release.)*
+
+**Objective:** turn the verified RV32IMAF processor into a high-performance
+research-grade in-order core.
+
+- **Dynamic branch prediction** — ✅ done, this project's own Phase E
+  (`docs/adr/0021`): BTB + 2-bit saturating counters, predict in IF,
+  update in EX, misprediction recovery, `bench_runner.py
+  --compare-predictors` for accuracy/IPC comparison.
+- **Variable-latency memory** — not started. Configurable I-mem/D-mem
+  latency, a wait-state model, pipeline interlocks, latency benchmarking.
+  New module: `MemoryLatencyModel.v`.
+- **Instruction cache** — not started (this project's own second-wave
+  Phase G covers I$+D$ together, see the open question above on how these
+  merge). Direct-mapped L1, configurable size/line-size, tag array, valid
+  bits, cache controller, hit/miss statistics. New module: `ICache.v`.
+- **Data cache** — not started (same Phase G note). Direct-mapped L1,
+  write-through, write-allocate, configurable size, performance counters.
+  New module: `DCache.v`.
+- **Hardware performance monitoring** — not started. CSRs for cycle count,
+  instructions retired, IPC, CPI, branches, branch misses, cache hits/
+  misses, pipeline stalls, interrupt count, exception count.
+- **Performance profiler** — not started. Automated reports: pipeline
+  utilization, stall breakdown, branch accuracy, cache statistics, IPC,
+  CPI, instruction mix.
+- **Formal verification** — not started. Prove register correctness,
+  hazard correctness, forwarding correctness, pipeline correctness, CSR
+  correctness, via a formal tool (none set up in this project yet).
+
+**Release:** RV32IMAF Research Processor v1.0.
+
+---
+
+## Generation 2 — RV64 Migration (v2.0)
+
+*(source material: "Phase F — RV64 Migration")*
+
+**Objective:** upgrade the architecture to a modern 64-bit implementation.
+
+- **XLEN migration** — widen every datapath to 64 bits; update pipeline
+  registers, the forwarding network, hazards. (Note: `XLEN` is already a
+  named parameter as of `docs/adr/0015`, but is not truly variable at
+  other values today — RV32I's own 32-bit instruction word and 5-bit
+  register-field encoding are baked in independent of the parameter. This
+  generation is where that parameter's promise finally gets exercised for
+  real, not just named.)
+- **Register file** — 64-bit integer registers, updated writeback logic.
+- **ALU** — 64-bit arithmetic, shifts, comparisons.
+- **Divider** — 64-bit iterative divider.
+- **Memory** — 64-bit loads/stores, alignment support, misaligned-access
+  handling.
+- **Toolchain** — 64-bit assembler, ISS, debugger, updated visualizer,
+  updated benchmarks (all of `sim/tools/asm.py`/`iss.py`/`debugger.py`/
+  `gen_trace.py`/`bench_runner.py` need real RV64 awareness, not just a
+  wider `XLEN`).
+- **Verification** — directed tests, random tests, differential testing,
+  RISC-V compliance testing.
+
+**Release:** RV64IMAF Processor v2.0.
+
+---
+
+## Generation 3 — Operating System Support (v3.0)
+
+*(source material: "Phase G — Operating System Support". See the open
+question above: this is very likely a new MMU design against RV64/Sv39,
+not a reuse of the current Phase F's RV32/Sv32 `Tlb.v`/`Ptw.v`, even though
+the lessons carry over.)*
+
+**Objective:** build a Linux-capable processor.
+
+- **Privilege architecture** — M/S/U modes. (Substantial overlap with the
+  current in-progress Phase F1/F3's privilege-mode/CSR/trap-delegation
+  work — re-verify against RV64/Sv39 rather than assuming it transfers
+  unchanged.)
+- **MMU** — virtual-to-physical address translation.
+- **TLB** — I-TLB, D-TLB, refill logic. (Current Phase F4's `Tlb.v` is
+  unified/single-array by design choice, not split — re-decide this for
+  RV64 rather than assuming the same choice still holds.)
+- **Page tables** — multi-level page walker, access bits, dirty bits,
+  permission checking. (Current Phase F4's `Ptw.v` is Sv32-specific,
+  2-level; RV64/Sv39 is 3-level with a different PTE layout — new design,
+  not a port.)
+- **Memory protection** — page faults, access faults, permission faults.
+- **Linux boot** — BusyBox Linux, UART console, interactive shell. (Net
+  new scope; nothing in this project's history has attempted this yet.)
+
+**Release:** Linux-capable RV64 Processor v3.0.
+
+---
+
+## Generation 4 — Advanced Memory System (v4.0)
+
+*(source material: "Phase H — Advanced Memory System")*
+
+**Objective:** bring the memory subsystem closer to a modern CPU.
+
+- **Advanced branch prediction** — static, 1-bit, 2-bit (already have this
+  shape from Generation 1's own BHT/BTB, see above), GShare, tournament
+  predictor; benchmark all.
+- **Advanced cache hierarchy** — 2-way and 4-way set-associative, victim
+  cache, L2, replacement policies (LRU/FIFO).
+- **Hardware prefetchers** — next-line, stride, stream.
+- **Non-blocking cache** — multiple outstanding misses, MSHRs.
+- **Memory controller** — burst transfers, improved arbitration.
+
+**Release:** Advanced Memory Architecture v4.0.
+
+---
+
+## Generation 5 — Multicore SoC (v5.0)
+
+*(source material: "Phase I — Multicore SoC")*
+
+**Objective:** scale beyond a single core.
+
+- Dual core.
+- Quad core.
+- Shared memory system.
+- Bus arbiter.
+- MESI cache coherence.
+- Atomic instructions.
+
+**Release:** Multicore RISC-V SoC v5.0.
+
+---
+
+## Generation 6 — Out-of-Order Core (v6.0)
+
+*(source material: "Phase J — Next-Generation Core". Explicitly called out
+in the source material as **a new core, not a modification of the existing
+pipeline** — worth repeating here so a future session doesn't try to
+retrofit register renaming onto `riscvpipeline.v`'s existing in-order
+5-stage structure.)*
+
+- Register renaming.
+- Physical register file.
+- Reservation stations.
+- Reorder buffer.
+- Load/store queue.
+- Tomasulo scheduling.
+- Speculative execution.
+- Dual-issue pipeline. (Note: this project's own second-wave Phase H
+  already delivers an in-order dual-issue design earlier than this,
+  against the *existing* pipeline — that's a genuinely different, smaller
+  step than this generation's own from-scratch OoO dual-issue core. Both
+  are legitimate; don't conflate them when this generation starts.)
+
+**Release:** Out-of-Order RV64 Processor v6.0.
+
+---
+
+## Generation 7 — Vector Processing (v7.0)
+
+*(source material: "Phase K — Vector Processing")*
+
+- Vector register file.
+- Vector ALU.
+- Vector load/store.
+- Mask operations.
+- Vector benchmarks.
+
+**Release:** RV64 Vector Processor v7.0.
+
+---
+
+## Generation 8 — Reliability & Security (v8.0)
+
+*(source material: "Phase L — Reliability & Security")*
+
+- Physical Memory Protection (PMP).
+- Secure boot.
+- ECC memory support.
+- Watchdog timer.
+- Built-In Self-Test (BIST).
+- Fault injection framework.
+- Clock gating.
+- Power optimization.
+
+**Release:** Production-Ready Secure Processor v8.0.
+
+---
+
+## Generation 9 — FPGA SoC Platform (v9.0)
+
+*(source material: "Phase M — FPGA SoC Platform". Note: this project's own
+Phase 7 (`docs/ROADMAP.md`) already has FPGA bring-up scaffolding
+(`fpga/top.v`, `fpga/constraints_template.xdc`) and has never touched real
+hardware — that's a much smaller, still-open item, not the same scope as
+this generation's full peripheral platform.)*
+
+Support for: DDR memory, Ethernet, HDMI/VGA, SD card, USB UART, GPIO, SPI
+Flash, audio; FPGA timing closure and resource optimization.
+
+**Release:** Complete FPGA SoC v9.0.
+
+---
+
+## Generation 10 — CPU Architecture Laboratory (final vision)
+
+*(source material: "Phase N — CPU Architecture Laboratory")*
+
+Instead of one fixed CPU, a configurable research platform: choose RV32 or
+RV64, pipeline depth, hazard strategy, branch predictor, cache size/
+associativity, memory latency, divider implementation, FPU on/off, MMU
+on/off, core count, vector extension on/off — then one command generates
+the configured RTL, builds it, runs directed + constrained-random
+verification, runs benchmarks, generates IPC/CPI reports, compares
+configurations, and produces HTML/PDF reports with performance graphs.
+
+(Note: this project already has real precedent for exactly this pattern at
+smaller scale — `HAZARD_STRATEGY`, `PIPELINE_PROFILE`, and
+`BRANCH_PREDICTOR` are all closed, named, elaboration-time-selected
+parameters today, each with its own `bench_runner.py --compare-*` report.
+Generation 10 is that same discipline generalized across every axis in the
+list above, not a new idea introduced from scratch.)
+
+---
+
+## Evolution summary
+
+```
+Gen 1  RV32IMAF Research Processor        (this project's Phase A-E, + in-progress F-H)
+Gen 2  RV64 Processor
+Gen 3  Linux-capable RV64 Processor
+Gen 4  Advanced Memory Architecture
+Gen 5  Multicore SoC
+Gen 6  Out-of-Order Processor
+Gen 7  Vector Processor
+Gen 8  Secure & Reliable Processor
+Gen 9  Complete FPGA SoC
+Gen 10 CPU Architecture Laboratory
+```
