@@ -49,6 +49,37 @@ MCAUSE_ILLEGAL_INSTRUCTION, MCAUSE_BREAKPOINT, MCAUSE_ECALL_FROM_M = 2, 3, 11
 MCAUSE_INT_MACHINE_TIMER = 0x80000007
 MCAUSE_INT_MACHINE_EXTERNAL = 0x8000000B
 
+# ==========================================================================
+# docs/adr/00NN-mmu-sv32.md (Phase F6). Sv32 MMU: a from-scratch, independent
+# page-table walker matching design/Ptw.v bit-for-bit (same fault
+# conditions, same cause codes, same 20-bit PPN truncation -- see Ptw.v's
+# own header for why this core truncates PPN to 20 bits instead of the full
+# spec 22), plus the S-mode CSR storage design/CSR.v gained in F1 and the
+# real privilege-aware trap/mret/sret machinery riscvpipeline.v/CSR.v gained
+# in F3. Unlike branch prediction's zero-ISS-change case, address
+# translation affects every memory access, not scheduled points -- this is
+# not optional or reducible, per the phase plan's own assessment.
+# ==========================================================================
+CSR_SSTATUS, CSR_SIE, CSR_STVEC, CSR_SSCRATCH = 0x100, 0x104, 0x105, 0x140
+CSR_SEPC, CSR_SCAUSE, CSR_STVAL, CSR_SIP, CSR_SATP = 0x141, 0x142, 0x143, 0x144, 0x180
+CSR_MIE, CSR_MIP, CSR_MTVAL, CSR_MEDELEG, CSR_MIDELEG = 0x304, 0x344, 0x343, 0x302, 0x303
+
+MCAUSE_ECALL_FROM_U, MCAUSE_ECALL_FROM_S = 8, 9
+MCAUSE_INSTRUCTION_PAGE_FAULT, MCAUSE_LOAD_PAGE_FAULT, MCAUSE_STORE_PAGE_FAULT = 12, 13, 15
+
+# 2-bit privilege encoding, matches design/riscv_defs.vh's PRIV_U/PRIV_S/PRIV_M
+# exactly -- numerically ordered so a plain `<` comparison (CSR access-
+# privilege checks below) works the same way riscvpipeline.v's own
+# csr_priv_violation does.
+PRIV_U, PRIV_S, PRIV_M = 0b00, 0b01, 0b11
+
+MSTATUS_SIE_BIT, MSTATUS_SPIE_BIT, MSTATUS_SPP_BIT, MSTATUS_MPP_LO = 1, 5, 8, 11
+MIE_SSIE_BIT, MIE_STIE_BIT, MIE_SEIE_BIT = 1, 5, 9
+
+# Sv32 PTE bit positions, matches design/riscv_defs.vh's PTE_*_BIT exactly.
+PTE_V_BIT, PTE_R_BIT, PTE_W_BIT, PTE_X_BIT, PTE_U_BIT = 0, 1, 2, 3, 4
+SATP_MODE_BIT = 31
+
 
 # ==========================================================================
 # docs/adr/0019-f-extension.md (Phase C9): RV32F reference model. Independent
@@ -511,6 +542,19 @@ class ISS:
         # machine-mode CSRs design/CSR.v implements. mstatus models just the
         # MIE (bit3) / MPIE (bit7) trap-enable stack, matching that module.
         self.csr = {CSR_MSTATUS: 0, CSR_MTVEC: 0, CSR_MSCRATCH: 0, CSR_MEPC: 0, CSR_MCAUSE: 0}
+        # docs/adr/00NN-mmu-sv32.md (Phase F6). Phase F1's own CSR.v storage
+        # additions, mirrored here. priv_mode resets to M (spec boot
+        # behavior, matches CSR.v exactly). mip is real storage here (unlike
+        # CSR.v's own mip, which ORs in two hardware-driven bits from
+        # Timer.v/Uart.v) since this ISS has no peripheral model at all --
+        # external interrupts are injected directly via schedule_interrupt/
+        # trap(), never derived from a simulated mip read, so plain
+        # software-writable storage for mip is sufficient and correct here.
+        self.priv_mode = PRIV_M
+        self.csr.update({
+            CSR_SSCRATCH: 0, CSR_SEPC: 0, CSR_SCAUSE: 0, CSR_STVAL: 0, CSR_MTVAL: 0,
+            CSR_STVEC: 0, CSR_SATP: 0, CSR_MIDELEG: 0, CSR_MEDELEG: 0, CSR_MIE: 0, CSR_MIP: 0,
+        })
         # docs/adr/0019-f-extension.md (Phase C9). fregs has no x0-equivalent
         # (FRegister.v hardwires nothing). frm/fflags mirror CSR.v's own
         # separate registers, not folded into self.csr, since fflags needs
@@ -558,6 +602,26 @@ class ISS:
             return self.frm & 0x7
         if addr == CSR_FCSR:
             return ((self.frm & 0x7) << 5) | (self.fflags & 0x1F)
+        # docs/adr/00NN-mmu-sv32.md (Phase F6). sstatus/sie/sip are NOT
+        # separate storage -- masked VIEWS onto mstatus/mie/mip's S-visible
+        # bit subset, matching design/CSR.v's own sstatus_view/sie_view/
+        # sip_view exactly (the same relationship fcsr already has onto
+        # {frm,fflags}).
+        if addr == CSR_SSTATUS:
+            m = self.csr[CSR_MSTATUS]
+            return (((m >> MSTATUS_SIE_BIT) & 1) << MSTATUS_SIE_BIT |
+                    ((m >> MSTATUS_SPIE_BIT) & 1) << MSTATUS_SPIE_BIT |
+                    ((m >> MSTATUS_SPP_BIT) & 1) << MSTATUS_SPP_BIT)
+        if addr == CSR_SIE:
+            e = self.csr[CSR_MIE]
+            return (((e >> MIE_SSIE_BIT) & 1) << MIE_SSIE_BIT |
+                    ((e >> MIE_STIE_BIT) & 1) << MIE_STIE_BIT |
+                    ((e >> MIE_SEIE_BIT) & 1) << MIE_SEIE_BIT)
+        if addr == CSR_SIP:
+            p = self.csr[CSR_MIP]
+            return (((p >> MIE_SSIE_BIT) & 1) << MIE_SSIE_BIT |
+                    ((p >> MIE_STIE_BIT) & 1) << MIE_STIE_BIT |
+                    ((p >> MIE_SEIE_BIT) & 1) << MIE_SEIE_BIT)
         return self.csr.get(addr, 0)
 
     def csr_write(self, addr, val):
@@ -571,27 +635,180 @@ class ISS:
             self.frm = (val >> 5) & 0x7
             self.fflags = val & 0x1F
             return
-        if addr == CSR_MSTATUS:  # only bits 3 (MIE) and 7 (MPIE) are real, see design/CSR.v
-            val &= (1 << 3) | (1 << 7)
+        if addr == CSR_MSTATUS:
+            # docs/adr/00NN-mmu-sv32.md (Phase F1/F6): SIE/SPIE/SPP/MPP join
+            # the pre-existing MIE(3)/MPIE(7) as real bits, matching
+            # design/CSR.v's mstatus_masked exactly.
+            val &= ((1 << 3) | (1 << 7) | (1 << MSTATUS_SIE_BIT) | (1 << MSTATUS_SPIE_BIT) |
+                    (1 << MSTATUS_SPP_BIT) | (0b11 << MSTATUS_MPP_LO))
+        elif addr == CSR_SSTATUS:
+            # A write THROUGH sstatus only ever touches the S-visible subset
+            # -- never MIE/MPIE/MPP -- matching CSR.v's own
+            # sstatus_write_masked/read-modify-write preservation.
+            keep = self.csr[CSR_MSTATUS] & ~((1 << MSTATUS_SIE_BIT) | (1 << MSTATUS_SPIE_BIT) | (1 << MSTATUS_SPP_BIT))
+            new = val & ((1 << MSTATUS_SIE_BIT) | (1 << MSTATUS_SPIE_BIT) | (1 << MSTATUS_SPP_BIT))
+            self.csr[CSR_MSTATUS] = u32(keep | new)
+            return
+        elif addr == CSR_MIE:
+            val &= ((1 << 7) | (1 << 11) | (1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
+        elif addr == CSR_SIE:
+            keep = self.csr[CSR_MIE] & ~((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
+            new = val & ((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
+            self.csr[CSR_MIE] = u32(keep | new)
+            return
+        elif addr in (CSR_MIP, CSR_SIP):
+            # Only SSIP/STIP/SEIP are software-writable (MTIP/MEIP are
+            # hardware-only in CSR.v, meaningless here -- see __init__'s own
+            # comment). Reachable via either mip or sip's own address, same
+            # as CSR.v.
+            val &= ((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
+            self.csr[CSR_MIP] = u32(val)
+            return
+        elif addr == CSR_MEDELEG:
+            # Matches CSR.v's medeleg_masked: only the causes this core can
+            # actually raise are real bits.
+            val &= ((1 << 2) | (1 << 3) | (1 << 8) | (1 << 9) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 15))
+        elif addr == CSR_MIDELEG:
+            # Matches CSR.v's mideleg_masked.
+            val &= ((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << 7) | (1 << MIE_SEIE_BIT) | (1 << 11))
         if addr in self.csr:
             self.csr[addr] = u32(val)
 
-    def trap(self, cause):
-        # Matches design/CSR.v's trap_taken path exactly: mepc <- the
-        # trapping instruction's own PC (not next_pc), mcause <- cause,
-        # mstatus.MPIE <- mstatus.MIE, mstatus.MIE <- 0, pc <- mtvec.
-        mie = (self.csr[CSR_MSTATUS] >> 3) & 1
-        self.csr[CSR_MSTATUS] = (mie << 7)
-        self.csr[CSR_MEPC] = self.pc
-        self.csr[CSR_MCAUSE] = u32(cause)
-        self.pc = self.csr[CSR_MTVEC]
+    def trap(self, cause, tval=0):
+        # docs/adr/00NN-mmu-sv32.md (Phase F3/F6): cause's own bit31 is the
+        # interrupt-vs-exception flag (already baked into every interrupt
+        # cause constant, e.g. MCAUSE_INT_MACHINE_TIMER), so is_interrupt is
+        # derived from it rather than a separate parameter -- keeps every
+        # pre-existing call site (schedule_interrupt's own trap() call, the
+        # plain exception ones below) unchanged. Delegation target (M vs S)
+        # matches design/CSR.v's trap_target_is_s exactly: never delegated
+        # if the trap is sourced in M itself, regardless of the delegation
+        # bits. Bit-level mstatus updates (not a blanket overwrite) --
+        # unlike the pre-Phase-F version, mstatus now has real bits
+        # (SIE/SPIE/SPP) an M-targeted trap must leave untouched, and vice
+        # versa for an S-targeted one, matching CSR.v's own per-bit
+        # nonblocking assigns exactly.
+        is_interrupt = bool(cause & 0x80000000)
+        low_cause = cause & 0x1F
+        deleg = self.csr[CSR_MIDELEG] if is_interrupt else self.csr[CSR_MEDELEG]
+        to_s = (self.priv_mode != PRIV_M) and bool((deleg >> low_cause) & 1)
+        mcause_val = u32(cause)
+        m = self.csr[CSR_MSTATUS]
+        if to_s:
+            self.csr[CSR_SEPC] = self.pc
+            self.csr[CSR_SCAUSE] = mcause_val
+            self.csr[CSR_STVAL] = u32(tval)
+            sie = (m >> MSTATUS_SIE_BIT) & 1
+            m &= ~((1 << MSTATUS_SIE_BIT) | (1 << MSTATUS_SPIE_BIT) | (1 << MSTATUS_SPP_BIT))
+            m |= (sie << MSTATUS_SPIE_BIT) | ((self.priv_mode & 1) << MSTATUS_SPP_BIT)
+            self.csr[CSR_MSTATUS] = u32(m)
+            self.priv_mode = PRIV_S
+            self.pc = self.csr[CSR_STVEC]
+        else:
+            self.csr[CSR_MEPC] = self.pc
+            self.csr[CSR_MCAUSE] = mcause_val
+            self.csr[CSR_MTVAL] = u32(tval)
+            mie = (m >> 3) & 1
+            m &= ~((1 << 3) | (1 << 7) | (0b11 << MSTATUS_MPP_LO))
+            m |= (mie << 7) | (self.priv_mode << MSTATUS_MPP_LO)
+            self.csr[CSR_MSTATUS] = u32(m)
+            self.priv_mode = PRIV_M
+            self.pc = self.csr[CSR_MTVEC]
 
     def mret(self):
         # Matches design/CSR.v's mret_taken path: mstatus.MIE <- mstatus.MPIE,
-        # mstatus.MPIE <- 1, pc <- mepc.
-        mpie = (self.csr[CSR_MSTATUS] >> 7) & 1
-        self.csr[CSR_MSTATUS] = (mpie << 3) | (1 << 7)
+        # mstatus.MPIE <- 1, mstatus.MPP <- U, priv_mode <- (old) MPP, pc <- mepc.
+        m = self.csr[CSR_MSTATUS]
+        mpie = (m >> 7) & 1
+        mpp = (m >> MSTATUS_MPP_LO) & 0b11
+        m &= ~((1 << 3) | (1 << 7) | (0b11 << MSTATUS_MPP_LO))
+        m |= (mpie << 3) | (1 << 7) | (PRIV_U << MSTATUS_MPP_LO)
+        self.csr[CSR_MSTATUS] = u32(m)
+        self.priv_mode = mpp
         self.pc = self.csr[CSR_MEPC]
+
+    def sret(self):
+        # docs/adr/00NN-mmu-sv32.md (Phase F3/F6). Matches CSR.v's
+        # sret_taken path: mstatus.SIE <- mstatus.SPIE, mstatus.SPIE <- 1,
+        # mstatus.SPP <- U, priv_mode <- (old) SPP (a single bit, U=0/S=1,
+        # coincides with PRIV_U/PRIV_S directly), pc <- sepc.
+        m = self.csr[CSR_MSTATUS]
+        spie = (m >> MSTATUS_SPIE_BIT) & 1
+        spp = (m >> MSTATUS_SPP_BIT) & 1
+        m &= ~((1 << MSTATUS_SIE_BIT) | (1 << MSTATUS_SPIE_BIT) | (1 << MSTATUS_SPP_BIT))
+        m |= (spie << MSTATUS_SIE_BIT) | (1 << MSTATUS_SPIE_BIT)
+        self.csr[CSR_MSTATUS] = u32(m)
+        self.priv_mode = spp
+        self.pc = self.csr[CSR_SEPC]
+
+    def _read_pte(self, addr):
+        addr &= 0xFFFFFFFF
+        return (self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8) |
+                (self.load_mem_byte(addr + 2) << 16) | (self.load_mem_byte(addr + 3) << 24))
+
+    def _pte_perm_ok(self, pte, access):
+        # access: 'fetch'|'load'|'store'. Matches design/Ptw.v's own
+        # permission check exactly -- no SUM/MXR (this phase's own scoping
+        # default, design/riscv_defs.vh's PTE_U_BIT comment).
+        access_bit = PTE_X_BIT if access == "fetch" else (PTE_W_BIT if access == "store" else PTE_R_BIT)
+        if not ((pte >> access_bit) & 1):
+            return False
+        priv_is_u = (self.priv_mode == PRIV_U)
+        pte_u = (pte >> PTE_U_BIT) & 1
+        return bool(pte_u) if priv_is_u else not bool(pte_u)
+
+    def translate(self, vaddr, access):
+        """Sv32 translation, matching design/Ptw.v's own 2-level walk +
+        design/riscvpipeline.v's permission check bit-for-bit. access:
+        'fetch'|'load'|'store'. Returns the translated physical address on
+        success; on a page fault, traps internally (mcause + mtval/stval =
+        the faulting VA, matching design/riscvpipeline.v's trap_value
+        wiring) and returns None -- the caller must check for None and stop
+        (mirrors an ifetch_fault_regde/dtlb_page_fault redirect: the
+        access itself never completes)."""
+        vaddr = u32(vaddr)
+        satp = self.csr[CSR_SATP]
+        if not ((satp >> SATP_MODE_BIT) & 1) or self.priv_mode == PRIV_M:
+            return vaddr
+        vpn1 = (vaddr >> 22) & 0x3FF
+        vpn0 = (vaddr >> 12) & 0x3FF
+        offset = vaddr & 0xFFF
+        satp_ppn20 = satp & 0xFFFFF  # low 20 bits meaningful -- see Ptw.v's own header
+        fault_cause = {
+            "fetch": MCAUSE_INSTRUCTION_PAGE_FAULT,
+            "load": MCAUSE_LOAD_PAGE_FAULT,
+            "store": MCAUSE_STORE_PAGE_FAULT,
+        }[access]
+
+        def fault():
+            self.trap(fault_cause, tval=vaddr)
+            return None
+
+        l1_addr = (satp_ppn20 << 12) | (vpn1 << 2)
+        pte1 = self._read_pte(l1_addr)
+        if not ((pte1 >> PTE_V_BIT) & 1):
+            return fault()
+        if (pte1 >> PTE_R_BIT) & 1 or (pte1 >> PTE_W_BIT) & 1 or (pte1 >> PTE_X_BIT) & 1:
+            # Leaf at level 1: a megapage. PPN[0] (pte1[19:10]) must be 0.
+            ppn20 = (pte1 >> 10) & 0xFFFFF
+            if ppn20 & 0x3FF:
+                return fault()
+            if not self._pte_perm_ok(pte1, access):
+                return fault()
+            result_ppn20 = ((ppn20 >> 10) << 10) | vpn0  # {pte1[29:20], vpn0}
+            return u32((result_ppn20 << 12) | offset)
+        # Non-leaf: descend to level 0.
+        l0_addr = (((pte1 >> 10) & 0xFFFFF) << 12) | (vpn0 << 2)
+        pte0 = self._read_pte(l0_addr)
+        if not ((pte0 >> PTE_V_BIT) & 1):
+            return fault()
+        if not ((pte0 >> PTE_R_BIT) & 1 or (pte0 >> PTE_W_BIT) & 1 or (pte0 >> PTE_X_BIT) & 1):
+            # Non-leaf at level 0: Sv32 is exactly 2 levels -- malformed.
+            return fault()
+        if not self._pte_perm_ok(pte0, access):
+            return fault()
+        ppn20 = (pte0 >> 10) & 0xFFFFF
+        return u32((ppn20 << 12) | offset)
 
     def load_mem_byte(self, addr):
         # docs/adr/0020-soc-integration.md (Phase D10). MMIO_BASE (design/
@@ -740,7 +957,9 @@ class ISS:
             self.pc = next_pc
 
         elif op == 0b0000011:  # loads
-            addr = u32(A + imm_i)
+            addr = self.translate(u32(A + imm_i), "load")
+            if addr is None:
+                return  # page fault already trapped inside translate()
             if f3 == 0:  # lb
                 v = self.load_mem_byte(addr)
                 res = u32(s32(v | (0xFFFFFF00 if v & 0x80 else 0)))
@@ -761,7 +980,9 @@ class ISS:
 
         elif op == 0b0100011:  # stores
             imm_s = sext(((word >> 25) << 5) | ((word >> 7) & 0x1F), 12)
-            addr = u32(A + imm_s)
+            addr = self.translate(u32(A + imm_s), "store")
+            if addr is None:
+                return  # page fault already trapped inside translate()
             if f3 == 0:
                 self.store_mem_byte(addr, B)
             elif f3 == 1:
@@ -810,37 +1031,77 @@ class ISS:
             self.wr(rd, u32(self.pc + (word & 0xFFFFF000)))
             self.pc = next_pc
 
-        elif op == 0b1110011:  # SYSTEM: csrrw/rs/rc(+i), ecall, ebreak, mret
+        elif op == 0b1110011:  # SYSTEM: csrrw/rs/rc(+i), ecall, ebreak, mret, sret, sfence.vma
             csr_addr = (word >> 20) & 0xFFF
             if f3 == 0b000:
-                if csr_addr == 0x000:
-                    self.trap(MCAUSE_ECALL_FROM_M)
+                # docs/adr/00NN-mmu-sv32.md (Phase F2/F6). sfence.vma is
+                # SYSTEM/funct3=000 like ecall/ebreak/mret/sret, but unlike
+                # those four it has real rs1/rs2 fields, so its own
+                # inst[31:20] position isn't fixed -- distinguished by
+                # funct7 alone, checked before the fixed-immediate cases
+                # below, matching design/Control.v's own decode exactly.
+                if f7 == 0b0001001:  # sfence.vma
+                    if self.priv_mode == PRIV_U:
+                        self.trap(MCAUSE_ILLEGAL_INSTRUCTION)
+                    else:
+                        # No-op otherwise -- this ISS models no TLB cache to
+                        # flush, a full walk happens on every translate()
+                        # call already.
+                        self.pc = next_pc
+                elif csr_addr == 0x000:  # ecall
+                    # docs/adr/00NN-mmu-sv32.md (Phase F3/F6): privilege-
+                    # dependent cause, matching riscvpipeline.v's own
+                    # ecall trap_cause selection exactly (was unconditionally
+                    # FROM_M before this phase, when M was the only
+                    # privilege that existed).
+                    cause = {PRIV_M: MCAUSE_ECALL_FROM_M, PRIV_S: MCAUSE_ECALL_FROM_S,
+                             PRIV_U: MCAUSE_ECALL_FROM_U}[self.priv_mode]
+                    self.trap(cause)
                 elif csr_addr == 0x001:
                     self.trap(MCAUSE_BREAKPOINT)
-                elif csr_addr == 0x302:
-                    self.mret()
+                elif csr_addr == 0x302:  # mret
+                    if self.priv_mode != PRIV_M:
+                        self.trap(MCAUSE_ILLEGAL_INSTRUCTION)
+                    else:
+                        self.mret()
+                elif csr_addr == 0x102:  # sret
+                    if self.priv_mode == PRIV_U:
+                        self.trap(MCAUSE_ILLEGAL_INSTRUCTION)
+                    else:
+                        self.sret()
                 else:
-                    self.trap(MCAUSE_ILLEGAL_INSTRUCTION)  # SYSTEM/f3=0, not ecall/ebreak/mret
+                    self.trap(MCAUSE_ILLEGAL_INSTRUCTION)  # SYSTEM/f3=0, not any recognized form
             else:
-                # rs1's raw 5-bit field doubles as the zero-extended uimm for
-                # the *i variants -- matches design/riscvpipeline.v's
-                # csr_wdata = funct3[2] ? {27'b0, inst[19:15]} : readData1.
-                old = self.csr_read(csr_addr)
-                src = rs1 if (f3 & 0b100) else A
-                csr_op = f3 & 0b011  # 01=write, 10=set, 11=clear -- matches design/CSR.v
-                if csr_op == 0b01:
-                    new_val = src
-                elif csr_op == 0b10:
-                    new_val = old | src
+                # docs/adr/00NN-mmu-sv32.md (Phase F3/F6): a CSR access below
+                # its own required privilege (addr bits[9:8], per spec --
+                # already numerically ordered the same way PRIV_U/S/M are,
+                # matching riscvpipeline.v's csr_priv_violation exactly)
+                # illegal-traps instead of committing.
+                required_priv = (csr_addr >> 8) & 0b11
+                if self.priv_mode < required_priv:
+                    self.trap(MCAUSE_ILLEGAL_INSTRUCTION)
                 else:
-                    new_val = old & ~src
-                self.csr_write(csr_addr, new_val)
-                self.wr(rd, old)
-                self.pc = next_pc
+                    # rs1's raw 5-bit field doubles as the zero-extended uimm
+                    # for the *i variants -- matches design/riscvpipeline.v's
+                    # csr_wdata = funct3[2] ? {27'b0, inst[19:15]} : readData1.
+                    old = self.csr_read(csr_addr)
+                    src = rs1 if (f3 & 0b100) else A
+                    csr_op = f3 & 0b011  # 01=write, 10=set, 11=clear -- matches design/CSR.v
+                    if csr_op == 0b01:
+                        new_val = src
+                    elif csr_op == 0b10:
+                        new_val = old | src
+                    else:
+                        new_val = old & ~src
+                    self.csr_write(csr_addr, new_val)
+                    self.wr(rd, old)
+                    self.pc = next_pc
 
         # docs/adr/0019-f-extension.md (Phase C9): RV32F dispatch.
         elif op == 0b0000111:  # flw
-            addr = u32(A + imm_i)
+            addr = self.translate(u32(A + imm_i), "load")
+            if addr is None:
+                return  # page fault already trapped inside translate()
             v = (self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8) |
                  (self.load_mem_byte(addr + 2) << 16) | (self.load_mem_byte(addr + 3) << 24))
             self.fregs[rd] = v
@@ -848,7 +1109,9 @@ class ISS:
 
         elif op == 0b0100111:  # fsw
             imm_s = sext(((word >> 25) << 5) | ((word >> 7) & 0x1F), 12)
-            addr = u32(A + imm_s)
+            addr = self.translate(u32(A + imm_s), "store")
+            if addr is None:
+                return  # page fault already trapped inside translate()
             v = self.fregs[rs2]
             for i in range(4):
                 self.store_mem_byte(addr + i, v >> (8 * i))
@@ -941,7 +1204,7 @@ class ISS:
         # ever generates forward-only branches/jumps.
         byte_len = len(words) * 4
         steps = 0
-        while self.pc < byte_len and steps < max_steps:
+        while steps < max_steps:
             # docs/adr/0020-soc-integration.md (Phase D10). Externally
             # scheduled interrupt injection -- checked *before* the
             # self-loop-halt detection below, deliberately: if `after_steps`
@@ -959,7 +1222,22 @@ class ISS:
                 self.trap(self.pending_interrupt["cause"])
                 self.pending_interrupt = None
                 continue
-            word = words[self.pc // 4]
+            # docs/adr/00NN-mmu-sv32.md (Phase F6). self.pc is always the
+            # VIRTUAL address (architecturally, PC is a virtual concept --
+            # translation only affects where the fetch reads FROM, matching
+            # design/riscvpipeline.v's own design: pc_o/pc_o_regde etc are
+            # never translated themselves). `words` is this ISS's own
+            # instruction-memory array, indexed by the PHYSICAL fetch
+            # address -- bit-exact with the pre-Phase-F behavior when
+            # translation is disabled (translate() returns vaddr unchanged,
+            # so fetch_addr == self.pc exactly, same as the old `self.pc //
+            # 4` indexing and the old `self.pc < byte_len` loop bound).
+            fetch_addr = self.translate(self.pc, "fetch")
+            if fetch_addr is None:
+                continue  # page fault already trapped inside translate(); retry with the new (redirected) pc
+            if fetch_addr >= byte_len:
+                break
+            word = words[fetch_addr // 4]
             if word & 0x7F == 0b1101111:  # jal
                 b20 = (word >> 31) & 1
                 b19_12 = (word >> 12) & 0xFF
