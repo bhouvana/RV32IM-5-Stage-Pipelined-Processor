@@ -30,6 +30,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // docs/adr/0020-soc-integration.md (Phase D9). Directed test for the
 // interrupt redirect path itself, timer source: sim/programs/timer_interrupt.s

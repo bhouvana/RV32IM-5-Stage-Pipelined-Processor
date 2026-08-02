@@ -30,6 +30,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // docs/adr/0019-f-extension.md (Phase C7): exercises FForward.v's actual
 // forwarding paths with back-to-back dependent float instructions (no

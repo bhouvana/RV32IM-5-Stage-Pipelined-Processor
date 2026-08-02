@@ -30,6 +30,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // docs/adr/0020-soc-integration.md (Phase D9). Directed test:
 // sim/programs/interrupt_priority.s arms both interrupt sources so they are

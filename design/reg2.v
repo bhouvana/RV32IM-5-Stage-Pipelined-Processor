@@ -50,7 +50,8 @@
     readReg2_regde <= 0; \
     readReg3_regde <= 0; \
     predict_taken_regde <= 0; \
-    predict_target_regde <= 0;
+    predict_target_regde <= 0; \
+    ifetch_fault_regde <= 0;
 
 `define PASS_DECODE_CONTEXT \
     pc_o_regde <= pc_o_regfd; \
@@ -66,7 +67,8 @@
     readReg2_regde <= readReg2; \
     readReg3_regde <= readReg3; \
     predict_taken_regde <= predict_taken; \
-    predict_target_regde <= predict_target;
+    predict_target_regde <= predict_target; \
+    ifetch_fault_regde <= ifetch_fault;
 
 module reg2 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
@@ -127,6 +129,11 @@ module reg2 #(
     // real resolved outcome. Always 0/don't-care under PREDICTOR_STATIC.
     input predict_taken,
     input [XLEN-1:0] predict_target,
+    // docs/adr/00NN-mmu-sv32.md (Phase F5). reg1's own ifetch_fault_regfd,
+    // carried one more stage to EX -- same decode-context treatment as
+    // predict_taken/predict_target above, for the same reason (see
+    // reg1.v's own port comment).
+    input ifetch_fault,
     input jump,
     input jalr,
     input lui,
@@ -163,6 +170,7 @@ module reg2 #(
     output reg [$clog2(NUM_REGS)-1:0] readReg3_regde,
     output reg predict_taken_regde,
     output reg [XLEN-1:0] predict_target_regde,
+    output reg ifetch_fault_regde,
     output reg jump_regde,
     output reg jalr_regde,
     output reg lui_regde,

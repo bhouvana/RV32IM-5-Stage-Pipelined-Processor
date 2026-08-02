@@ -30,6 +30,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // ALUCtl==ALUCTL_ILLEGAL (a *recognized* opcode with an unrecognized
 // funct7/funct3), as opposed to tb_illegal_instr.v's entirely-unrecognized-

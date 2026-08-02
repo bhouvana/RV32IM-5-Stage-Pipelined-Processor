@@ -117,7 +117,16 @@ module CSR #(
     // medeleg/priv_mode, all of which already live in this module.
     output [XLEN-1:0] stvec_val,
     output [XLEN-1:0] sepc_val,
-    output trap_target_is_s
+    output trap_target_is_s,
+
+    // docs/adr/00NN-mmu-sv32.md (Phase F5). satp's own two fields the
+    // translation gate needs: MODE (bit 31 -- 0=Bare/1=Sv32) and PPN
+    // (bits [21:0], the root page table's own physical page number).
+    // ASID (bits [30:22]) has no consumer this phase (no selective TLB
+    // invalidation, see the phase plan's own scoping default), so it's
+    // not exposed here.
+    output satp_mode_val,
+    output [21:0] satp_ppn_val
 );
 
     reg [XLEN-1:0] mstatus;  // bit3(MIE)/bit7(MPIE) real since docs/adr/0011; bit1(SIE)/bit5(SPIE)/
@@ -199,6 +208,8 @@ module CSR #(
     assign priv_mode_val = priv_mode;
     assign stvec_val = stvec;
     assign sepc_val = sepc;
+    assign satp_mode_val = satp[`SATP_MODE_BIT];
+    assign satp_ppn_val = satp[`SATP_PPN_HI:`SATP_PPN_LO];
 
     // docs/adr/00NN-mmu-sv32.md (Phase F3). Delegation decision: a trap is
     // taken directly into S (rather than M) iff it's NOT sourced from M

@@ -30,6 +30,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // Ad hoc cycle-by-cycle trace tool, not a directed test (excluded from
 // sim/run_tests.sh's tb_*.v glob on purpose). Point INIT_FILE and the

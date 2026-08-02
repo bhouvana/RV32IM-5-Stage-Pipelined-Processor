@@ -30,6 +30,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // docs/adr/0020-soc-integration.md (Phase D7, updated for D8): mie/mip's
 // CSR-only plumbing -- masking (only MTIE/MEIE survive a write to mie),

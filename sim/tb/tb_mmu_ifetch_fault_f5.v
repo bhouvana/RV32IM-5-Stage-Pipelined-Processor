@@ -33,14 +33,16 @@
 `include "Tlb.v"
 `include "Ptw.v"
 
-// Closes the "each of blt/bge/ble/bgt/bltu/bgeu only has one branch
-// direction covered" gap flagged in ARCHITECTURE.md section 15 / the
-// ROADMAP status log -- see sim/programs/branch_dir_gaps.s.
-module tb_branch_dir_gaps;
+// docs/adr/00NN-mmu-sv32.md (Phase F5). Instruction page fault -- see
+// sim/programs/mmu_ifetch_fault_f5.s's own header: satp enabled with a
+// deliberately empty page table, so a translated fetch attempt faults at
+// the level-1 PDE itself (no level-0 walk needed). Confirms cause
+// classification (mcause=12) and mtval (the faulting VA).
+module tb_mmu_ifetch_fault_f5;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/branch_dir_gaps.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
+    PIPELINED #(.INIT_FILE("sim/programs/mmu_ifetch_fault_f5.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;
@@ -48,19 +50,12 @@ module tb_branch_dir_gaps;
     initial begin
         start = 0;
         #10 start = 1;
-        #800;
+        #300;
 
-        check_reg(3, 32'd1, "bltu taken (1 unsigned is < 0xFFFFFFFF)");
-        check_reg(4, 32'd1, "bgeu not taken (1 unsigned is not >= 0xFFFFFFFF)");
-        check_reg(5, 32'd1, "blt not taken (1 signed is not < -1)");
-        check_reg(6, 32'd1, "bge taken (1 signed is >= -1)");
-        check_reg(7, 32'd1, "ble not taken (1 signed is not <= -1, custom op)");
-        check_reg(8, 32'd1, "bgt taken (1 signed is > -1, custom op)");
+        check_reg(11, 32'd12, "x11 = mcause in m_handler: 12 (MCAUSE_INSTRUCTION_PAGE_FAULT)");
+        check_reg(13, 32'h00005000, "x13 = mtval in m_handler: 0x5000 (the faulting virtual address)");
 
-        report("branch_dir_gaps");
-`ifdef COVERAGE
-        dut.dump_coverage;
-`endif
+        report("mmu_ifetch_fault_f5");
         $finish;
     end
 endmodule

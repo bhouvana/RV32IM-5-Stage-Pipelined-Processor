@@ -33,14 +33,17 @@
 `include "Tlb.v"
 `include "Ptw.v"
 
-// Closes the "each of blt/bge/ble/bgt/bltu/bgeu only has one branch
-// direction covered" gap flagged in ARCHITECTURE.md section 15 / the
-// ROADMAP status log -- see sim/programs/branch_dir_gaps.s.
-module tb_branch_dir_gaps;
+// docs/adr/00NN-mmu-sv32.md (Phase F5). Closes a real gap this phase's own
+// hand-trace found in F3's csr_priv_violation logic -- see
+// sim/programs/mmu_csr_leak_f5.s's own header for the full story: a
+// U-mode csrrs on an M-only CSR (mscratch) must trap AND must never let
+// rd (x10) actually receive the CSR's real value. No MMU/satp involvement
+// -- this is a pure privilege-check gap, independent of translation.
+module tb_mmu_csr_leak_f5;
     reg clk = 0;
     reg start = 0;
 
-    PIPELINED #(.INIT_FILE("sim/programs/branch_dir_gaps.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
+    PIPELINED #(.INIT_FILE("sim/programs/mmu_csr_leak_f5.mem")) dut(.clk(clk), .start(start), .uart_rx(1'b1));
     `include "check_tasks.vh"
 
     always #5 clk = ~clk;
@@ -48,19 +51,12 @@ module tb_branch_dir_gaps;
     initial begin
         start = 0;
         #10 start = 1;
-        #800;
+        #300;
 
-        check_reg(3, 32'd1, "bltu taken (1 unsigned is < 0xFFFFFFFF)");
-        check_reg(4, 32'd1, "bgeu not taken (1 unsigned is not >= 0xFFFFFFFF)");
-        check_reg(5, 32'd1, "blt not taken (1 signed is not < -1)");
-        check_reg(6, 32'd1, "bge taken (1 signed is >= -1)");
-        check_reg(7, 32'd1, "ble not taken (1 signed is not <= -1, custom op)");
-        check_reg(8, 32'd1, "bgt taken (1 signed is > -1, custom op)");
+        check_reg(10, 32'd0, "x10 = 0: the privilege-violating csrrs never actually wrote mscratch's real value (999) to rd");
+        check_reg(11, 32'd2, "x11 = mcause in m_handler: 2 (MCAUSE_ILLEGAL_INSTRUCTION) -- the violation correctly trapped");
 
-        report("branch_dir_gaps");
-`ifdef COVERAGE
-        dut.dump_coverage;
-`endif
+        report("mmu_csr_leak_f5");
         $finish;
     end
 endmodule

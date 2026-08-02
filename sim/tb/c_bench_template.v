@@ -31,6 +31,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // Template for real compiled-C programs (docs/ROADMAP.md Phase 10 --
 // CoreMark/Dhrystone, following up on the hand-written sim/benchmarks/

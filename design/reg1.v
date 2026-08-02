@@ -33,10 +33,23 @@ module reg1 #(
     // riscvpipeline.v's own comment at the reg1 instantiation).
     input predict_taken,
     input [XLEN-1:0] predict_target,
+    // docs/adr/00NN-mmu-sv32.md (Phase F5). Whether THIS fetch attempt's
+    // resolution (a same-cycle TLB-hit permission failure, or a just-
+    // concluded Ptw.v walk) was a page fault -- the "instruction" bits
+    // riscvpipeline.v is presenting alongside it are garbage (wrong/no
+    // real translation) and must have zero architectural effect once
+    // this reaches EX (see riscvpipeline.v's own exception_taken fold-in).
+    // Decode-context group, not control-fields: a Hazard.v load-use flush
+    // on this same cycle must not silently drop the fault tag (flush
+    // passes decode context through, zeros only control fields) -- the
+    // garbage instruction's rs1/rs2 could coincidentally trigger an
+    // unrelated load-use hazard, and the fault flag must survive that.
+    input ifetch_fault,
     output reg [XLEN-1:0] inst_regfd,
     output reg [XLEN-1:0] pc_o_regfd,
     output reg predict_taken_regfd,
-    output reg [XLEN-1:0] predict_target_regfd
+    output reg [XLEN-1:0] predict_target_regfd,
+    output reg ifetch_fault_regfd
 );
 
 always@(posedge clk)
@@ -56,6 +69,7 @@ begin
     pc_o_regfd <= 0;
     predict_taken_regfd <= 0;
     predict_target_regfd <= 0;
+    ifetch_fault_regfd <= 0;
     end
     else
         begin
@@ -66,6 +80,7 @@ begin
                 pc_o_regfd <= 0;
                 predict_taken_regfd <= 0;
                 predict_target_regfd <= 0;
+                ifetch_fault_regfd <= 0;
             end
             else if(stall)
             begin
@@ -73,6 +88,7 @@ begin
                 pc_o_regfd <= pc_o_regfd;
                 predict_taken_regfd <= predict_taken_regfd;
                 predict_target_regfd <= predict_target_regfd;
+                ifetch_fault_regfd <= ifetch_fault_regfd;
             end
             else
             begin
@@ -80,6 +96,7 @@ begin
                 pc_o_regfd <= pc_o;
                 predict_taken_regfd <= predict_taken;
                 predict_target_regfd <= predict_target;
+                ifetch_fault_regfd <= ifetch_fault;
             end
     end
 end

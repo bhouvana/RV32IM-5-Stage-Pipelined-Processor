@@ -191,8 +191,13 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
     // instantiating different modules.
     wire [XLEN-1:0] imem_read_addr = (PIPELINE_PROFILE == PROFILE_5STAGE) ? pc_o : pc_o_reg1a;
 
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): imem_phys_addr (defined in the
+    // MMU translation block near the MEM section below) substitutes the
+    // translated physical address when translation is active, bit-exact
+    // with raw imem_read_addr otherwise -- forward-referenced here, same
+    // pattern as pc_stall/priv_mode_w elsewhere in this file.
     InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_InstMem(
-    .readAddr(imem_read_addr),
+    .readAddr(imem_phys_addr),
     .inst(inst)
     );
     //
@@ -241,6 +246,7 @@ wire [XLEN-1:0] inst_regfd;
 wire [XLEN-1:0] pc_o_regfd;
 wire predict_taken_regfd;               // docs/adr/0021-branch-prediction.md
 wire [XLEN-1:0] predict_target_regfd;
+wire ifetch_fault_regfd;                // docs/adr/00NN-mmu-sv32.md (Phase F5)
 
 reg1 #(.XLEN(XLEN)) m_reg1(
     .clk(clk),
@@ -289,10 +295,16 @@ reg1 #(.XLEN(XLEN)) m_reg1(
     // was live, not whatever pc_o/predict_taken_if currently is).
     .predict_taken(predict_taken_fetch),
     .predict_target(predict_target_fetch),
+    // docs/adr/00NN-mmu-sv32.md (Phase F5). See the MMU translation block
+    // (near the MEM section below) for ifetch_fault_if's own definition --
+    // referenced here as a forward reference, the same pattern this file
+    // already relies on for pc_stall/priv_mode_w/etc.
+    .ifetch_fault(ifetch_fault_if),
     .inst_regfd(inst_regfd),
     .pc_o_regfd(pc_o_regfd),
     .predict_taken_regfd(predict_taken_regfd),
-    .predict_target_regfd(predict_target_regfd)
+    .predict_target_regfd(predict_target_regfd),
+    .ifetch_fault_regfd(ifetch_fault_regfd)
 );
 
 // IF1/IF2 relay register (docs/adr/0018-variable-pipeline-depth.md). Only
@@ -573,6 +585,7 @@ wire [6:0] funct7_control;
     wire [REG_ADDR_WIDTH-1:0] readReg3_regde;
     wire predict_taken_regde;               // docs/adr/0021-branch-prediction.md
     wire [XLEN-1:0] predict_target_regde;
+    wire ifetch_fault_regde;                // docs/adr/00NN-mmu-sv32.md (Phase F5)
     wire [1:0] forwardA;
     wire [1:0] forwardB;
     wire [1:0] fforwardA;
@@ -612,7 +625,14 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .freadData3(freadData3),
     .imm(imm),
     .inst_regfd(inst_regfd),
-    .flush(flush | float_load_use_hazard),  // docs/adr/0019 (Phase C7): bubble reg2 while an flw
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): itlb_miss joins float_load_use_hazard
+    // here -- same front-end-only-interlock category as Hazard.v's own
+    // stall (reg1 held via pc_stall, so whatever's flowing into reg2 is
+    // unchanged cycle to cycle; without also bubbling reg2 here, the
+    // instruction already in ID before the miss began would be re-latched
+    // into EX every stall cycle instead of exactly once -- the same bug
+    // class docs/adr/0016 found for HazardNoForward.v's own stall).
+    .flush(flush | float_load_use_hazard | itlb_miss),  // docs/adr/0019 (Phase C7): bubble reg2 while an flw
                                           // load-use hazard clears, same "insert a nop, real
                                           // instruction retries from IF/ID" shape as Hazard.v's own
     .branch_taken(branch_taken),
@@ -626,6 +646,9 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     // already latched for this instruction, carried one more stage to EX.
     .predict_taken(predict_taken_regfd),
     .predict_target(predict_target_regfd),
+    // docs/adr/00NN-mmu-sv32.md (Phase F5). reg1's own ifetch_fault_regfd,
+    // carried one more stage to EX.
+    .ifetch_fault(ifetch_fault_regfd),
     .jump(jump),
     .jalr(jalr),
     .lui(lui),
@@ -662,6 +685,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .readReg3_regde(readReg3_regde),
     .predict_taken_regde(predict_taken_regde),
     .predict_target_regde(predict_target_regde),
+    .ifetch_fault_regde(ifetch_fault_regde),
     .jump_regde(jump_regde),
     .jalr_regde(jalr_regde),
     .lui_regde(lui_regde),
@@ -1089,7 +1113,9 @@ endgenerate
         else mem_stall_done_r <= mem_stall;
     end
 
-    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard;
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): itlb_miss/dtlb_miss are defined
+    // in the MMU translation block below (forward-referenced here).
+    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard | itlb_miss | dtlb_miss;
 
     // reg2's own hold condition, factored out for reuse below (CSR.v's write
     // gating needs to know exactly the same thing reg2 does: "is this
@@ -1100,7 +1126,14 @@ endgenerate
     // not EX, so it has no business holding reg2's own occupant in place --
     // exactly the same reasoning Hazard.v's own load-use flush/stall
     // already follows for the integer file's lw case.
-    wire reg2_hold = div_stall | mem_stall | fp_stall;
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): dtlb_miss joins the existing
+    // multi-cycle-EX-interlock set -- the load/store itself is held in EX
+    // (not bubbled) while the D-side walk resolves, exactly mirroring
+    // div_stall/fp_stall/mem_stall's own shape. itlb_miss deliberately
+    // does NOT join here -- it's a front-end-only interlock (nothing in
+    // EX/MEM is its cause), same category as Hazard.v's own stall, see
+    // reg2's flush input below instead.
+    wire reg2_hold = div_stall | mem_stall | fp_stall | dtlb_miss;
 
     wire [XLEN-1:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
 
@@ -1137,8 +1170,15 @@ endgenerate
     wire mret_real = isMret_regde & !mret_priv_violation;
     wire sret_real = isSret_regde & !sret_priv_violation;
 
+    // docs/adr/00NN-mmu-sv32.md (Phase F5). ifetch_fault_regde/
+    // dtlb_page_fault/sfence_priv_violation are all defined in the MMU
+    // translation block near the MEM section below -- forward-referenced
+    // here, the same pattern this file already relies on for
+    // priv_mode_w/stvec_val/etc (all defined at m_CSR's own instantiation,
+    // referenced earlier throughout this section).
     wire exception_taken = illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) | isEcall_regde | isEbreak_regde |
-                            csr_priv_violation | mret_priv_violation | sret_priv_violation;
+                            csr_priv_violation | mret_priv_violation | sret_priv_violation |
+                            sfence_priv_violation | ifetch_fault_regde | dtlb_page_fault;
     // docs/adr/00NN-mmu-sv32.md (Phase F3): ecall's cause is now
     // privilege-dependent (it was unconditionally MCAUSE_ECALL_FROM_M
     // through Phase E, since M was the only privilege that existed) --
@@ -1146,8 +1186,19 @@ endgenerate
     // is bit-exact for all of them. The three new violation sources all
     // map to the same illegal-instruction cause an ordinary illegal
     // opcode does.
-    wire [XLEN-1:0] trap_cause = (illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) |
-                                   csr_priv_violation | mret_priv_violation | sret_priv_violation)
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): ifetch_fault_regde/
+    // dtlb_page_fault get their own real causes, checked first -- an
+    // ifetch-fault "instruction" carries garbage bits that could
+    // themselves coincidentally decode as illegal/ecall/etc, and the page
+    // fault cause must win regardless of what the garbage happened to
+    // look like. dtlb_page_fault implies a real load/store opcode, never
+    // simultaneously illegal/ecall/csr/mret/sret/sfence, so its ordering
+    // relative to those is not itself load-bearing, but it's placed early
+    // for the same clarity.
+    wire [XLEN-1:0] trap_cause = ifetch_fault_regde ? `MCAUSE_INSTRUCTION_PAGE_FAULT :
+                              dtlb_page_fault ? (memWrite_regde ? `MCAUSE_STORE_PAGE_FAULT : `MCAUSE_LOAD_PAGE_FAULT) :
+                              (illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) |
+                                   csr_priv_violation | mret_priv_violation | sret_priv_violation | sfence_priv_violation)
                                       ? `MCAUSE_ILLEGAL_INSTRUCTION :
                               isEbreak_regde ? `MCAUSE_BREAKPOINT :
                               isEcall_regde  ? ((priv_mode_w == `PRIV_M) ? `MCAUSE_ECALL_FROM_M :
@@ -1347,11 +1398,14 @@ endgenerate
     .trap_pc(interrupt_taken ? interrupt_mepc : pc_o_regde),
     .trap_cause(interrupt_taken ? interrupt_cause : trap_cause),
     .trap_is_interrupt(interrupt_taken),
-    // docs/adr/00NN-mmu-sv32.md (Phase F3). No real page fault exists yet
-    // (F5) -- tied to 0 for now, the same tie-off-then-real-wire staging
-    // D7/D8 used for timer_pending/ext_pending; CSR.v's own interface
-    // needs no further changes once F5 replaces this.
-    .trap_value({XLEN{1'b0}}),
+    // docs/adr/00NN-mmu-sv32.md (Phase F5). Replaces F3's tie-off, exactly
+    // as anticipated: the faulting virtual address for mtval/stval --
+    // pc_o_regde for an ifetch fault (the VA that failed translation,
+    // already correctly carried this far via reg1/reg2's normal PC
+    // threading), ALUOut for a D-side fault (the VA the load/store was
+    // about to use, computed combinationally at EX -- see the MMU
+    // translation block below), 0 for every other cause exactly as before.
+    .trap_value(ifetch_fault_regde ? pc_o_regde : dtlb_page_fault ? dtlb_vaddr : {XLEN{1'b0}}),
     .mret_taken(mret_real && !reg2_hold),
     .sret_taken(sret_real && !reg2_hold),
     .fp_flags_we(fp_flags_we),
@@ -1373,12 +1427,17 @@ endgenerate
     .priv_mode_val(priv_mode_w),
     .stvec_val(stvec_val),
     .sepc_val(sepc_val),
-    .trap_target_is_s(trap_target_is_s)
+    .trap_target_is_s(trap_target_is_s),
+    // docs/adr/00NN-mmu-sv32.md (Phase F5).
+    .satp_mode_val(satp_mode_w),
+    .satp_ppn_val(satp_ppn_w)
     );
     wire mstatus_mie, mie_mtie, mie_meie;
     wire [1:0] priv_mode_w;
     wire [XLEN-1:0] stvec_val, sepc_val;
     wire trap_target_is_s;
+    wire satp_mode_w;
+    wire [21:0] satp_ppn_w;
 
     // What EX "produces" this cycle: an F-extension result (docs/adr/0019)
     // on any OP-FP/FMA op -- checked first since isOpFp_regde/isFma_regde
@@ -1392,8 +1451,14 @@ endgenerate
     // forwarding correction needed for CSR reads either (same reasoning as
     // lui/auipc, docs/adr/0009): ex_result is already correct by the time
     // reg3 latches it.
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): a load/store's address becomes
+    // the translated physical address (mem_paddr, defined in the MMU
+    // translation block below) instead of the raw ALU output -- bit-exact
+    // at translate_enable=0 (mem_paddr reduces to exactly ALUOut there),
+    // matching this file's own existing behavior for every other case.
     wire [XLEN-1:0] ex_result = (isOpFp_regde || isFma_regde) ? fp_result :
-                                 isCsr_regde ? csr_old_val : (isDivRem ? div_result : ALUOut);
+                                 isCsr_regde ? csr_old_val : (isDivRem ? div_result :
+                                 ((memRead_regde | memWrite_regde) ? mem_paddr : ALUOut));
 
     // docs/adr/0020-soc-integration.md (Phase D9). interrupt_taken joins
     // the same squash machinery jal/jalr/exception/mret already use --
@@ -1517,7 +1582,27 @@ wire [2:0] funct3_regem;
     // fdiv.s/fsqrt.s is still computing, reg2/EX keeps presenting that same
     // instruction cycle after cycle, and without bubbling, reg3 would latch
     // its (fRegWrite=1) control signals on every one of those cycles too.
-    wire reg3_bubble = div_stall | fp_stall;
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): dtlb_miss joins div_stall/
+    // fp_stall (same reasoning -- while a D-side walk is in progress, reg3
+    // must not see any version of the not-yet-translated access).
+    // exception_taken also joins here now, fixing a real gap found by this
+    // same hand-trace: csr_priv_violation (Phase F3) is a genuine csrrX
+    // instruction with regWrite=1, and without this, a privilege-violating
+    // CSR read would still let reg3 latch regWrite_regde=1 and the CSR's
+    // real old value one cycle before the trap redirect became visible
+    // anywhere else -- a real leak, not just this phase's own new fault
+    // sources (an ifetch-fault "instruction" carries garbage bits that
+    // could themselves coincidentally decode as an ordinary regWrite=1 op,
+    // which is what actually surfaced this while designing that case). Safe
+    // to add unconditionally: every pre-existing exception_taken source
+    // (illegalOpcode/ALUCTL_ILLEGAL/ecall/ebreak/mret/sret violations)
+    // already has regWrite=0 from Control.v, so this is a no-op for all of
+    // them -- confirmed by inspection, not just assumed. No !reg2_hold
+    // qualifier needed (unlike csr_write_en/trap_taken's "fire exactly
+    // once" requirement): bubbling reg3 is safe and correct to repeat
+    // every cycle the condition holds, the same multi-cycle-bubble shape
+    // div_stall/fp_stall already have.
+    wire reg3_bubble = div_stall | fp_stall | dtlb_miss | exception_taken;
     wire memtoReg_to_reg3      = reg3_bubble ? 1'b0 : memtoReg_regde;
     wire regWrite_to_reg3      = reg3_bubble ? 1'b0 : regWrite_regde;
     wire fRegWrite_to_reg3     = reg3_bubble ? 1'b0 : fRegWrite_regde;
@@ -1540,8 +1625,11 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
     // since Phase C7) -- docs/adr/0003's lesson (store data is a separate
     // path to reg3/DataMemory, easy to silently leave on the raw/stale
     // decode-stage value) applies to the float case just as much as the
-    // original integer one it was found for.
-    .readData2_regde(isStoreFp_regde ? freadData2_final : readData2_final),
+    // original integer one it was found for. docs/adr/00NN-mmu-sv32.md
+    // (Phase F5): dtlb_store_data (forward-referenced, defined below near
+    // dtlb_needed) instead of the raw expression -- see dtlb_vaddr_r's own
+    // comment for the forwarding-drift bug a long D-side stall can hit.
+    .readData2_regde(dtlb_store_data),
     .write_to_Reg_regde(destReg_to_reg3),
     .jump_regde(jump_to_reg3),
     .pc_plus4_regde(pc_plus4_regde),
@@ -1577,7 +1665,13 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
 `ifdef ASSERT_ON
 reg [XLEN-1:0] expected_store_data;
 always @(posedge clk) begin
-    expected_store_data <= (isStoreFp_regde ? freadData2_final : readData2_final);
+    // docs/adr/00NN-mmu-sv32.md (Phase F5): tracks dtlb_store_data, not
+    // the raw expression -- reg3 now legitimately latches the frozen
+    // snapshot (dtlb_store_data_r) instead of the live, possibly-drifted
+    // forwarding result once a D-side stall has been in progress a while
+    // (see dtlb_vaddr_r's own comment); this assertion must track the
+    // same value reg3 actually receives, or it would spuriously fire.
+    expected_store_data <= dtlb_store_data;
     if (start && memWrite_regem && (readData2_regem !== expected_store_data))
         begin
             $display("ASSERTION FAILED @t=%0t: reg3 store-data mismatch: readData2_regem=%0d, expected (last cycle's forwarded readData2_final)=%0d",
@@ -1611,6 +1705,309 @@ end
                     // see mem_stall's own comment below for why it is deliberately NOT
                     // consumed here.
 
+    // ==========================================================================
+    // MMU translation (docs/adr/00NN-mmu-sv32.md, Phase F5). Wires Tlb.v/
+    // Ptw.v (Phase F4, standalone until now) live into fetch and load/
+    // store. Translation is gated on satp.MODE==Sv32 && priv_mode != M --
+    // M-mode always executes physical addresses (mstatus.MPRV, which
+    // would let M opt in too, is out of scope this phase). Deliberately a
+    // real, always-instantiated feature (unlike HAZARD_STRATEGY/
+    // BRANCH_PREDICTOR's elaboration-time swappable-subsystem parameters)
+    // -- gated at runtime by translate_enable, not a research-platform
+    // comparison axis. Placed here (rather than up near the IF section
+    // that most immediately consumes itlb_miss/imem_phys_addr) because
+    // this is where it most naturally reads the EX/MEM-stage signals it
+    // needs (ALUOut, memRead_regde/memWrite_regde, lsu_cyc); every
+    // upstream consumer (pc_stall, reg1/reg2's instantiations,
+    // exception_taken, ex_result) forward-references these wires, the
+    // same pattern this file already relies on for pc_stall/priv_mode_w.
+    // ==========================================================================
+    wire translate_enable = satp_mode_w && (priv_mode_w != `PRIV_M);
+    wire priv_is_u = (priv_mode_w == `PRIV_U);
+
+    // -- Tlb.v: unified, tagged, two independent combinational read ports.
+    wire itlb_hit, ls_hit;
+    wire [XLEN-1:0] itlb_ppn, ls_ppn;
+    wire itlb_perm_r, itlb_perm_w, itlb_perm_x, itlb_perm_u;
+    wire ls_perm_r, ls_perm_w, ls_perm_x, ls_perm_u;
+    wire ptw_fill_valid;
+    wire [XLEN-1:0] ptw_fill_vaddr, ptw_fill_ppn;
+    wire ptw_fill_perm_r, ptw_fill_perm_w, ptw_fill_perm_x, ptw_fill_perm_u;
+
+    Tlb #(.XLEN(XLEN)) m_Tlb(
+        .clk(clk), .rst(start),
+        .fetch_vaddr(imem_read_addr),
+        .fetch_hit(itlb_hit), .fetch_ppn(itlb_ppn),
+        .fetch_perm_r(itlb_perm_r), .fetch_perm_w(itlb_perm_w),
+        .fetch_perm_x(itlb_perm_x), .fetch_perm_u(itlb_perm_u),
+        // docs/adr/00NN-mmu-sv32.md (Phase F5): dtlb_vaddr (forward-
+        // referenced, defined below near dtlb_needed), not raw ALUOut --
+        // see its own comment for the forwarding-drift bug this avoids.
+        .ls_vaddr(dtlb_vaddr),
+        .ls_hit(ls_hit), .ls_ppn(ls_ppn),
+        .ls_perm_r(ls_perm_r), .ls_perm_w(ls_perm_w),
+        .ls_perm_x(ls_perm_x), .ls_perm_u(ls_perm_u),
+        .fill_valid(ptw_fill_valid), .fill_vaddr(ptw_fill_vaddr), .fill_ppn(ptw_fill_ppn),
+        .fill_perm_r(ptw_fill_perm_r), .fill_perm_w(ptw_fill_perm_w),
+        .fill_perm_x(ptw_fill_perm_x), .fill_perm_u(ptw_fill_perm_u),
+        .flush_all(sfence_real && !reg2_hold)
+    );
+
+    // -- I-side (fetch): front-end-only interlock, same category as
+    // Hazard.v's own load-use stall (freeze PC/reg1, bubble reg2) -- see
+    // pc_stall's and reg2's own instantiation comments above for the fold-
+    // in, and ptw_done_i's own definition below for why itlb_miss excludes
+    // the exact cycle a walk just concluded with a fault (so the stall
+    // doesn't re-trigger a pointless re-walk of a known-faulting address).
+    wire itlb_hit_fault = translate_enable && itlb_hit &&
+        !(itlb_perm_x && (priv_is_u ? itlb_perm_u : !itlb_perm_u));
+    // A real bug found by running, not anticipated in the design write-up
+    // -- the same bug class docs/adr/0016 already found for
+    // HazardNoForward.v's own stall: PC.v prioritizes `stall` over
+    // accepting a new `pc_i` UNCONDITIONALLY, regardless of what's causing
+    // either one. Once an OLDER instruction's ifetch_fault_regde reaches
+    // EX and fires exception_taken (branch_taken=1, wanting to redirect to
+    // mtvec), a YOUNGER instruction's own itlb_miss for the (about to be
+    // abandoned) current PC would otherwise keep pc_stall=1 that same
+    // cycle, and PC.v's stall silently swallows the redirect entirely --
+    // observed directly via a debug testbench tapping branch_taken/pc_o
+    // (the same diagnostic technique D8's mip_live race and D11's CSR bug
+    // were both found with), not reasoned out in advance. Fixed the same
+    // way docs/adr/0016 fixed it: gate the whole stall condition on
+    // !branch_taken, not just the specific path that motivated finding it.
+    wire itlb_miss = translate_enable && !itlb_hit && !(ptw_done_i && ptw_fault) && !branch_taken;
+    // ptw_abandoned_r (defined below, near ptw_done_i/ptw_done_d) excludes
+    // a stale, already-abandoned walk's fault result -- see its own
+    // comment for the real bug this closes.
+    wire ifetch_fault_if = itlb_hit_fault | (ptw_done_i && ptw_fault && !ptw_abandoned_r);
+    // Gated on itlb_hit, not just translate_enable: Tlb.v only resets its
+    // `valid` array, not `ppn_r` (see Tlb.v's own header -- a stale/never-
+    // filled entry's data fields are X until first filled, by design, the
+    // same way a BTB/BHT-style table's payload is meaningless without a
+    // qualifying hit). Using itlb_ppn unconditionally on a MISS let X
+    // propagate into `inst`/Control.v's decode and, from there, into
+    // completely unrelated combinational signals (Hazard.v's own stall,
+    // observed directly corrupting pc_stall to X via a debug testbench) --
+    // even though the architectural effect was already safely squashed via
+    // ifetch_fault_regde/reg3_bubble, the X itself still needed to not
+    // exist in the first place. On a miss/disabled/fault cycle the actual
+    // fetched bits don't matter (the whole point of itlb_miss stalling or
+    // ifetch_fault_if tagging), so falling back to the untranslated VA here
+    // is harmless and, critically, always a defined value.
+    wire [XLEN-1:0] imem_phys_addr = (translate_enable && itlb_hit) ?
+        {itlb_ppn[19:0], imem_read_addr[11:0]} : imem_read_addr;
+
+    // -- D-side (load/store): EX-anchored interlock, same category as
+    // div_stall/fp_stall (hold reg2, bubble reg3) -- anchored at EX
+    // (ALUOut) rather than MEM (ALUOut_regem) so a D-side page fault can
+    // reuse the existing exception_taken/unconditional_redirect machinery
+    // directly instead of a third, MEM-anchored redirect category.
+    wire dtlb_needed = translate_enable && (memRead_regde | memWrite_regde);
+    // A real bug found by running: ALUOut's own value, for an instruction
+    // held in EX, depends on Forward.v's mux -- which only has a bounded
+    // ~2-cycle window (EX/MEM, MEM/WB) after its producer retires. Once a
+    // load/store is held by dtlb_miss for LONGER than that (which a multi-
+    // cycle Ptw.v walk easily does), the producer fully drains past MEM/WB,
+    // Forward.v correctly reports "no forward" from then on, and
+    // readData1_final falls back to reg2's own STALE, pre-forward operand
+    // (captured at the ORIGINAL decode cycle, before the producer had even
+    // committed) -- silently corrupting ALUOut mid-hold (observed directly:
+    // a store's own address drifted from a correct 0x1004 down to 0x1000,
+    // losing an immediate-offset instruction's contribution entirely, once
+    // its result aged out of the forwarding window). Divider.v/FDivider.v/
+    // FSqrt.v/Ptw.v itself all avoid this class of bug by latching their
+    // own inputs ONCE, internally, at the moment they start (the same
+    // start&&!busy&&!done guard) -- nothing else in riscvpipeline.v
+    // previously needed to snapshot ALUOut for a held instruction, since no
+    // other reg2_hold source ever depended on it past the first cycle.
+    // Same drift hits the STORE's own data operand (readData2_final,
+    // forwarded x11 in the case that found this): once its producer ages
+    // out of Forward.v's window, readData2_final reverts to reg3's stale
+    // pre-forward operand too -- latched alongside the VA for the same
+    // reason, using the exact same timing.
+    reg [XLEN-1:0] dtlb_vaddr_r;
+    reg [XLEN-1:0] dtlb_store_data_r;
+    reg dtlb_miss_r;
+    always @(posedge clk) begin
+        if (~start) begin
+            dtlb_vaddr_r <= {XLEN{1'b0}};
+            dtlb_store_data_r <= {XLEN{1'b0}};
+            dtlb_miss_r  <= 1'b0;
+        end else begin
+            if (dtlb_needed && !dtlb_miss_r) begin
+                dtlb_vaddr_r <= ALUOut;
+                dtlb_store_data_r <= isStoreFp_regde ? freadData2_final : readData2_final;
+            end
+            dtlb_miss_r <= dtlb_miss;
+        end
+    end
+    // The stable VA to use for D-side translation. Gated on dtlb_miss_r
+    // (the ONE-CYCLE-DELAYED copy), not live dtlb_miss: on the very first
+    // cycle dtlb_miss goes high, dtlb_vaddr_r hasn't been written with
+    // THIS cycle's ALUOut yet (that capture only lands on the upcoming
+    // edge) -- gating on live dtlb_miss would read the stale, pre-capture
+    // register (e.g. still 0 from reset, on an instruction's first-ever
+    // D-side access) instead of the still-fresh, correct ALUOut. A real
+    // bug found by running: vpn0_r inside Ptw.v latched 0 instead of the
+    // real VPN0, because ptw_vaddr (fed from this same mux) sampled that
+    // exact stale value on the walk's own first cycle.
+    wire [XLEN-1:0] dtlb_vaddr = dtlb_miss_r ? dtlb_vaddr_r : ALUOut;
+    wire [XLEN-1:0] dtlb_store_data = dtlb_miss_r ? dtlb_store_data_r :
+        (isStoreFp_regde ? freadData2_final : readData2_final);
+    wire ls_perm_ok = (memWrite_regde ? ls_perm_w : ls_perm_r) &&
+        (priv_is_u ? ls_perm_u : !ls_perm_u);
+    wire dtlb_hit_fault = dtlb_needed && ls_hit && !ls_perm_ok;
+    // Same !branch_taken gate as itlb_miss above, same reason -- see its
+    // own comment.
+    wire dtlb_miss = dtlb_needed && !ls_hit && !(ptw_done_d && ptw_fault) && !branch_taken;
+    // ptw_abandoned_r: see ifetch_fault_if's own comment (defined below,
+    // near ptw_done_i/ptw_done_d) for the real bug this closes.
+    wire dtlb_page_fault = dtlb_hit_fault | (ptw_done_d && ptw_fault && !ptw_abandoned_r);
+    // Gated on ls_hit, not just translate_enable -- same X-propagation
+    // reasoning as imem_phys_addr above. Uses dtlb_vaddr (not raw ALUOut)
+    // for the same drift reasoning as dtlb_vaddr_r's own comment.
+    wire [XLEN-1:0] mem_paddr = (translate_enable && ls_hit) ?
+        {ls_ppn[19:0], dtlb_vaddr[11:0]} : dtlb_vaddr;
+
+    // -- sfence.vma (F2 decoded it; still inert until now). Requires S or
+    // M -- a real, necessary privilege check the phase plan left as an
+    // open question, decided here since F5 is when it needs an answer;
+    // folds into exception_taken above like mret/sret's own violation
+    // checks.
+    wire sfence_priv_violation = isSfenceVma_regde & (priv_mode_w == `PRIV_U);
+    wire sfence_real = isSfenceVma_regde & !sfence_priv_violation;
+
+    // -- Shared Ptw.v: exactly one instance, arbitrated between the two
+    // requesters above. D-side always wins when both are pending (older
+    // instruction, program-order priority) -- this only needs to be
+    // correct at the moment Ptw.v is idle (its own start&&!busy&&!done
+    // guard, mirroring Divider.v, latches inputs once at walk start and
+    // ignores this mux entirely while busy), so simultaneous itlb_miss+
+    // dtlb_miss (possible: an older load stalled in EX and a newer fetch
+    // missing, genuinely independent conditions) resolves correctly by
+    // construction -- I-side's own pc_stall keeps the front end frozen
+    // regardless of which side the walker is currently servicing, so it
+    // simply waits its turn.
+    //
+    // A real, genuine bus conflict found during this implementation (not
+    // anticipated in the original design write-up): an OLDER, unrelated
+    // instruction's own mem_stall (docs/adr/0013) can be genuinely,
+    // actively using the shared Wishbone master port (cyc/stb held high
+    // for its own registered-read latency) at the exact same cycle a
+    // YOUNGER instruction's dtlb_miss/itlb_miss becomes true -- the two
+    // conditions are checked at different pipeline stages with
+    // independent trigger conditions, so "a walk only ever happens while
+    // the pipeline is already stalled" does not, by itself, guarantee no
+    // OTHER real bus traffic is in flight. Fixed by gating ptw_start on
+    // !lsu_cyc (the plain, pre-mux "does the real LSU currently want the
+    // bus" signal, unchanged) -- the walker simply waits its turn; the
+    // pipeline stays correctly frozen via dtlb_miss/itlb_miss regardless
+    // of exactly when the walk itself is allowed to start.
+    wire ptw_req_d = dtlb_miss;
+    wire ptw_req_i = itlb_miss && !dtlb_miss;
+    wire ptw_start = (ptw_req_d || ptw_req_i) && !lsu_cyc;
+    // dtlb_vaddr (not raw ALUOut): if ptw_start is itself delayed past the
+    // first dtlb_miss cycle (the !lsu_cyc gate below can do that), ALUOut
+    // may have already drifted by the time the walk actually latches it --
+    // see dtlb_vaddr_r's own comment.
+    wire [XLEN-1:0] ptw_vaddr = ptw_req_d ? dtlb_vaddr : imem_read_addr;
+    wire ptw_is_fetch = ptw_req_i;
+    wire ptw_is_store = ptw_req_d && memWrite_regde;
+
+    wire ptw_busy, ptw_done, ptw_fault;
+    wire [XLEN-1:0] ptw_result_ppn;
+    wire ptw_result_perm_r, ptw_result_perm_w, ptw_result_perm_x, ptw_result_perm_u;
+    wire ptw_m_cyc, ptw_m_stb, ptw_m_we;
+    wire [XLEN-1:0] ptw_m_addr, ptw_m_data_o;
+    wire [3:0] ptw_m_sel;
+
+    Ptw #(.XLEN(XLEN)) m_Ptw(
+        .clk(clk), .rst(start),
+        .start(ptw_start), .vaddr(ptw_vaddr), .satp_ppn(satp_ppn_w),
+        .is_fetch(ptw_is_fetch), .is_store(ptw_is_store), .priv_is_u(priv_is_u),
+        .busy(ptw_busy), .done(ptw_done), .fault(ptw_fault),
+        .result_ppn(ptw_result_ppn),
+        .result_perm_r(ptw_result_perm_r), .result_perm_w(ptw_result_perm_w),
+        .result_perm_x(ptw_result_perm_x), .result_perm_u(ptw_result_perm_u),
+        .m_cyc(ptw_m_cyc), .m_stb(ptw_m_stb), .m_we(ptw_m_we),
+        .m_addr(ptw_m_addr), .m_data_o(ptw_m_data_o), .m_sel(ptw_m_sel),
+        .m_data_i(readData), .m_ack(lsu_ack)
+    );
+
+    // Which side a walk currently in progress (or just concluded) was for
+    // -- needed because Ptw.v itself doesn't report this (mirrors
+    // Divider.v's own precedent of the caller owning any such
+    // bookkeeping, not the multi-cycle unit itself).
+    reg ptw_servicing_d_r;
+    always @(posedge clk) begin
+        if (~start) ptw_servicing_d_r <= 1'b0;
+        else if (ptw_start && !ptw_busy) ptw_servicing_d_r <= ptw_req_d;
+    end
+    wire ptw_done_i = ptw_done && !ptw_servicing_d_r;
+    wire ptw_done_d = ptw_done && ptw_servicing_d_r;
+
+    // A second real bug found by running (the !branch_taken fix above
+    // addresses a DIFFERENT cycle of the same underlying scenario): a walk
+    // already in flight when a redirect fires is NOT itself cancelled --
+    // Ptw.v has no notion of "never mind" once busy, it just keeps
+    // running to completion. Observed directly: a walk started for one
+    // fetch attempt (VA X) outlives a redirect that abandons X entirely
+    // (e.g. that same cycle's exception_taken firing for a DIFFERENT,
+    // OLDER reason), then concludes several cycles later -- by which point
+    // the pipeline has moved on to completely unrelated code (even a
+    // DIFFERENT privilege level) -- and its now-stale fault/success result
+    // was still being trusted, corrupting whatever was actually executing.
+    // Fixed by latching "the requestor of the walk currently in flight was
+    // abandoned" the cycle a redirect coincides with ptw_busy, and
+    // suppressing ifetch_fault_if/dtlb_page_fault (but not ptw_fill_valid
+    // -- caching a stale walk's SUCCESSFUL translation is harmless and
+    // still useful for whoever asks next) for that walk's own conclusion.
+    reg ptw_abandoned_r;
+    always @(posedge clk) begin
+        if (~start) ptw_abandoned_r <= 1'b0;
+        else if (ptw_busy && branch_taken) ptw_abandoned_r <= 1'b1;
+        else if (ptw_done) ptw_abandoned_r <= 1'b0;
+    end
+
+    assign ptw_fill_valid = (ptw_done_i || ptw_done_d) && !ptw_fault;
+    assign ptw_fill_vaddr = ptw_servicing_d_r ? dtlb_vaddr : imem_read_addr;
+    assign ptw_fill_ppn = ptw_result_ppn;
+    assign ptw_fill_perm_r = ptw_result_perm_r;
+    assign ptw_fill_perm_w = ptw_result_perm_w;
+    assign ptw_fill_perm_x = ptw_result_perm_x;
+    assign ptw_fill_perm_u = ptw_result_perm_u;
+
+    // -- Bus mux: Ptw.v's own master port shares the LSU's existing single
+    // master port on WbDecoder, per the phase's own "a walk only ever
+    // happens while the pipeline is already stalled, so a plain mux
+    // suffices, no real arbiter needed" reasoning. m_WbDecoder's own
+    // instantiation below is wired to these instead of the raw lsu_*/
+    // ALUOut_regem/readData2_regem signals; m_data_i(readData)/
+    // m_ack(lsu_ack) stay shared/unchanged either way -- see Ptw.v's own
+    // .m_data_i/.m_ack connections above for why reusing the same wires
+    // for both potential "readers" of the response is safe (only one of
+    // Ptw or the real LSU is ever the active requester at a time).
+    wire wb_m_cyc  = ptw_busy ? ptw_m_cyc  : lsu_cyc;
+    wire wb_m_stb  = ptw_busy ? ptw_m_stb  : lsu_stb;
+    wire wb_m_we   = ptw_busy ? ptw_m_we   : lsu_we;
+    wire [XLEN-1:0] wb_m_addr   = ptw_busy ? ptw_m_addr   : ALUOut_regem;
+    wire [XLEN-1:0] wb_m_data_o = ptw_busy ? ptw_m_data_o : readData2_regem;
+    wire [3:0] wb_m_sel = ptw_busy ? ptw_m_sel : lsu_sel;
+    // A real bug found by running: RamWishboneAdapter.v's `funct3` port is
+    // a side-band tag (docs/adr/0020 D2 -- not part of the standard
+    // Wishbone signal set, needed because DataMemoryBRAM.v bakes load
+    // width/signedness into funct3 rather than a pure byte-enable mask).
+    // Left wired to the real LSU's own funct3_regem unconditionally, a
+    // Ptw.v word read during a walk was silently reinterpreted as whatever
+    // width/signedness the real LSU's last (unrelated, possibly stale-
+    // reset-value) funct3 happened to be -- observed directly: a real PTE
+    // word (0x401) came back as 0x1, its own low byte, sign-extension
+    // irrelevant since bit7 was already 0. Every PTE read is always a
+    // plain 4-byte-aligned full word (funct3=3'b010, lw's own encoding,
+    // the only width Ptw.v ever needs), muxed the same way every other
+    // master-side signal already is.
+    wire [2:0] wb_m_funct3 = ptw_busy ? 3'b010 : funct3_regem;
+
     // docs/adr/0020-soc-integration.md (Phase D8). NUM_SLAVES=3: slave 0
     // is RAM, slave 1 is Uart.v, slave 2 is Timer.v -- indices/BASE/SIZE
     // must stay in lockstep across the three flattened buses below (the
@@ -1624,8 +2021,11 @@ end
     WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(3),
                 .BASE({`TIMER_BASE, `UART_BASE, 32'd0}),
                 .SIZE({`TIMER_SIZE, `UART_SIZE, MEM_SIZE_BYTES})) m_WbDecoder(
-        .m_cyc(lsu_cyc), .m_stb(lsu_stb), .m_we(lsu_we),
-        .m_addr(ALUOut_regem), .m_data_o(readData2_regem), .m_sel(lsu_sel),
+        // docs/adr/00NN-mmu-sv32.md (Phase F5): wb_m_* mux Ptw.v's own bus
+        // traffic onto this shared master port while a walk is in
+        // progress -- see the MMU translation block above.
+        .m_cyc(wb_m_cyc), .m_stb(wb_m_stb), .m_we(wb_m_we),
+        .m_addr(wb_m_addr), .m_data_o(wb_m_data_o), .m_sel(wb_m_sel),
         .m_data_i(readData), .m_ack(lsu_ack),
         .s_cyc(wb_s_cyc), .s_stb(wb_s_stb), .s_we(wb_s_we),
         .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
@@ -1636,7 +2036,10 @@ end
         .clk(clk), .rst(start),
         .s_cyc(wb_s_cyc[0]), .s_stb(wb_s_stb[0]), .s_we(wb_s_we),
         .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
-        .funct3(funct3_regem),
+        // docs/adr/00NN-mmu-sv32.md (Phase F5): wb_m_funct3 muxes in a
+        // fixed word-width tag during a Ptw.v walk -- see the MMU
+        // translation block above.
+        .funct3(wb_m_funct3),
         .s_data_i(wb_s_data_i[0*XLEN +: XLEN]), .s_ack(wb_s_ack[0])
     );
 

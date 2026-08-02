@@ -30,6 +30,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Tlb.v"
+`include "Ptw.v"
 
 // docs/adr/0020-soc-integration.md (Phase D8): confirms mip.MTIP/MEIP
 // track real, live hardware transitions (Timer.v counting up to a
