@@ -32,6 +32,8 @@
     isEcall_regde <= 0; \
     isEbreak_regde <= 0; \
     isMret_regde <= 0; \
+    isSret_regde <= 0; \
+    isSfenceVma_regde <= 0; \
     illegalOpcode_regde <= 0;
 
 `define ZERO_DECODE_CONTEXT \
@@ -46,7 +48,9 @@
     funct3_regde <= 0; \
     readReg1_regde <= 0; \
     readReg2_regde <= 0; \
-    readReg3_regde <= 0;
+    readReg3_regde <= 0; \
+    predict_taken_regde <= 0; \
+    predict_target_regde <= 0;
 
 `define PASS_DECODE_CONTEXT \
     pc_o_regde <= pc_o_regfd; \
@@ -60,7 +64,9 @@
     funct3_regde <= funct3; \
     readReg1_regde <= readReg1; \
     readReg2_regde <= readReg2; \
-    readReg3_regde <= readReg3;
+    readReg3_regde <= readReg3; \
+    predict_taken_regde <= predict_taken; \
+    predict_target_regde <= predict_target;
 
 module reg2 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
@@ -114,6 +120,13 @@ module reg2 #(
     // but FForward.v needs this index for every instruction to correctly
     // report "no forward" (index 0) rather than an accidental stale match.
     input [$clog2(NUM_REGS)-1:0] readReg3,
+    // docs/adr/0021-branch-prediction.md (Phase E4). The branch predictor's
+    // guess for this instruction, latched alongside every other piece of
+    // decode context (see ZERO_DECODE_CONTEXT/PASS_DECODE_CONTEXT above) so
+    // it's available in EX, two cycles after fetch, to compare against the
+    // real resolved outcome. Always 0/don't-care under PREDICTOR_STATIC.
+    input predict_taken,
+    input [XLEN-1:0] predict_target,
     input jump,
     input jalr,
     input lui,
@@ -122,6 +135,8 @@ module reg2 #(
     input isEcall,
     input isEbreak,
     input isMret,
+    input isSret,        // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
+    input isSfenceVma,    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
     input illegalOpcode,
 
     output reg branch_regde,
@@ -146,6 +161,8 @@ module reg2 #(
     output reg [$clog2(NUM_REGS)-1:0] readReg1_regde,
     output reg [$clog2(NUM_REGS)-1:0] readReg2_regde,
     output reg [$clog2(NUM_REGS)-1:0] readReg3_regde,
+    output reg predict_taken_regde,
+    output reg [XLEN-1:0] predict_target_regde,
     output reg jump_regde,
     output reg jalr_regde,
     output reg lui_regde,
@@ -154,6 +171,8 @@ module reg2 #(
     output reg isEcall_regde,
     output reg isEbreak_regde,
     output reg isMret_regde,
+    output reg isSret_regde,
+    output reg isSfenceVma_regde,
     output reg illegalOpcode_regde
 
 );
@@ -223,6 +242,8 @@ begin
         isEcall_regde <= isEcall;
         isEbreak_regde <= isEbreak;
         isMret_regde <= isMret;
+        isSret_regde <= isSret;
+        isSfenceVma_regde <= isSfenceVma;
         illegalOpcode_regde <= illegalOpcode;
         `PASS_DECODE_CONTEXT
         inst_regde <= inst_regfd;

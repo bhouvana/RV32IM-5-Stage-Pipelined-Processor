@@ -32,7 +32,7 @@ def load_words(mem_path):
 
 
 def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0,
-            mem_size=128, interrupt=None):
+            mem_size=128, interrupt=None, branch_predictor=0):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
     text, interrupt_info = gen_program(seed, n_instrs, mem_size=mem_size, interrupt=interrupt)
@@ -79,6 +79,7 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
               .replace("__OUT_FILE__", out_path).replace("__HAZARD_STRATEGY__", str(hazard_strategy))
               .replace("__PIPELINE_PROFILE__", str(pipeline_profile)).replace("__MEM_SIZE__", str(mem_size))
+              .replace("__BRANCH_PREDICTOR__", str(branch_predictor))
               .replace("__UART_STIMULUS__", uart_stimulus))
     with open(dump_v, "w") as f:
         f.write(tpl)
@@ -137,6 +138,9 @@ def main():
     ap.add_argument("--pipeline-profile", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's PIPELINE_PROFILE (docs/adr/0018): "
                           "0=5-stage (default), 1=6-stage split-fetch")
+    ap.add_argument("--branch-predictor", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's BRANCH_PREDICTOR (docs/adr/0021): "
+                          "0=static not-taken (default), 1=dynamic BHT+BTB")
     # docs/adr/0020-soc-integration.md (Phase D10). Opt-in, not default-on --
     # every existing invocation (no --interrupt) behaves exactly as before,
     # against the original dump_regs_template.v at mem_size=128.
@@ -163,7 +167,8 @@ def main():
             seed = args.seed_start + i
             ok, msg = run_one(seed, args.n_instrs, work_dir, args.iverilog_dir, template,
                               args.hazard_strategy, args.pipeline_profile,
-                              mem_size=mem_size, interrupt=args.interrupt)
+                              mem_size=mem_size, interrupt=args.interrupt,
+                              branch_predictor=args.branch_predictor)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")

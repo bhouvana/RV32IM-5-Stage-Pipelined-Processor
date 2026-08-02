@@ -35,8 +35,11 @@
 // CSR-only plumbing -- masking (only MTIE/MEIE survive a write to mie),
 // csrrw-replaces-vs-csrrs-ORs semantics against a real bit-position pair
 // spread across the 32-bit register (not adjacent low bits, unlike
-// mscratch's own tb_csr_ops.v coverage), and mip's read-only/write-dropped
-// behavior. No live interrupt *redirect* exists yet (D9) -- but as of D8,
+// mscratch's own tb_csr_ops.v coverage), and (updated for Phase F1) mip's
+// mixed read-only-hardware/software-writable behavior: MTIP/MEIP stay
+// hardware-driven and read-only exactly as through Phase E, but SSIP/STIP/
+// SEIP are now real, software-writable storage (see the check below). No
+// live interrupt *redirect* exists yet (D9) -- but as of D8,
 // mip.MTIP is real, live-wired hardware state from Timer.v, which is
 // pending from reset onward here (this program never touches MTIMECMP,
 // and Timer.v resets with mtime=0/mtimecmp=0, so 0>=0 immediately) --
@@ -55,11 +58,17 @@ module tb_mie_mip_csr;
         #10 start = 1;
         #300;
 
+        // docs/adr/00NN-mmu-sv32.md (Phase F1): 0x7f (bits 0-6) now
+        // includes two real bits that didn't exist through Phase E --
+        // SSIE@1/STIE@5 -- so this write no longer masks to entirely 0.
+        // MTIE@7/SEIE@9/MEIE@11 (the bits 0x7f doesn't reach) still don't
+        // survive, confirming the mask boundary is exactly right, not
+        // simply wider than before.
         check_reg(2, 32'h00000000, "csrrw x2,mie,0x7f: x2 = old mie (0)");
-        check_reg(3, 32'h00000000, "mie reads back 0 -- no real bits in 0x7f survived masking");
+        check_reg(3, 32'h00000022, "mie reads back 0x22 -- SSIE@1/STIE@5 (Phase F, real) survived, nothing above bit6 did");
 
-        check_reg(4, 32'h00000000, "csrrw x4,mie,0x80: x4 = old mie (0)");
-        check_reg(5, 32'h00000080, "mie reads back 0x80 -- MTIE alone survived");
+        check_reg(4, 32'h00000022, "csrrw x4,mie,0x80: x4 = old mie (0x22 from the previous csrrw)");
+        check_reg(5, 32'h00000080, "mie reads back 0x80 -- csrrw REPLACED (0x22 is gone), MTIE alone survived");
 
         check_reg(6, 32'h00000080, "csrrw x6,mie,0x800: x6 = old mie (0x80)");
         check_reg(7, 32'h00000800, "mie reads back 0x800 -- csrrw REPLACED, MTIE dropped");
@@ -76,7 +85,18 @@ module tb_mie_mip_csr;
         // program touches the UART. 0x80 = MTIP alone.
         check_reg(10, 32'h00000080, "mip reads 0x80 (MTIP live-pending from Timer.v since reset) before any write attempt");
         check_reg(11, 32'h00000080, "csrrw x11,mip,0x7ff: x11 = old mip (0x80)");
-        check_reg(12, 32'h00000080, "mip still reads 0x80 -- the write to a read-only CSR was silently dropped, live MTIP unaffected");
+        // docs/adr/00NN-mmu-sv32.md (Phase F1): MTIP/MEIP (bits 7/11) stay
+        // hardware-driven, read-only exactly as before -- but SSIP/STIP/
+        // SEIP (bits 1/5/9) are now genuine, software-writable storage
+        // (mip_sw in CSR.v), per the real spec's own convention that these
+        // three specific mip bits are software-settable even though
+        // MTIP/MEIP are not. 0x7ff has bits 0-10 all set, so bits 1/5/9
+        // survive into mip_sw (0x222); MTIP (0x80, still live-pending)
+        // ORs in on top -- 0x222 | 0x80 = 0x2a2. This is a real, deliberate
+        // behavior change from before Phase F, not a regression: mip was
+        // never meant to be entirely read-only, only its two
+        // hardware-sourced bits are.
+        check_reg(12, 32'h000002a2, "mip reads 0x2a2 -- SSIP/STIP/SEIP (Phase F, software-writable) took 0x7ff's bits 1/5/9, live MTIP (0x80) unaffected");
 
         report("mie_mip_csr");
         $finish;

@@ -76,7 +76,8 @@ CSR_ADDR = {  # standard RISC-V machine-mode addresses (docs/adr/0011-csr-and-ex
 }
 CSR_OP = {"csrrw": 0b001, "csrrs": 0b010, "csrrc": 0b011,
           "csrrwi": 0b101, "csrrsi": 0b110, "csrrci": 0b111}
-SYSTEM_IMM12 = {"ecall": 0x000, "ebreak": 0x001, "mret": 0x302}
+SYSTEM_IMM12 = {"ecall": 0x000, "ebreak": 0x001, "mret": 0x302, "sret": 0x102}
+FUNCT7_SFENCE_VMA = 0b0001001  # docs/adr/00NN-mmu-sv32.md (Phase F2)
 
 FUNCT7_BASE = 0b0000000
 FUNCT7_ALT = 0b0100000    # sub/sra, and this core's custom ctz
@@ -297,6 +298,16 @@ def system_noarg(mn):
     return (SYSTEM_IMM12[mn] << 20) | OP_SYSTEM
 
 
+def sfence_vma(rs1, rs2):
+    # docs/adr/00NN-mmu-sv32.md (Phase F2). Real rs1 (address, x0="all
+    # addresses")/rs2 (ASID, x0="all ASIDs") fields -- unlike ecall/ebreak/
+    # mret/sret, funct7 alone (not a fixed full inst[31:20]) identifies this
+    # instruction, since rs2 varies. This project's own RTL always flushes
+    # the whole TLB regardless of rs1/rs2 (a documented simplification, see
+    # the phase plan), but the assembler still encodes them faithfully.
+    return (FUNCT7_SFENCE_VMA << 25) | (rs2 << 20) | (rs1 << 15) | OP_SYSTEM
+
+
 def assemble(lines):
     # pass 1: strip comments/whitespace, record label addresses
     stmts = []
@@ -365,8 +376,12 @@ def assemble(lines):
         elif mn in ("csrrwi", "csrrsi", "csrrci"):
             rd, csr, uimm = reg(args[0]), args[1], args[2]
             words.append(csr_imm(mn, rd, csr, uimm))
-        elif mn in ("ecall", "ebreak", "mret"):
+        elif mn in ("ecall", "ebreak", "mret", "sret"):
             words.append(system_noarg(mn))
+        elif mn == "sfence.vma":
+            rs1 = reg(args[0]) if len(args) > 0 else 0
+            rs2 = reg(args[1]) if len(args) > 1 else 0
+            words.append(sfence_vma(rs1, rs2))
         elif mn == "word":
             # Raw 32-bit word, for encodings this assembler has no mnemonic
             # for -- e.g. an opcode this core doesn't implement, to exercise

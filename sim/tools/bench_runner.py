@@ -34,9 +34,17 @@ both PIPELINE_PROFILE=0 (PROFILE_5STAGE, the default) and =1
 cycle-count delta -- the honest cost of profile 1's one extra redirect-
 recovery cycle (see docs/adr/0018's Design section), not a hypothetical.
 
+--compare-predictors does the same for branch prediction
+(docs/adr/0021-branch-prediction.md, Phase E5): every benchmark under both
+BRANCH_PREDICTOR=0 (PREDICTOR_STATIC, the default) and =1
+(PREDICTOR_DYNAMIC_BHT_BTB), reporting the cycle-count delta -- the real,
+measured benefit of speculative fetch on branch/loop-heavy kernels, not a
+hypothetical.
+
 Usage: python bench_runner.py --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-strategies --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-profiles --iverilog-dir /c/iverilog/bin
+       python bench_runner.py --compare-predictors --iverilog-dir /c/iverilog/bin
 """
 import argparse
 import glob
@@ -80,7 +88,8 @@ def load_words(mem_path):
     return words
 
 
-def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0):
+def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0,
+              branch_predictor=0):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
@@ -103,8 +112,13 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
     # Neither the stall-only hazard strategy nor the split-fetch pipeline
     # profile can ever take *fewer* cycles per instruction than the defaults
     # -- generous margin, not tuned per-strategy/per-profile.
+    # Neither is true of branch prediction, unlike the comment above about
+    # the stall-only strategy/split-fetch profile: a correct prediction
+    # only ever removes cycles relative to the static baseline, so the same
+    # generous margin (computed independent of branch_predictor) still
+    # covers PREDICTOR_DYNAMIC_BHT_BTB runs too.
     max_time = (instrs * 60 + 500) * 10
-    tag = f"{name}_hs{hazard_strategy}_p{pipeline_profile}"
+    tag = f"{name}_hs{hazard_strategy}_p{pipeline_profile}_bp{branch_predictor}"
     dump_v = os.path.join(work_dir, f"{tag}.v")
     out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
@@ -115,7 +129,8 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
               .replace("__OUT_FILE__", out_path)
               .replace("__MEM_SIZE__", str(mem_size))
               .replace("__HAZARD_STRATEGY__", str(hazard_strategy))
-              .replace("__PIPELINE_PROFILE__", str(pipeline_profile)))
+              .replace("__PIPELINE_PROFILE__", str(pipeline_profile))
+              .replace("__BRANCH_PREDICTOR__", str(branch_predictor)))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
@@ -145,11 +160,19 @@ def main():
     ap.add_argument("--pipeline-profile", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's PIPELINE_PROFILE (docs/adr/0018): 0=PROFILE_5STAGE (default), "
                           "1=PROFILE_6STAGE_SPLIT_FETCH")
+    ap.add_argument("--branch-predictor", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's BRANCH_PREDICTOR (docs/adr/0021): 0=PREDICTOR_STATIC (default), "
+                          "1=PREDICTOR_DYNAMIC_BHT_BTB")
     compare = ap.add_mutually_exclusive_group()
     compare.add_argument("--compare-strategies", action="store_true",
-                          help="run every benchmark under both hazard strategies (at --pipeline-profile) and report the delta")
+                          help="run every benchmark under both hazard strategies "
+                               "(at --pipeline-profile/--branch-predictor) and report the delta")
     compare.add_argument("--compare-profiles", action="store_true",
-                          help="run every benchmark under both pipeline profiles (at --hazard-strategy) and report the delta")
+                          help="run every benchmark under both pipeline profiles "
+                               "(at --hazard-strategy/--branch-predictor) and report the delta")
+    compare.add_argument("--compare-predictors", action="store_true",
+                          help="run every benchmark under both branch predictors "
+                               "(at --hazard-strategy/--pipeline-profile) and report the delta")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -160,32 +183,43 @@ def main():
         print(f"No bench_*.s programs found under {args.programs_dir}")
         sys.exit(1)
 
+    # pairs are always (hazard_strategy, pipeline_profile, branch_predictor)
+    # 3-tuples; a --compare-* flag varies exactly one of the three while
+    # holding the other two at whatever --hazard-strategy/--pipeline-profile/
+    # --branch-predictor were passed (defaulting to 0 each).
     if args.compare_strategies:
         axis, axis_label = "strategy", "HAZARD_STRATEGY"
         keys = (0, 1)
-        pairs = [(s, args.pipeline_profile) for s in keys]
+        pairs = [(s, args.pipeline_profile, args.branch_predictor) for s in keys]
     elif args.compare_profiles:
         axis, axis_label = "profile", "PIPELINE_PROFILE"
         keys = (0, 1)
-        pairs = [(args.hazard_strategy, p) for p in keys]
+        pairs = [(args.hazard_strategy, p, args.branch_predictor) for p in keys]
+    elif args.compare_predictors:
+        axis, axis_label = "predictor", "BRANCH_PREDICTOR"
+        keys = (0, 1)
+        pairs = [(args.hazard_strategy, args.pipeline_profile, bp) for bp in keys]
     else:
         axis, axis_label = None, None
         keys = (args.hazard_strategy,)  # single run, keyed arbitrarily by hazard_strategy
-        pairs = [(args.hazard_strategy, args.pipeline_profile)]
+        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor)]
 
     all_results = {k: [] for k in keys}
     with tempfile.TemporaryDirectory() as work_dir:
-        for key, (strategy, profile) in zip(keys, pairs):
+        for key, (strategy, profile, predictor) in zip(keys, pairs):
             if axis == "strategy":
                 print(f"--- HAZARD_STRATEGY={strategy} ({'forwarding' if strategy == 0 else 'stall-only'}) ---")
             elif axis == "profile":
                 print(f"--- PIPELINE_PROFILE={profile} "
                       f"({'PROFILE_5STAGE' if profile == 0 else 'PROFILE_6STAGE_SPLIT_FETCH'}) ---")
+            elif axis == "predictor":
+                print(f"--- BRANCH_PREDICTOR={predictor} "
+                      f"({'PREDICTOR_STATIC' if predictor == 0 else 'PREDICTOR_DYNAMIC_BHT_BTB'}) ---")
             for prog_s in progs:
                 name = os.path.splitext(os.path.basename(prog_s))[0]
                 mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
                 result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size,
-                                         strategy, profile)
+                                         strategy, profile, predictor)
                 if err:
                     print(f"FAIL  {name}: {err}")
                     all_results[key].append((name, None))
@@ -196,8 +230,11 @@ def main():
             print()
 
     if axis is not None:
-        label0 = "forwarding (HS=0)" if axis == "strategy" else "PROFILE_5STAGE (PP=0)"
-        label1 = "stall-only (HS=1)" if axis == "strategy" else "PROFILE_6STAGE_SPLIT_FETCH (PP=1)"
+        labels0 = {"strategy": "forwarding (HS=0)", "profile": "PROFILE_5STAGE (PP=0)",
+                   "predictor": "PREDICTOR_STATIC (BP=0)"}
+        labels1 = {"strategy": "stall-only (HS=1)", "profile": "PROFILE_6STAGE_SPLIT_FETCH (PP=1)",
+                   "predictor": "PREDICTOR_DYNAMIC_BHT_BTB (BP=1)"}
+        label0, label1 = labels0[axis], labels1[axis]
         print(f"=== comparison: {label0} vs. {label1} ===")
         by_name_0 = dict(all_results[0])
         by_name_1 = dict(all_results[1])

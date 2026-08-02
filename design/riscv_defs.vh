@@ -230,4 +230,130 @@
 `define TIMER_BASE (`UART_BASE + `UART_SIZE)
 `define TIMER_SIZE 32'd8
 
+// ---- Sv32 MMU / M-S-U privilege modes (Phase F of the redesign) ----
+// This core was M-mode only through Phase E (docs/adr/0011 explicitly drew
+// that boundary; docs/adr/0020's Future Improvements explicitly deferred
+// S/U-mode delegation to "whenever" this phase happens). Phase F is that
+// phase: real S-mode/U-mode privilege levels, `mideleg`/`medeleg` trap
+// delegation, and a full 2-level Sv32 page-table walk with a TLB, gated
+// off unless `satp.MODE`==Sv32 and the current privilege is below M
+// (M-mode always executes physical addresses this phase -- `mstatus.MPRV`,
+// which would let M opt into translation too, is out of scope, see the
+// phase plan's own Explicitly out of scope section).
+
+// Current-privilege-level encoding (standard RISC-V `mstatus.MPP`/`sstatus.SPP`
+// and satp.MODE-adjacent convention) -- 2'b10 (H, hypervisor) is a reserved
+// encoding this core never produces or accepts, since there is no H-mode.
+`define PRIV_U 2'b00
+`define PRIV_S 2'b01
+`define PRIV_M 2'b11
+
+// `sret` (SYSTEM opcode, funct3=000, like ecall/ebreak/mret) -- distinguished
+// by the same fixed inst[31:20] "csr" field position those three already use.
+`define CSR_IMM12_SRET 12'h102
+
+// `sfence.vma rs1, rs2` (SYSTEM opcode, funct3=000) -- unlike ecall/ebreak/
+// mret/sret, this one has real rs1 (address, or x0 for "all addresses") and
+// rs2 (ASID, or x0 for "all ASIDs") register fields, so it's distinguished
+// by funct7 (inst[31:25]) alone, not the full 12-bit immediate position.
+// This phase always flushes the whole TLB regardless of rs1/rs2 (see the
+// phase plan's own "sfence.vma flushes unconditionally" scoping default),
+// so rs1/rs2 are decoded (Control.v must still recognize this funct7 to
+// avoid misdecoding it as something else) but not actually read for their
+// address/ASID meaning.
+`define FUNCT7_SFENCE_VMA 7'b0001001
+
+// New CSR addresses (standard RISC-V S-mode assignments) -- `sstatus`/`sie`/
+// `sip` are NOT separate storage, same "one more view onto the same bits"
+// relationship `fcsr` already has onto `{frm,fflags}` (CSR.v's own header
+// comment) -- here the view is onto `mstatus`/`mie`/`mip`'s S-mode-visible
+// bit subset, which is how the real privileged spec itself defines them.
+`define CSR_ADDR_SSTATUS  12'h100
+`define CSR_ADDR_SIE      12'h104
+`define CSR_ADDR_STVEC    12'h105
+`define CSR_ADDR_SSCRATCH 12'h140
+`define CSR_ADDR_SEPC     12'h141
+`define CSR_ADDR_SCAUSE   12'h142
+`define CSR_ADDR_STVAL    12'h143
+`define CSR_ADDR_SIP      12'h144
+`define CSR_ADDR_SATP     12'h180
+// M-mode-only additions this phase needs alongside the S-mode set above:
+// `mtval` (the faulting address companion to `mcause`, not previously
+// implemented -- this phase is the first real consumer, a page fault's
+// faulting virtual address) and `mideleg`/`medeleg` (which causes, if they
+// occur at or below S-mode, get delegated to S's own trap vector instead
+// of M's -- per spec, a trap whose *source* privilege is M itself is never
+// delegated, regardless of these bits, see riscvpipeline.v's own delegation
+// condition).
+`define CSR_ADDR_MTVAL   12'h343
+`define CSR_ADDR_MEDELEG 12'h302
+`define CSR_ADDR_MIDELEG 12'h303
+
+// New mcause values this phase adds, same "already-assigned spec numbering,
+// the interrupt bit is what disambiguates, not a disjoint range" convention
+// docs/adr/0020 established for the timer/external interrupt causes.
+// ECALL_FROM_M already existed (docs/adr/0011); ecall's cause is now
+// privilege-dependent (whichever of these three was current at trap time),
+// not the fixed M-only value it always was through Phase E.
+`define MCAUSE_ECALL_FROM_U 32'd8
+`define MCAUSE_ECALL_FROM_S 32'd9
+`define MCAUSE_INSTRUCTION_PAGE_FAULT 32'd12
+`define MCAUSE_LOAD_PAGE_FAULT        32'd13
+`define MCAUSE_STORE_PAGE_FAULT       32'd15
+
+// mstatus bit positions this phase makes real, alongside the existing
+// MIE_MTIE_BIT/MIE_MEIE_BIT for mie/mip and mstatus's own pre-existing
+// bit3(MIE)/bit7(MPIE) (CSR.v itself still hardcodes those two directly --
+// only the genuinely new bits get named constants here, matching how
+// MIE_MTIE_BIT/MIE_MEIE_BIT were the only mie/mip bits that needed names
+// when D7 added them).
+`define MSTATUS_SIE_BIT   1   // S-mode global interrupt enable
+`define MSTATUS_SPIE_BIT  5   // S-mode: previous SIE, saved across a trap into S
+`define MSTATUS_SPP_BIT   8   // S-mode: privilege mode (U or S only, 1 bit) before a trap into S
+`define MSTATUS_MPP_LO    11  // M-mode: privilege mode (U/S/M, 2 bits, 12:11) before a trap into M
+`define MIE_SSIE_BIT 1   // S-mode software interrupt enable (mip's software half is not implemented,
+                           // no second hart -- mirrors this core's existing MSIP omission)
+`define MIE_STIE_BIT 5   // S-mode timer interrupt enable
+`define MIE_SEIE_BIT 9   // S-mode external interrupt enable
+
+// satp fields (Sv32 -- the only mode this core implements besides Bare).
+// MODE is a single bit for Sv32 (0=Bare/no translation, 1=Sv32) -- real
+// RV32 satp has no other mode encoding to choose between.
+`define SATP_MODE_BIT 31
+`define SATP_ASID_HI  30
+`define SATP_ASID_LO  22
+`define SATP_PPN_HI   21
+`define SATP_PPN_LO   0
+
+// Sv32 PTE (page-table-entry) format -- identical at both walk levels.
+// PPN occupies bits 31:10 (two sub-fields, PPN[1]=31:20/PPN[0]=19:10, only
+// relevant for reconstructing a megapage's physical address; the walker
+// otherwise treats PPN as one 22-bit field). A/D (accessed/dirty) are
+// tracked here as ordinary bits the walker reads but this phase's own
+// Ptw.v does not itself set on a successful access (matching this core's
+// existing "simulate today's real timing, simplify what doesn't change
+// correctness" convention -- a real OS sets these up front or via its own
+// fault handler; auto-set-on-access is a real but separable future
+// optimization, not attempted here).
+`define PTE_V_BIT 0   // valid
+`define PTE_R_BIT 1   // readable
+`define PTE_W_BIT 2   // writable
+`define PTE_X_BIT 3   // executable
+`define PTE_U_BIT 4   // accessible from U-mode
+`define PTE_G_BIT 5   // global (matches in every address space -- this phase's
+                        // TLB does not special-case this bit; see Ptw.v)
+`define PTE_A_BIT 6   // accessed
+`define PTE_D_BIT 7   // dirty
+`define PTE_PPN_LO 10  // PPN occupies bits 31:10 of the 32-bit PTE word
+
+// Sv32 address decomposition -- VPN[1] is the level-1 (megapage) index,
+// VPN[0] the level-0 (4KB page) index, both 10 bits; the low 12 bits are
+// the page offset, untouched by translation.
+`define VPN1_HI 31
+`define VPN1_LO 22
+`define VPN0_HI 21
+`define VPN0_LO 12
+`define PAGE_OFFSET_HI 11
+`define PAGE_OFFSET_LO 0
+
 `endif

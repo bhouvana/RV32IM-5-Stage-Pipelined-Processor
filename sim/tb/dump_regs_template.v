@@ -32,17 +32,21 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Bht.v"
+`include "Btb.v"
 
 // Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__,
 // __MAX_TIME__, __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-
 // strategy.md; 0 or 1, see riscvpipeline.v's HAZARD_STRATEGY parameter), and
 // __PIPELINE_PROFILE__ (docs/adr/0018-variable-pipeline-depth.md; 0 or 1,
-// see riscvpipeline.v's PIPELINE_PROFILE parameter) are substituted per run.
-// Dumps final architectural state as one decimal value per line, for
-// comparison against sim/tools/iss.py's own final state on the same
-// program -- the ISS itself doesn't model pipeline microarchitecture at
+// see riscvpipeline.v's PIPELINE_PROFILE parameter), and __BRANCH_PREDICTOR__
+// (docs/adr/0021-branch-prediction.md; 0 or 1, see riscvpipeline.v's
+// BRANCH_PREDICTOR parameter) are substituted per run. Dumps final
+// architectural state as one decimal value per line, for comparison against
+// sim/tools/iss.py's own final state on the same program -- the ISS itself
+// doesn't model pipeline microarchitecture (or branch-prediction timing) at
 // all, so it's equally valid as a reference regardless of which hazard
-// strategy or pipeline profile the RTL used. Not part of sim/run_tests.sh's
+// strategy, pipeline profile, or branch predictor the RTL used. Not part of sim/run_tests.sh's
 // tb_*.v glob (different shape -- generated per-run, not a fixed named
 // test). Layout: 32 integer regs, 128 data memory bytes, 32 float regs
 // (docs/adr/0019-f-extension.md Phase C9), fflags, frm -- in that order,
@@ -54,7 +58,8 @@ module dump_regs;
     integer fd;
 
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
-                .PIPELINE_PROFILE(__PIPELINE_PROFILE__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
+                .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__))
+                dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

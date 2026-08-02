@@ -36,6 +36,12 @@ module Control (
     output reg isEcall,
     output reg isEbreak,
     output reg isMret,
+    // docs/adr/00NN-mmu-sv32.md (Phase F2). No live behavior yet -- these
+    // just decode correctly; riscvpipeline.v doesn't consume either until
+    // F3 (isSret, folded into the redirect mux alongside isMret) and F5
+    // (isSfenceVma, flushing Tlb.v).
+    output reg isSret,
+    output reg isSfenceVma,
     output reg illegalOpcode, // opcode itself unrecognized -- see riscvpipeline.v for the
                                // other exception source (ALUCtl==ILLEGAL, a recognized
                                // opcode with an unrecognized funct7/funct3)
@@ -66,6 +72,8 @@ always@(*)begin
     isEcall   = 0;
     isEbreak  = 0;
     isMret    = 0;
+    isSret    = 0;
+    isSfenceVma = 0;
     illegalOpcode = 0;
     fRegWrite = 0;
 
@@ -156,17 +164,35 @@ case(opcode)
     begin
         if (funt3 == `CSR_F3_NONE)
         begin
-            // Not a csrrX read/write at all -- inst[31:20] (csr_imm12 here)
-            // picks which of the three funct3=000 instructions this is.
-            // Anything else in this position is a reserved/unallocated
-            // SYSTEM encoding -- illegalOpcode below, same exception
-            // riscvpipeline.v raises for any other unrecognized instruction.
-            case (csr_imm12)
-                `CSR_IMM12_ECALL:  isEcall  = 1;
-                `CSR_IMM12_EBREAK: isEbreak = 1;
-                `CSR_IMM12_MRET:   isMret   = 1;
-                default: illegalOpcode = 1;  // SYSTEM/funct3=0 but not ecall/ebreak/mret
-            endcase
+            // docs/adr/00NN-mmu-sv32.md (Phase F2). sfence.vma is checked
+            // FIRST and separately, by funt7 alone (inst[31:25]) -- unlike
+            // ecall/ebreak/mret/sret, it has real rs1 (address)/rs2 (ASID)
+            // register fields (inst[24:20]/[19:15] respectively), so its
+            // full inst[31:20] "csr_imm12" position is NOT a single fixed
+            // value the way the case statement below assumes -- it varies
+            // with whatever rs2 register the instruction happens to name.
+            // (This phase always flushes the whole TLB regardless of
+            // rs1/rs2's actual values -- see the phase plan's own scoping
+            // default -- so decoding only needs to recognize the
+            // instruction, not read those two fields for their real
+            // address/ASID meaning.)
+            if (funt7 == `FUNCT7_SFENCE_VMA)
+                isSfenceVma = 1;
+            else begin
+                // Not a csrrX read/write at all -- inst[31:20] (csr_imm12
+                // here) picks which of the four funct3=000, non-sfence.vma
+                // instructions this is. Anything else in this position is a
+                // reserved/unallocated SYSTEM encoding -- illegalOpcode
+                // below, same exception riscvpipeline.v raises for any
+                // other unrecognized instruction.
+                case (csr_imm12)
+                    `CSR_IMM12_ECALL:  isEcall  = 1;
+                    `CSR_IMM12_EBREAK: isEbreak = 1;
+                    `CSR_IMM12_MRET:   isMret   = 1;
+                    `CSR_IMM12_SRET:   isSret   = 1;
+                    default: illegalOpcode = 1;  // SYSTEM/funct3=0 but not ecall/ebreak/mret/sret/sfence.vma
+                endcase
+            end
         end
         else
         begin

@@ -52,7 +52,20 @@ module reg1a #(
     input rst,
     input stall,
     input [XLEN-1:0] pc_o,
-    output reg [XLEN-1:0] pc_o_reg1a
+    output reg [XLEN-1:0] pc_o_reg1a,
+    // docs/adr/0021-branch-prediction.md (Phase E4). The branch predictor's
+    // guess for THIS pc_o, relayed alongside it with exactly the same
+    // unconditional reset/stall/latch treatment pc_o itself already gets
+    // above -- not a new mechanism, just two more fields riding the same
+    // relay. Always 0/don't-care under PREDICTOR_STATIC (riscvpipeline.v
+    // ties them off there). Squash handling for a redirect still lives
+    // entirely in riscvpipeline.v's redirect_squash_extend_r / reg1.v's own
+    // priority chain -- see this module's own header for why a second,
+    // independent squash source must never be added here.
+    input predict_taken,
+    input [XLEN-1:0] predict_target,
+    output reg predict_taken_reg1a,
+    output reg [XLEN-1:0] predict_target_reg1a
 );
 
 always@(posedge clk)
@@ -60,16 +73,22 @@ begin
     if(~rst)
     begin
         pc_o_reg1a <= 0;
+        predict_taken_reg1a <= 0;
+        predict_target_reg1a <= 0;
     end
     else
         begin
             if(stall)
             begin
                 pc_o_reg1a <= pc_o_reg1a;
+                predict_taken_reg1a <= predict_taken_reg1a;
+                predict_target_reg1a <= predict_target_reg1a;
             end
             else
             begin
                 pc_o_reg1a <= pc_o;
+                predict_taken_reg1a <= predict_taken;
+                predict_target_reg1a <= predict_target;
             end
     end
 end

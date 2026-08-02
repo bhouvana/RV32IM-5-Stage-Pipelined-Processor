@@ -32,16 +32,20 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Bht.v"
+`include "Btb.v"
 
 // Template for sim/tools/bench_runner.py (docs/ROADMAP.md Phase 10).
 // __INIT_FILE__/__MAX_TIME__/__OUT_FILE__/__MEM_SIZE__/__HAZARD_STRATEGY__/
-// __PIPELINE_PROFILE__ substituted per run, same idiom dump_regs_template.v
-// (docs/ROADMAP.md V-4) already established. __HAZARD_STRATEGY__
-// (docs/adr/0016-swappable-hazard-strategy.md) is what makes this runner
-// double as the "compare hazard strategies" tool docs/ROADMAP.md Phase 6
-// named as a research-platform goal; __PIPELINE_PROFILE__ (docs/adr/0018-
-// variable-pipeline-depth.md, Phase A6) does the same for "compare pipeline
-// depths".
+// __PIPELINE_PROFILE__/__BRANCH_PREDICTOR__ substituted per run, same idiom
+// dump_regs_template.v (docs/ROADMAP.md V-4) already established.
+// __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-strategy.md) is what
+// makes this runner double as the "compare hazard strategies" tool
+// docs/ROADMAP.md Phase 6 named as a research-platform goal;
+// __PIPELINE_PROFILE__ (docs/adr/0018-variable-pipeline-depth.md, Phase A6)
+// does the same for "compare pipeline depths"; __BRANCH_PREDICTOR__
+// (docs/adr/0021-branch-prediction.md, Phase E5) does the same for
+// "compare branch predictors".
 //
 // Detects "program finished" generically, without needing to know any
 // program's specific halt-label address: every benchmark (like every other
@@ -59,7 +63,7 @@ module bench_run;
     integer cycle_count;
     reg done;
 
-    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__), .HAZARD_STRATEGY(__HAZARD_STRATEGY__), .PIPELINE_PROFILE(__PIPELINE_PROFILE__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
+    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__), .HAZARD_STRATEGY(__HAZARD_STRATEGY__), .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 

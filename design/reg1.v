@@ -21,8 +21,22 @@ module reg1 #(
     input branch_regde,
     input zero,
     input jump,       // unconditional redirect (jal) resolved in EX, same squash as a taken branch
+    // docs/adr/0021-branch-prediction.md (Phase E4). The branch predictor's
+    // guess for THIS specific fetch (queried at the same address `inst`
+    // itself was fetched from), latched alongside it with exactly the same
+    // squash/hold/fresh-latch priority as inst/pc_o above -- never a
+    // second, independent squash source (see reg1a.v's own header for why
+    // that distinction matters). Always 0/don't-care under
+    // PREDICTOR_STATIC -- riscvpipeline.v ties them off there, and folds
+    // the branch/jump redirect condition entirely into `jump` above instead
+    // of this module's own branch_regde/zero ports in that case too (see
+    // riscvpipeline.v's own comment at the reg1 instantiation).
+    input predict_taken,
+    input [XLEN-1:0] predict_target,
     output reg [XLEN-1:0] inst_regfd,
-    output reg [XLEN-1:0] pc_o_regfd
+    output reg [XLEN-1:0] pc_o_regfd,
+    output reg predict_taken_regfd,
+    output reg [XLEN-1:0] predict_target_regfd
 );
 
 always@(posedge clk)
@@ -40,24 +54,32 @@ begin
     // read those registers early enough to notice).
     inst_regfd <= 32'h00000013;
     pc_o_regfd <= 0;
+    predict_taken_regfd <= 0;
+    predict_target_regfd <= 0;
     end
     else
         begin
             if((branch_regde & zero) | jump)
             begin
-                
+
                 inst_regfd <= 32'h00000013;
                 pc_o_regfd <= 0;
+                predict_taken_regfd <= 0;
+                predict_target_regfd <= 0;
             end
             else if(stall)
             begin
                 inst_regfd <= inst_regfd;
                 pc_o_regfd <= pc_o_regfd;
+                predict_taken_regfd <= predict_taken_regfd;
+                predict_target_regfd <= predict_target_regfd;
             end
             else
             begin
                 inst_regfd <= inst;
                 pc_o_regfd <= pc_o;
+                predict_taken_regfd <= predict_taken;
+                predict_target_regfd <= predict_target;
             end
     end
 end

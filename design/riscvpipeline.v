@@ -65,7 +65,30 @@ module PIPELINED #(
     // correctness test as a realistic one). A real FPGA target instantiation
     // would override this to match a real baud rate against a real clock
     // frequency (e.g. 115200 baud at 50MHz needs 434).
-    parameter UART_CLKS_PER_BIT = 4
+    parameter UART_CLKS_PER_BIT = 4,
+    // docs/adr/0021-branch-prediction.md (Phase E). A closed, named enum
+    // (same docs/adr/0015 honesty convention as PIPELINE_PROFILE/
+    // HAZARD_STRATEGY above -- never a free integer). PREDICTOR_STATIC (0,
+    // default): today's exact behavior, unchanged and bit-exact forever --
+    // fetch always guesses "not taken," every taken branch/jal/jalr/trap/
+    // mret costs a fixed 2-bubble squash, discovered only once EX resolves
+    // it. PREDICTOR_DYNAMIC_BHT_BTB (1): a per-PC 2-bit-saturating-counter
+    // branch-history table (Bht.v) plus a branch-target buffer (Btb.v) let
+    // fetch speculatively redirect *before* EX resolves anything; a correct
+    // prediction costs zero bubbles, a misprediction still costs the same
+    // 2-bubble squash as today, now discovered by comparing EX's ground-
+    // truth outcome against the prediction that traveled alongside the
+    // instruction, not by fetch simply never having guessed in the first
+    // place. Not yet consumed anywhere as of this commit (E1).
+    parameter BRANCH_PREDICTOR = 0,
+    // docs/adr/0021-branch-prediction.md. Bht.v/Btb.v table size, only
+    // meaningful under PREDICTOR_DYNAMIC_BHT_BTB. Must be a power of 2 (see
+    // Bht.v/Btb.v's own indexing). Small by default -- this core's test
+    // programs are tiny (32-instruction budget per sim/run_tests.sh), so a
+    // bigger table buys nothing measurable without a benchmark large enough
+    // to exercise it; a real FPGA target running larger programs could
+    // override this.
+    parameter BHT_BTB_ENTRIES = 32
 )(
     input clk,
     input start,
@@ -95,6 +118,12 @@ localparam REG_ADDR_WIDTH = $clog2(NUM_REGS);
 localparam PROFILE_5STAGE = 0;
 localparam PROFILE_6STAGE_SPLIT_FETCH = 1;
 
+// BRANCH_PREDICTOR values (docs/adr/0021-branch-prediction.md) -- named
+// constants purely for readability at the generate/if sites that consume
+// this parameter; not yet consumed anywhere as of this commit.
+localparam PREDICTOR_STATIC = 0;
+localparam PREDICTOR_DYNAMIC_BHT_BTB = 1;
+
 wire branch;
 wire memRead;
 wire memtoReg;
@@ -120,6 +149,9 @@ wire [XLEN-1:0] imm_s;
 wire [XLEN-1:0] inst;
 wire [XLEN-1:0] pc_o;
 wire [XLEN-1:0] pc_new;
+wire [XLEN-1:0] pc_speculative;  // docs/adr/0021-branch-prediction.md: pc_new, or the predictor's guessed target
+wire predict_taken_if;           // live query result for whatever pc_o is fetching THIS cycle
+wire [XLEN-1:0] predict_target_if;
 wire [XLEN-1:0] readData;
 wire jump;
 wire jalr;
@@ -133,6 +165,8 @@ wire isCsr;         // CSR/exceptions (docs/adr/0011-csr-and-exceptions.md)
 wire isEcall;
 wire isEbreak;
 wire isMret;
+wire isSret;         // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
+wire isSfenceVma;    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
 wire illegalOpcode;
 wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a trap/mret
 
@@ -162,9 +196,27 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
     .inst(inst)
     );
     //
-    Mux2to1 #(.size(XLEN)) m_Mux_PC(
-        .sel(branch_taken),   // fires on a taken branch, jal/jalr, a trap, or mret -- all resolved in EX
+    // docs/adr/0021-branch-prediction.md (Phase E4). Speculative arm: if the
+    // predictor guesses this cycle's fetch is a taken branch/jump, override
+    // the default sequential `pc_new` with its guessed target -- a second
+    // Mux2to1 chained in front of the pre-existing redirect mux below,
+    // which keeps top priority (an authoritative EX-stage
+    // redirect/misprediction-correction always wins over a stale guess).
+    // Under PREDICTOR_STATIC, predict_taken_if is tied to 0 (see
+    // gen_predictor/gen_no_predictor below), so this mux always selects
+    // s0=pc_new -- a pure no-op, bit-exact with today's single-mux fetch.
+    Mux2to1 #(.size(XLEN)) m_Mux_PC_Speculative(
+        .sel(predict_taken_if),
         .s0(pc_new),
+        .s1(predict_target_if),
+        .out(pc_speculative)
+    );
+    //
+    Mux2to1 #(.size(XLEN)) m_Mux_PC(
+        .sel(branch_taken),   // fires on a misprediction, a trap, or mret -- all resolved in EX
+                               // (PREDICTOR_STATIC: fires on any taken branch/jal/jalr instead,
+                               // exactly as before this phase -- see branch_or_jump_redirect below)
+        .s0(pc_speculative),
         .s1(redirect_target),
         .out(pc_final)
 
@@ -187,6 +239,8 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
 
 wire [XLEN-1:0] inst_regfd;
 wire [XLEN-1:0] pc_o_regfd;
+wire predict_taken_regfd;               // docs/adr/0021-branch-prediction.md
+wire [XLEN-1:0] predict_target_regfd;
 
 reg1 #(.XLEN(XLEN)) m_reg1(
     .clk(clk),
@@ -203,15 +257,42 @@ reg1 #(.XLEN(XLEN)) m_reg1(
     // caught by constrained-random cross-checking at profile 1 before this
     // fix, not assumed correct from the design alone.
     .pc_o(imem_read_addr),
-    .branch_regde(branch_regde),
-    .zero(zero),
-    // jal/jalr, or a trap/mret (docs/adr/0011) -- see branch_taken's
-    // definition -- ORed with redirect_squash_extend_r (docs/adr/0018),
+    // docs/adr/0021-branch-prediction.md (Phase E4). Tied to 0 rather than
+    // fed the real branch_regde/zero wires: unconditional_redirect below
+    // now fully covers the branch/jump redirect condition on its own
+    // (branch_or_jump_redirect, folded in below) for BOTH BRANCH_PREDICTOR
+    // values -- under PREDICTOR_STATIC branch_or_jump_redirect reduces to
+    // exactly (branch_regde&zero)|jump_regde, the same condition this
+    // module would otherwise recompute itself, so tying these off and
+    // routing everything through `jump` instead is bit-exact, not just
+    // convenient. Under PREDICTOR_DYNAMIC_BHT_BTB it's essential, not just
+    // tidy: feeding the raw (unfiltered-by-prediction) branch_regde/zero
+    // here would squash every actually-taken branch regardless of whether
+    // it was correctly predicted, defeating the entire feature.
+    .branch_regde(1'b0),
+    .zero(1'b0),
+    // Fires on a misprediction, a trap, or mret (PREDICTOR_DYNAMIC_BHT_BTB)
+    // or on any taken branch/jal/jalr/trap/mret (PREDICTOR_STATIC, bit-
+    // exact with pre-Phase-E behavior) -- see unconditional_redirect's own
+    // definition below. ORed with redirect_squash_extend_r (docs/adr/0018),
     // which is always 0 under PROFILE_5STAGE, so this term is a genuine
     // no-op at the default profile.
     .jump(unconditional_redirect | redirect_squash_extend_r),
+    // docs/adr/0021-branch-prediction.md (Phase E4). The prediction made
+    // for THIS fetch (query_pc == imem_read_addr, the same address `inst`
+    // came from), latched alongside it -- see predict_taken_fetch/
+    // predict_target_fetch's own definitions below for the
+    // PIPELINE_PROFILE-aware selection (mirrors imem_read_addr's own
+    // pc_o-vs-pc_o_reg1a pattern exactly, for the same reason: under
+    // PROFILE_6STAGE_SPLIT_FETCH, the prediction that mattered for this
+    // specific instruction was made one cycle earlier, when reg1a's own PC
+    // was live, not whatever pc_o/predict_taken_if currently is).
+    .predict_taken(predict_taken_fetch),
+    .predict_target(predict_target_fetch),
     .inst_regfd(inst_regfd),
-    .pc_o_regfd(pc_o_regfd)
+    .pc_o_regfd(pc_o_regfd),
+    .predict_taken_regfd(predict_taken_regfd),
+    .predict_target_regfd(predict_target_regfd)
 );
 
 // IF1/IF2 relay register (docs/adr/0018-variable-pipeline-depth.md). Only
@@ -223,17 +304,79 @@ reg1 #(.XLEN(XLEN)) m_reg1(
 // infinite loop, then a duplicated fetch) and redirect_squash_extend_r
 // below for where the actual fix lives.
 wire [XLEN-1:0] pc_o_reg1a;
+wire predict_taken_reg1a;               // docs/adr/0021-branch-prediction.md
+wire [XLEN-1:0] predict_target_reg1a;
 generate
 if (PIPELINE_PROFILE == PROFILE_5STAGE) begin : gen_fetch_5stage
     assign pc_o_reg1a = pc_o;  // unused under this profile; tied off for cleanliness, not read anywhere
+    assign predict_taken_reg1a = 1'b0;
+    assign predict_target_reg1a = {XLEN{1'b0}};
 end else begin : gen_fetch_6stage_split_fetch
     reg1a #(.XLEN(XLEN)) m_reg1a(
         .clk(clk),
         .rst(start),
         .stall(pc_stall),
         .pc_o(pc_o),
-        .pc_o_reg1a(pc_o_reg1a)
+        .pc_o_reg1a(pc_o_reg1a),
+        .predict_taken(predict_taken_if),
+        .predict_target(predict_target_if),
+        .predict_taken_reg1a(predict_taken_reg1a),
+        .predict_target_reg1a(predict_target_reg1a)
     );
+end
+endgenerate
+
+// docs/adr/0021-branch-prediction.md (Phase E4). Which prediction pairs
+// correctly with imem_read_addr's own PIPELINE_PROFILE-aware selection
+// just above -- same reasoning, same pattern: under PROFILE_5STAGE the
+// live combinational query (predict_taken_if, queried this cycle at pc_o)
+// is exactly the prediction that was made for whatever imem_read_addr==
+// pc_o just fetched; under PROFILE_6STAGE_SPLIT_FETCH, imem_read_addr is
+// reg1a's one-cycle-delayed relay of a PAST pc_o, so the prediction that
+// matters is reg1a's own equally-delayed relay of that past query
+// (predict_taken_reg1a), not today's live one.
+wire predict_taken_fetch = (PIPELINE_PROFILE == PROFILE_5STAGE) ? predict_taken_if : predict_taken_reg1a;
+wire [XLEN-1:0] predict_target_fetch = (PIPELINE_PROFILE == PROFILE_5STAGE) ? predict_target_if : predict_target_reg1a;
+
+// docs/adr/0021-branch-prediction.md (Phase E4). The predictor itself:
+// only instantiated under PREDICTOR_DYNAMIC_BHT_BTB (the unselected branch
+// isn't even elaborated, same convention as HAZARD_STRATEGY/
+// PIPELINE_PROFILE above) -- queried combinationally every cycle at pc_o
+// (the same live PC pc_new's own Adder_1 uses, not imem_read_addr -- the
+// "what should fetch do next" decision always operates on PC.v's current
+// live output regardless of profile, exactly like pc_new already does;
+// only the value LATCHED for later comparison needs the profile-aware
+// relay above). A hit requires BOTH tables to agree there's something
+// useful here: Bht.v's own direction counter predicting taken, AND
+// Btb.v actually having a target on file for this PC -- a direction-only
+// "taken" with no known target has nowhere useful to speculatively
+// redirect to. bp_update_valid/bp_update_pc/bp_update_taken/
+// bp_update_target (trained from EX's real resolution) are declared where
+// desired_taken/desired_target themselves are, further below.
+wire bp_update_valid;
+wire [XLEN-1:0] bp_update_pc;
+wire bp_update_taken;
+wire [XLEN-1:0] bp_update_target;
+generate
+if (BRANCH_PREDICTOR == PREDICTOR_DYNAMIC_BHT_BTB) begin : gen_predictor
+    wire bht_predict_taken_q;
+    wire btb_hit_q;
+    wire [XLEN-1:0] btb_target_q;
+    Bht #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Bht(
+        .clk(clk), .rst(start),
+        .query_pc(pc_o), .predict_taken(bht_predict_taken_q),
+        .update_valid(bp_update_valid), .update_pc(bp_update_pc), .update_taken(bp_update_taken)
+    );
+    Btb #(.XLEN(XLEN), .NUM_ENTRIES(BHT_BTB_ENTRIES)) m_Btb(
+        .clk(clk), .rst(start),
+        .query_pc(pc_o), .hit(btb_hit_q), .target(btb_target_q),
+        .update_valid(bp_update_valid & bp_update_taken), .update_pc(bp_update_pc), .update_target(bp_update_target)
+    );
+    assign predict_taken_if = bht_predict_taken_q & btb_hit_q;
+    assign predict_target_if = btb_target_q;
+end else begin : gen_no_predictor
+    assign predict_taken_if = 1'b0;
+    assign predict_target_if = {XLEN{1'b0}};
 end
 endgenerate
 
@@ -291,6 +434,8 @@ wire [6:0] funct7_control;
         .isEcall(isEcall),
         .isEbreak(isEbreak),
         .isMret(isMret),
+        .isSret(isSret),
+        .isSfenceVma(isSfenceVma),
         .illegalOpcode(illegalOpcode),
         .fRegWrite(fRegWrite)
     );
@@ -426,6 +571,8 @@ wire [6:0] funct7_control;
     wire [REG_ADDR_WIDTH-1:0] readReg1_regde;
     wire [REG_ADDR_WIDTH-1:0] readReg2_regde;
     wire [REG_ADDR_WIDTH-1:0] readReg3_regde;
+    wire predict_taken_regde;               // docs/adr/0021-branch-prediction.md
+    wire [XLEN-1:0] predict_target_regde;
     wire [1:0] forwardA;
     wire [1:0] forwardB;
     wire [1:0] fforwardA;
@@ -439,6 +586,8 @@ wire [6:0] funct7_control;
     wire isEcall_regde;
     wire isEbreak_regde;
     wire isMret_regde;
+    wire isSret_regde;
+    wire isSfenceVma_regde;
     wire illegalOpcode_regde;
     //
 reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
@@ -473,6 +622,10 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .readReg1(inst_regfd[19:15]),
     .readReg2(inst_regfd[24:20]),
     .readReg3(inst_regfd[31:27]),
+    // docs/adr/0021-branch-prediction.md (Phase E4). The prediction reg1
+    // already latched for this instruction, carried one more stage to EX.
+    .predict_taken(predict_taken_regfd),
+    .predict_target(predict_target_regfd),
     .jump(jump),
     .jalr(jalr),
     .lui(lui),
@@ -481,6 +634,8 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .isEcall(isEcall),
     .isEbreak(isEbreak),
     .isMret(isMret),
+    .isSret(isSret),
+    .isSfenceVma(isSfenceVma),
     .illegalOpcode(illegalOpcode),
 
     .branch_regde(branch_regde),
@@ -505,6 +660,8 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .readReg1_regde(readReg1_regde),
     .readReg2_regde(readReg2_regde),
     .readReg3_regde(readReg3_regde),
+    .predict_taken_regde(predict_taken_regde),
+    .predict_target_regde(predict_target_regde),
     .jump_regde(jump_regde),
     .jalr_regde(jalr_regde),
     .lui_regde(lui_regde),
@@ -513,6 +670,8 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .isEcall_regde(isEcall_regde),
     .isEbreak_regde(isEbreak_regde),
     .isMret_regde(isMret_regde),
+    .isSret_regde(isSret_regde),
+    .isSfenceVma_regde(isSfenceVma_regde),
     .illegalOpcode_regde(illegalOpcode_regde)
 );
 
@@ -521,11 +680,19 @@ wire [2:0] funct3_regde;
 wire [XLEN-1:0] readData1_final;
 wire [XLEN-1:0] readData2_final;
 wire branch_taken;
-wire unconditional_redirect;  // jal/jalr | trap | mret -- see the assign below, and docs/adr/0011
+wire unconditional_redirect;  // branch/jal/jalr (mispredict-gated under docs/adr/0021) | trap | mret
 // Fires on a taken branch, an unconditional jal/jalr, a synchronous
 // exception, or mret -- all resolved here in EX, all squash the two
 // younger in-flight instructions (see reg1.jump / reg2.branch_taken).
-assign branch_taken = (branch_regde & zero) | unconditional_redirect;
+// docs/adr/0021-branch-prediction.md (Phase E4): unconditional_redirect's
+// own definition (below, near desired_taken/mispredict) now folds the
+// branch/jal/jalr condition in directly (branch_or_jump_redirect) rather
+// than this wire adding (branch_regde&zero) back on top of a narrower
+// unconditional_redirect the way it did before this phase -- the two
+// wires are therefore now always numerically identical; kept as two names
+// because every existing consumer of either already has its own settled
+// meaning and comment trail, not because they differ.
+assign branch_taken = unconditional_redirect;
 
 // forwarding unit (docs/adr/0016-swappable-hazard-strategy.md: only
 // instantiated under the default forwarding strategy -- the alternate
@@ -947,11 +1114,99 @@ endgenerate
     // unrecognized opcode, or SYSTEM/funct3=0 with an unrecognized
     // funct12), while ALUCtl==ILLEGAL is only known now, after ALUCtrl has
     // decoded a *recognized* opcode's funct7/funct3 and found no valid op.
-    wire exception_taken = illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) | isEcall_regde | isEbreak_regde;
-    wire [XLEN-1:0] trap_cause = (illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL)) ? `MCAUSE_ILLEGAL_INSTRUCTION :
+    // docs/adr/00NN-mmu-sv32.md (Phase F3). priv_mode_w is CSR.v's own
+    // live priv_mode_val output (declared as a port since F1, unconnected
+    // until now). Three new privilege-violation sources, each a real
+    // illegal-instruction exception, not a separate cause of its own:
+    // (1) any CSR access below that CSR address's own required privilege
+    // (bits[9:8] of the CSR address, per spec -- 00=U/01=S/11=M, already
+    // numerically ordered so a plain `<` compare works); (2) mret executed
+    // anywhere but M; (3) sret executed from U (S and M may both execute
+    // it -- M-mode using sret is unusual but not spec-illegal). Without
+    // these, U-mode/S-mode would not actually be a protection boundary --
+    // any program could read/write mstatus/satp/mideleg/etc, or return to
+    // an arbitrary privilege via mret, regardless of its own current level.
+    wire csr_priv_violation = isCsr_regde & (priv_mode_w < imm_regde[9:8]);
+    wire mret_priv_violation = isMret_regde & (priv_mode_w != `PRIV_M);
+    wire sret_priv_violation = isSret_regde & (priv_mode_w == `PRIV_U);
+    // The real mret/sret behavior (redirect via mepc/sepc, restore
+    // priv_mode/mstatus) only ever applies when NOT a privilege violation
+    // -- a violating mret/sret instead becomes a plain illegal-instruction
+    // exception (via exception_taken below), redirecting through the
+    // ordinary trap path instead of actually returning anywhere.
+    wire mret_real = isMret_regde & !mret_priv_violation;
+    wire sret_real = isSret_regde & !sret_priv_violation;
+
+    wire exception_taken = illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) | isEcall_regde | isEbreak_regde |
+                            csr_priv_violation | mret_priv_violation | sret_priv_violation;
+    // docs/adr/00NN-mmu-sv32.md (Phase F3): ecall's cause is now
+    // privilege-dependent (it was unconditionally MCAUSE_ECALL_FROM_M
+    // through Phase E, since M was the only privilege that existed) --
+    // every existing test still boots and stays in M throughout, so this
+    // is bit-exact for all of them. The three new violation sources all
+    // map to the same illegal-instruction cause an ordinary illegal
+    // opcode does.
+    wire [XLEN-1:0] trap_cause = (illegalOpcode_regde | (ALUCtl == `ALUCTL_ILLEGAL) |
+                                   csr_priv_violation | mret_priv_violation | sret_priv_violation)
+                                      ? `MCAUSE_ILLEGAL_INSTRUCTION :
                               isEbreak_regde ? `MCAUSE_BREAKPOINT :
-                              isEcall_regde  ? `MCAUSE_ECALL_FROM_M :
+                              isEcall_regde  ? ((priv_mode_w == `PRIV_M) ? `MCAUSE_ECALL_FROM_M :
+                                                 (priv_mode_w == `PRIV_S) ? `MCAUSE_ECALL_FROM_S :
+                                                                             `MCAUSE_ECALL_FROM_U) :
                               {XLEN{1'b0}};
+
+    // docs/adr/0021-branch-prediction.md (Phase E4). Ground truth for
+    // whatever branch/jal/jalr instruction is now in EX -- desired_taken/
+    // desired_target are the exact same expressions this file always used
+    // ((branch_regde&zero)|jump_regde, and imm_sum) before this phase,
+    // simply given names so they can be compared against a prediction
+    // instead of consumed directly. fallthrough reuses pc_plus4_regde
+    // (already computed above for jal's own link value -- pc_o_regde+4 is
+    // pc_o_regde+4 regardless of why it's needed) rather than a second,
+    // redundant adder.
+    wire desired_taken = (branch_regde & zero) | jump_regde;
+    wire [XLEN-1:0] desired_target = imm_sum;
+    wire [XLEN-1:0] fallthrough_pc_regde = pc_plus4_regde;
+
+    // Did fetch's earlier guess (predict_taken_regde/predict_target_regde,
+    // latched alongside this instruction all the way from IF, two cycles
+    // ago) disagree with what actually happened? Three ways to disagree:
+    // predicted taken but really wasn't (or this was never a branch/jump
+    // at all -- predict_taken_regde=1 for an ordinary instruction, e.g.
+    // from an aliased Bht.v/Btb.v hit, is exactly as wrong as mispredicting
+    // a real branch, and this XOR catches both identically); predicted
+    // not-taken but it really was; predicted taken *and* it really was, but
+    // to a different target than a stale Btb.v entry guessed. Under
+    // PREDICTOR_STATIC, predict_taken_regde is always 0 (riscvpipeline.v
+    // never feeds reg1 anything else -- see predict_taken_fetch/
+    // gen_no_predictor above), so `mispredict` collapses to exactly
+    // `desired_taken` -- today's exact "squash on every taken branch/jump"
+    // behavior, bit-exact. `branch_or_jump_redirect`/`branch_or_jump_target`
+    // are the two values every existing consumer below actually needs;
+    // `mispredict` itself is unused (harmlessly, just dead logic) under
+    // PREDICTOR_STATIC.
+    wire mispredict = (predict_taken_regde != desired_taken) |
+                       (desired_taken & (predict_target_regde != desired_target));
+    wire branch_or_jump_redirect = (BRANCH_PREDICTOR == PREDICTOR_DYNAMIC_BHT_BTB) ? mispredict : desired_taken;
+    wire [XLEN-1:0] branch_or_jump_target =
+        (BRANCH_PREDICTOR == PREDICTOR_DYNAMIC_BHT_BTB && !desired_taken) ? fallthrough_pc_regde : desired_target;
+
+    // Bht.v/Btb.v training, from this same ground truth -- gated !reg2_hold
+    // for exactly the same reason csr_write_en/trap_taken/mret_taken/
+    // fp_flags_we already are (docs/adr/0011/0019 D9's own comment below):
+    // an instruction held in EX across multiple cycles (e.g. mem_stall from
+    // an unrelated older load still in MEM) must train the tables exactly
+    // once, on its real resolution, not once per held cycle -- desired_taken
+    // would otherwise be (harmlessly) recomputed identically each held
+    // cycle, but a write-side effect like this genuinely needs the gate, the
+    // same distinction CSR.v's own write logic already draws. Btb.v is
+    // trained only when desired_taken (no target to record for a not-taken
+    // resolution); Bht.v trains on every resolution, taken or not, so the
+    // direction counter actually learns both directions.
+    assign bp_update_valid = (branch_regde | jump_regde) & !reg2_hold;
+    assign bp_update_pc = pc_o_regde;
+    assign bp_update_taken = desired_taken;
+    assign bp_update_target = desired_target;
 
     // docs/adr/0020-soc-integration.md (Phase D9). Interrupt detection --
     // independent of whatever instruction (if any) currently sits in EX,
@@ -973,8 +1228,17 @@ endgenerate
     // finishes. Deliberately the *pre*-interrupt value of what becomes
     // branch_taken/unconditional_redirect below, built from their raw
     // constituent signals rather than those wires themselves (referencing
-    // them here would be a combinational self-reference).
-    wire other_redirect_taken = (branch_regde & zero) | jump_regde | exception_taken | isMret_regde;
+    // them here would be a combinational self-reference). docs/adr/0021
+    // (Phase E4): branch_or_jump_redirect replaces the old raw
+    // (branch_regde&zero)|jump_regde term -- itself built from
+    // predict_taken_regde/desired_taken, not interrupt_taken, so no
+    // circularity is introduced.
+    // docs/adr/00NN-mmu-sv32.md (Phase F3): mret_real replaces the raw
+    // isMret_regde -- a privilege-violating mret doesn't itself redirect
+    // via mepc (it's folded into exception_taken instead, above), so it
+    // must not double-count here either. sret_real (a new redirect source
+    // this phase adds) joins the same list.
+    wire other_redirect_taken = branch_or_jump_redirect | exception_taken | mret_real | sret_real;
 
     // Gated on !pc_stall, not just !reg2_hold (docs/adr/0009/0013's
     // multi-cycle div/mem/fp interlock) -- reg1.v's own squash-on-jump
@@ -1060,7 +1324,12 @@ endgenerate
     CSR #(.XLEN(XLEN)) m_CSR(
     .clk(clk),
     .rst(start),
-    .csr_write_en(isCsr_regde && !reg2_hold),
+    // docs/adr/00NN-mmu-sv32.md (Phase F3): a privilege-violating CSR
+    // access must not actually commit its write (the read side needs no
+    // extra gating -- exception_taken already squashes this instruction
+    // before its rd write could ever retire, see riscvpipeline.v's own
+    // csr_priv_violation comment).
+    .csr_write_en(isCsr_regde && !reg2_hold && !csr_priv_violation),
     .csr_addr(imm_regde[11:0]),   // ImmGen.v zero-extends inst[31:20] into imm for OPCODE_SYSTEM
     .csr_op(funct3_regde[1:0]),
     .csr_wdata(csr_wdata),
@@ -1078,7 +1347,13 @@ endgenerate
     .trap_pc(interrupt_taken ? interrupt_mepc : pc_o_regde),
     .trap_cause(interrupt_taken ? interrupt_cause : trap_cause),
     .trap_is_interrupt(interrupt_taken),
-    .mret_taken(isMret_regde && !reg2_hold),
+    // docs/adr/00NN-mmu-sv32.md (Phase F3). No real page fault exists yet
+    // (F5) -- tied to 0 for now, the same tie-off-then-real-wire staging
+    // D7/D8 used for timer_pending/ext_pending; CSR.v's own interface
+    // needs no further changes once F5 replaces this.
+    .trap_value({XLEN{1'b0}}),
+    .mret_taken(mret_real && !reg2_hold),
+    .sret_taken(sret_real && !reg2_hold),
     .fp_flags_we(fp_flags_we),
     .fp_flags_in(fp_flags),
     .frm_val(frm_live),
@@ -1093,9 +1368,17 @@ endgenerate
     .mie_mtie(mie_mtie),
     .mie_meie(mie_meie),
     .mtvec_val(mtvec_val),
-    .mepc_val(mepc_val)
+    .mepc_val(mepc_val),
+    // docs/adr/00NN-mmu-sv32.md (Phase F3).
+    .priv_mode_val(priv_mode_w),
+    .stvec_val(stvec_val),
+    .sepc_val(sepc_val),
+    .trap_target_is_s(trap_target_is_s)
     );
     wire mstatus_mie, mie_mtie, mie_meie;
+    wire [1:0] priv_mode_w;
+    wire [XLEN-1:0] stvec_val, sepc_val;
+    wire trap_target_is_s;
 
     // What EX "produces" this cycle: an F-extension result (docs/adr/0019)
     // on any OP-FP/FMA op -- checked first since isOpFp_regde/isFma_regde
@@ -1118,11 +1401,29 @@ endgenerate
     // unconditional_redirect fired, only that it did (see reg1.v/reg2.v).
     // mtvec is a single, non-vectored trap target either way (this core
     // has no vectored-interrupt mode), so interrupt_taken shares
-    // exception_taken's redirect_target arm.
-    assign unconditional_redirect = jump_regde | exception_taken | isMret_regde | interrupt_taken;
-    assign redirect_target = (exception_taken | interrupt_taken) ? mtvec_val :
-                              isMret_regde                        ? mepc_val :
-                                                                     imm_sum;  // existing branch/jal/jalr target path
+    // exception_taken's redirect_target arm. docs/adr/0021 (Phase E4):
+    // branch_or_jump_redirect/branch_or_jump_target replace the old raw
+    // jump_regde / imm_sum terms -- under PREDICTOR_STATIC these reduce to
+    // exactly (branch_regde&zero)|jump_regde / imm_sum, bit-exact with
+    // this file's behavior before this phase; under
+    // PREDICTOR_DYNAMIC_BHT_BTB, a redirect only fires on an actual
+    // misprediction, to whichever of the real target or the real
+    // fall-through address the misprediction needs.
+    // docs/adr/00NN-mmu-sv32.md (Phase F3): mret_real/sret_real replace
+    // the raw isMret_regde (a privilege-violating mret/sret redirects via
+    // exception_taken's own mtvec/stvec arm instead, never mepc/sepc --
+    // see mret_real/sret_real's own definitions above). redirect_target's
+    // trap arm now also picks between M's and S's vector/return-address
+    // pair using CSR.v's own trap_target_is_s decision (mideleg/medeleg-
+    // aware, computed there since it already owns that state) --
+    // interrupt_taken shares this same delegation-aware selection, unlike
+    // before this phase when it always meant mtvec unconditionally (this
+    // core has no vectored-interrupt mode either way, M or S).
+    assign unconditional_redirect = branch_or_jump_redirect | exception_taken | mret_real | sret_real | interrupt_taken;
+    assign redirect_target = (exception_taken | interrupt_taken) ? (trap_target_is_s ? stvec_val : mtvec_val) :
+                              mret_real                           ? mepc_val :
+                              sret_real                           ? sepc_val :
+                                                                     branch_or_jump_target;
 
     // Compiled in only with -DCOVERAGE (see sim/tools/coverage_report.py,
     // docs/ROADMAP.md V-5). Not a real statement/branch coverage tool (none

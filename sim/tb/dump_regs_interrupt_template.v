@@ -32,6 +32,8 @@
 `include "RamWishboneAdapter.v"
 `include "Uart.v"
 `include "Timer.v"
+`include "Bht.v"
+`include "Btb.v"
 
 // docs/adr/0020-soc-integration.md (Phase D10). Interrupt-mode sibling of
 // dump_regs_template.v -- used only by sim/tools/run_random_tests.py's
@@ -44,7 +46,13 @@
 // snippet below (empty for timer-mode runs) that drives a byte in for
 // UART-source runs -- the "externally controlled, easy to pin" timing the
 // plan's own D10 section describes, as opposed to the timer source's own
-// real (generously-margined, not precisely timed) MTIMECMP compare.
+// real (generously-margined, not precisely timed) MTIMECMP compare. (3)
+// __BRANCH_PREDICTOR__ (docs/adr/0021-branch-prediction.md) is substituted
+// the same way __HAZARD_STRATEGY__/__PIPELINE_PROFILE__ already are --
+// interrupt-mode programs are just as valid a cross-check target under
+// either predictor setting, confirmed by the ADR's own research pass
+// (misprediction recovery injects no new control flow, so it can't
+// interact with interrupt-injection's own termination-safety machinery).
 module dump_regs_interrupt;
     reg clk = 0;
     reg start = 0;
@@ -55,7 +63,7 @@ module dump_regs_interrupt;
 
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .MEM_SIZE_BYTES(__MEM_SIZE__),
-                .UART_CLKS_PER_BIT(4))
+                .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .UART_CLKS_PER_BIT(4))
         dut(.clk(clk), .start(start), .uart_rx(uart_rx), .uart_tx(uart_tx));
 
     always #5 clk = ~clk;
