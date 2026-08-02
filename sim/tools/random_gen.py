@@ -106,8 +106,41 @@ def const_to_reg_instrs(rd, bits32):
     return lines
 
 
-def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
-    """interrupt: None (default -- every existing caller's behavior,
+def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, mmu=False):
+    """docs/adr/00NN-mmu-sv32.md (Phase F7). mmu=True (opt-in, default False
+    -- every existing call site unaffected): prepend a real, M-mode-built
+    Sv32 page table and drop to U-mode via mret before any of the
+    random-generated instructions run, so every one of them (fetch, load,
+    store) is a genuinely translated access -- mirrors docs/adr/0020 D10's
+    own "agree by construction" philosophy, extended from interrupt-timing
+    agreement to translation-validity agreement: a generator-*guaranteed-
+    valid* identity mapping (VA==PA everywhere, satp_ppn=0), never a truly
+    random satp, so every generated access is guaranteed mapped and
+    permitted -- there is nothing here for a page fault to legitimately hit
+    (fault-injection is a separate, deliberately directed-only concern, the
+    same "exclude what can't be made safe to compare" principle this
+    generator already applies to ecall/ebreak/mret/illegal instructions and
+    interrupt mode's own restricted CSR pool below).
+
+    Mutually exclusive with `interrupt` in this phase -- combining real
+    hardware-interrupt injection with a live page-table walk is real,
+    genuinely separate future work, not attempted here.
+
+    The page table needs real memory: a level-1 table (one PDE, at
+    physical address 0 -- satp_ppn=0) and a level-0 table (one PTE, at
+    physical page 1, address 0x1000 -- Sv32's own page-table alignment is
+    fixed by the spec, not a tunable choice) both need to exist, which the
+    tiny 128/256-byte mem_size this generator otherwise defaults to cannot
+    hold. Callers must pass a real mem_size (this module's own __main__ and
+    run_random_tests.py both default to 8192 -- two 4KB pages -- when mmu
+    is set). The random program's own working region (base pointer,
+    loads/stores) is deliberately kept within the FIRST page only (see
+    addr_space below) -- the single level-0 PTE only maps VPN0=0, so an
+    access into the second page (where the level-0 table itself lives)
+    would be genuinely unmapped, breaking the "always guaranteed valid"
+    property this mode exists to provide.
+
+    interrupt: None (default -- every existing caller's behavior,
     completely unaffected), or one of "timer"/"uart"/"both" to additionally
     arm that interrupt source (or, for "both", arm and pend both sources
     simultaneously -- docs/adr/0020-soc-integration.md Phase D11 -- so the
@@ -135,6 +168,15 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
     only needs to land somewhere in that same broad window, not at a
     specific cycle.
     """
+    if interrupt is not None and mmu:
+        raise ValueError("interrupt and mmu modes are mutually exclusive in this generator (Phase F7 scope)")
+
+    # docs/adr/00NN-mmu-sv32.md (Phase F7). See gen_program's own docstring
+    # for why: the random body's own loads/stores must stay within the
+    # single mapped page (VPN0=0) even though mem_size itself is bigger (to
+    # make room for the level-0 table in the second page).
+    addr_space = min(mem_size, 4096) if mmu else mem_size
+
     # Budget check, not just documentation: InstructionMemory is mem_size
     # bytes -- 1 (base addi) + 2*len(FLOAT_SEED_BITS) (seeding) + n_instrs +
     # 1 (trailing jal), plus interrupt mode's own prefix+handler, must not
@@ -151,7 +193,13 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
         # 5 + 3 = 8. Handler (all cases): csrrw(mie<-0) + mret -> 2.
         source_cost = {"timer": 5, "uart": 3, "both": 8}[interrupt]
         interrupt_prefix_cost = 5 + source_cost + 2
-    budget = 1 + 2 * len(FLOAT_SEED_BITS) + n_instrs + 1 + interrupt_prefix_cost
+    # docs/adr/00NN-mmu-sv32.md (Phase F7): level-1 PDE (const_to_reg, up to
+    # 2, + sw = 3) + level-0 table address (lui = 1) + level-0 PTE (up to 2,
+    # + sw = 3) + satp (up to 2, + csrrw = 3) + mepc placeholder+csrrw+mret
+    # (3) = up to 13, generous upper bound (mem_size=8192 leaves enormous
+    # headroom regardless).
+    mmu_prefix_cost = 13 if mmu else 0
+    budget = 1 + 2 * len(FLOAT_SEED_BITS) + n_instrs + 1 + interrupt_prefix_cost + mmu_prefix_cost
     if budget > mem_size // 4:
         raise ValueError(f"n_instrs={n_instrs} would overflow the {mem_size}-byte budget "
                           f"(everything else already uses {budget - n_instrs} instructions)")
@@ -200,6 +248,23 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
     csr_names_pool = CSR_NAMES if interrupt is None else [
         n for n in CSR_NAMES if n not in ("mstatus", "mepc", "mcause", "mtvec")]
 
+    # docs/adr/00NN-mmu-sv32.md (Phase F7). A real bug found by running: all
+    # five of CSR_NAMES (mstatus/mtvec/mscratch/mepc/mcause) are M-only CSRs
+    # (addr bits[9:8]==3) -- harmless for the plain/interrupt-mode corpus,
+    # which stays in M throughout, but the whole random body runs as
+    # TRANSLATED U-MODE code in mmu mode, so a random csrrX targeting any of
+    # them now correctly privilege-traps (this same phase's own F6 addition
+    # to iss.py, mirroring riscvpipeline.v's csr_priv_violation) -- and since
+    # this generator never sets mtvec to anything but its 0 reset default,
+    # that redirects execution to address 0 (the level-1 page-table PDE's
+    # own raw bit pattern, not a real instruction), corrupting everything
+    # downstream. Same "exclude what can't be made safe to compare"
+    # principle this generator already applies to interrupt mode's own
+    # restricted CSR pool -- here the whole `csr` instruction kind is
+    # excluded outright (fflags/frm/fcsr, the separate `fcsr` kind below,
+    # stay included: their addresses are U-mode accessible, genuinely safe).
+    csr_weight = 0 if mmu else 6
+
     # Build a flat instruction list first (as dicts), then assign forward-only
     # branch/jump targets once every instruction's final index is known.
     instrs = []
@@ -208,7 +273,7 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
             ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
              "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
              "fp_cvt_to_int", "fp_cvt_from_int", "fp_madd", "fload", "fstore", "fcsr"],
-            weights=[24, 16, 8, 10, 10, 8, 5, 6,
+            weights=[24, 16, 8, 10, 10, 8, 5, csr_weight,
                      10, 4, 4, 4, 4,
                      4, 4, 6, 6, 6, 4],
         )[0]
@@ -231,14 +296,14 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
             mn = rnd.choice(["lb", "lh", "lw", "lbu", "lhu"])
             rd = rnd.choice(GP_REGS)
             width = {"lb": 1, "lbu": 1, "lh": 2, "lhu": 2, "lw": 4}[mn]
-            max_off = mem_size - base_addr - width
+            max_off = min(addr_space - base_addr - width, 2047)  # 12-bit signed load/store immediate
             off = rnd.randrange(0, max_off + 1, width) if max_off >= 0 else 0
             instrs.append(f"{mn} x{rd}, {off}(x{BASE_REG})")
         elif kind == "store":
             mn = rnd.choice(["sb", "sh", "sw"])
             rs2 = rnd.choice(GP_REGS)
             width = {"sb": 1, "sh": 2, "sw": 4}[mn]
-            max_off = mem_size - base_addr - width
+            max_off = min(addr_space - base_addr - width, 2047)  # 12-bit signed load/store immediate
             off = rnd.randrange(0, max_off + 1, width) if max_off >= 0 else 0
             instrs.append(f"{mn} x{rs2}, {off}(x{BASE_REG})")
         elif kind == "branch":
@@ -297,12 +362,12 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
             instrs.append(f"{mn} f{rd}, f{rs1}, f{rs2}, f{rs3}, {rm}")
         elif kind == "fload":
             rd = rnd.choice(FREGS)
-            max_off = mem_size - base_addr - 4
+            max_off = min(addr_space - base_addr - 4, 2047)  # 12-bit signed load/store immediate
             off = rnd.randrange(0, max_off + 1, 4) if max_off >= 0 else 0
             instrs.append(f"flw f{rd}, {off}(x{BASE_REG})")
         elif kind == "fstore":
             rs2 = rnd.choice(FREGS)
-            max_off = mem_size - base_addr - 4
+            max_off = min(addr_space - base_addr - 4, 2047)  # 12-bit signed load/store immediate
             off = rnd.randrange(0, max_off + 1, 4) if max_off >= 0 else 0
             instrs.append(f"fsw f{rs2}, {off}(x{BASE_REG})")
         elif kind == "fcsr":
@@ -351,6 +416,37 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None):
     # (correctly, after docs/adr/0011-csr-and-exceptions.md) now traps.
     out.append("__halt:")
     out.append("jal x0, __halt")
+
+    if mmu:
+        # docs/adr/00NN-mmu-sv32.md (Phase F7). Runs entirely in M-mode
+        # (physical addressing, bypasses translation) before `out` (the
+        # base-pointer setup, float seeding, random body, and halt loop --
+        # completely unchanged) begins. x1/x2/x3 are reused as scratch here
+        # the same way interrupt mode's own prefix reuses x1/x2/x5/x6/x7/x8
+        # -- their residual values after the prefix are visible to the
+        # random body like any other GP register, but both RTL and ISS see
+        # the identical prefix execution, so they agree on them, same as
+        # every other pre-existing register value the random body might
+        # read.
+        pde_lines = const_to_reg_instrs(1, 0x401)   # level-1 PDE: level-0 table at PPN=1, V=1 (non-leaf)
+        pte_lines = const_to_reg_instrs(2, 0x1F)    # level-0 PTE: PPN=0 (identity), V|R|W|X|U -- guaranteed-permitted
+        satp_lines = const_to_reg_instrs(1, 0x80000000)  # satp: MODE=Sv32, PPN=0
+        prefix = (
+            pde_lines + ["sw x1, 0(x0)"] +                      # level-1[VPN1=0] <- PDE (satp_ppn=0 -> table at addr 0)
+            ["lui x3, 0x1"] + pte_lines + ["sw x2, 0(x3)"] +      # level-0[VPN0=0] <- identity PTE (level-0 table @ 0x1000)
+            satp_lines + ["csrrw x0, 0x180, x1"] +
+            ["addi x1, x0, __MEPC_PLACEHOLDER__", "csrrw x0, mepc, x1", "mret"]
+        )
+        # mepc = `out`'s own first instruction -- identity-mapped, so its
+        # virtual address equals its physical (assembled) address, computed
+        # once the prefix's own instruction count is known (same
+        # "placeholder, then substitute the resolved address" approach the
+        # D9 directed test programs and interrupt mode's own mtvec patching
+        # both already use).
+        prefix_instr_count = sum(1 for l in prefix if not l.rstrip().endswith(":"))
+        mepc_target = prefix_instr_count * 4
+        prefix = [l.replace("__MEPC_PLACEHOLDER__", str(mepc_target)) for l in prefix]
+        return "\n".join(prefix + out) + "\n", None
 
     if interrupt is None:
         return "\n".join(out) + "\n", None
@@ -434,11 +530,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--n", type=int, default=16)
-    ap.add_argument("--mem-size", type=int, default=128)
+    ap.add_argument("--mem-size", type=int, default=None)
     ap.add_argument("--interrupt", choices=["timer", "uart", "both"], default=None)
+    ap.add_argument("--mmu", action="store_true", help="docs/adr/00NN-mmu-sv32.md Phase F7: opt-in Sv32 translation mode")
     ap.add_argument("-o", "--output")
     args = ap.parse_args()
-    text, interrupt_info = gen_program(args.seed, args.n, mem_size=args.mem_size, interrupt=args.interrupt)
+    mem_size = args.mem_size if args.mem_size is not None else (8192 if args.mmu else 128)
+    text, interrupt_info = gen_program(args.seed, args.n, mem_size=mem_size, interrupt=args.interrupt, mmu=args.mmu)
     if interrupt_info is not None:
         print(f"# interrupt scheduled after instruction {interrupt_info['after']}, "
               f"cause={interrupt_info['cause']:#010x}")

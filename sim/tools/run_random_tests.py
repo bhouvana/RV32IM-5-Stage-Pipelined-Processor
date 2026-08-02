@@ -32,10 +32,10 @@ def load_words(mem_path):
 
 
 def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0,
-            mem_size=128, interrupt=None, branch_predictor=0):
+            mem_size=128, interrupt=None, branch_predictor=0, mmu=False):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
-    text, interrupt_info = gen_program(seed, n_instrs, mem_size=mem_size, interrupt=interrupt)
+    text, interrupt_info = gen_program(seed, n_instrs, mem_size=mem_size, interrupt=interrupt, mmu=mmu)
     with open(prog_s, "w") as f:
         f.write(text)
 
@@ -151,13 +151,40 @@ def main():
     ap.add_argument("--mem-size", type=int, default=None,
                      help="override InstructionMemory/DataMemory size in bytes; "
                           "defaults to 128 normally, 256 when --interrupt is set "
-                          "(room for the extra prefix/handler instructions)")
+                          "(room for the extra prefix/handler instructions), "
+                          "8192 when --mmu is set (room for the page table's own two pages)")
+    # docs/adr/00NN-mmu-sv32.md (Phase F7). Opt-in, not default-on -- every
+    # existing invocation (no --mmu) behaves exactly as before. Mutually
+    # exclusive with --interrupt in this phase (see gen_program's own
+    # docstring for why).
+    ap.add_argument("--mmu", action="store_true",
+                     help="opt-in Sv32 translation mode (docs/adr/00NN-mmu-sv32.md Phase F7): "
+                          "run the whole generated program as translated U-mode code, through a "
+                          "generator-guaranteed-valid identity page table")
     args = ap.parse_args()
 
-    mem_size = args.mem_size if args.mem_size is not None else (256 if args.interrupt else 128)
+    if args.interrupt and args.mmu:
+        print("error: --interrupt and --mmu are mutually exclusive in this generator (Phase F7 scope)", file=sys.stderr)
+        sys.exit(2)
+
+    if args.mem_size is not None:
+        mem_size = args.mem_size
+    elif args.mmu:
+        mem_size = 8192
+    elif args.interrupt:
+        mem_size = 256
+    else:
+        mem_size = 128
 
     here = os.path.dirname(os.path.abspath(__file__))
-    template_name = "dump_regs_interrupt_template.v" if args.interrupt else "dump_regs_template.v"
+    # docs/adr/00NN-mmu-sv32.md (Phase F7): MMU mode reuses the interrupt
+    # template -- it already parameterizes MEM_SIZE_BYTES and the memory-
+    # dump loop correctly (the plain default template hardcodes 128 bytes
+    # both places); its own interrupt-specific pieces (uart_rx wiring,
+    # drive_rx_byte) are simply unused/harmless when --mmu is set without
+    # --interrupt (uart_stimulus stays the empty string, same as a plain
+    # --interrupt-less run through this same template would see).
+    template_name = "dump_regs_interrupt_template.v" if (args.interrupt or args.mmu) else "dump_regs_template.v"
     template = os.path.join(here, "..", "tb", template_name)
 
     passed = 0
@@ -168,7 +195,7 @@ def main():
             ok, msg = run_one(seed, args.n_instrs, work_dir, args.iverilog_dir, template,
                               args.hazard_strategy, args.pipeline_profile,
                               mem_size=mem_size, interrupt=args.interrupt,
-                              branch_predictor=args.branch_predictor)
+                              branch_predictor=args.branch_predictor, mmu=args.mmu)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")
