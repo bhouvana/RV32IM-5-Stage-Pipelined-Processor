@@ -37,17 +37,22 @@ this generational structure for everything after.** Concretely:
   completion**. Do not rename it to match this file's Generation 3 (which
   also covers privilege/MMU/TLB/page-tables, see the open question below)
   while it's still in progress.
-- The project's own second-wave Phase G (caches) and Phase H (dual-issue),
-  both already confirmed in scope with the user before this file existed,
-  **also keep their existing lettering** when their turn comes.
-- **Once Phase F-G-H all close out**, this project's phase-lettering
-  convention (A, B, C... reused per-session, ADR-numbered) retires in favor
-  of this file's Generation numbering for anything new. At that point:
-  update `docs/ROADMAP.md`'s own phase list to point here for what's next,
-  and open a new ADR closing out "the whole A-E/F-H arc" the same way
+- The project's own second-wave Phase G (caches) **keeps its existing
+  lettering** and is now explicitly framed as Generation-1 work (see below
+  — its scope already matches Generation 1's own cache items). **Phase H
+  (dual-issue) is dropped from near-term scope** (decided 2026-08-02, see
+  below) — it was never a Generation 1 item and has no sunk cost yet.
+- **Once Phase F (through F9) and Phase G close out**, plus the
+  Generation-1 items the second wave never scoped (variable-latency
+  memory, HPC performance-monitoring CSRs, a profiler, formal
+  verification — see below), this project's phase-lettering convention
+  (A, B, C... reused per-session, ADR-numbered) retires in favor of this
+  file's Generation numbering for anything new. At that point: update
+  `docs/ROADMAP.md`'s own phase list to point here for what's next, and
+  open a new ADR closing out "the whole A-E/F-G arc" the same way
   `docs/adr/0018` closed out Phase A and `docs/adr/0021` closed out Phase E.
 
-### Open question, not yet decided — flag before starting Generation 2
+### Generation 1 scope — decided 2026-08-02 (was an open question, now resolved)
 
 The source roadmap's own Generation 1 (its "Phase E — Performance
 Architecture") scope is: dynamic branch prediction (done, this project's
@@ -55,17 +60,37 @@ own Phase E) + variable-latency memory + an I-cache + a D-cache + hardware
 performance-monitoring CSRs + a performance profiler + formal verification
 — then a "RV32IMAF Research Processor v1.0" release closes it out.
 
-That is **not the same scope** as this project's own already-confirmed
-second wave (Phase F: MMU: Phase G: caches; Phase H: dual-issue) — the
-second wave adds a full Sv32 MMU and dual-issue, neither of which this
-file's own Generation 1 asked for, and the second wave's cache phase (G)
-was scoped as "I$+D$, set-associative, write-back" without the variable-
-latency-memory/HPC-CSR/profiler/formal-verification items this file's
-Generation 1 also wants. **Before declaring Generation 1 (v1.0) released,
-the user needs to decide**: does v1.0 mean "second wave (F/G/H) plus this
-file's E-B/E-E/E-F/E-G items", or does it mean something narrower? Don't
-assume either way — ask when Phase H closes out, not before (too far off
-to matter yet, and scope may shift by then anyway).
+This does **not** line up cleanly with the second wave (Phase F: MMU;
+Phase G: caches; Phase H: dual-issue) — MMU is actually Generation 3's own
+item (`G-B`/`G-C`/`G-D` below), not Generation 1's, and dual-issue was
+never asked for by Generation 1 at all. Confirmed with the user
+(`AskUserQuestion`, 2026-08-02): **Generation 1 completion is now the
+explicit driver of what gets built next, not "finish F/G/H because they
+were queued."** Concretely:
+
+- **Phase F (MMU) finishes to F9** — already substantially done (F1-F5,
+  including real bugs found and fixed), cheap to close out cleanly, and
+  it's real groundwork for Generation 3 later even though it isn't a
+  Generation 1 requirement itself.
+- **Phase H (dual-issue) is dropped from near-term scope entirely** — not
+  a Generation 1 item, not started, no sunk cost. Revisit at Generation 6
+  (out-of-order) or later if still wanted; not a standing commitment.
+- **Phase G (caches) continues, folded into Generation 1 directly** — its
+  own "I$+D$, set-associative, write-back" scope already matches
+  Generation 1's own I-cache/D-cache items.
+- **The Generation-1 items the second wave never scoped** — variable-
+  latency memory, hardware performance-monitoring CSRs, a performance
+  profiler, and formal verification — are now real, committed work, not
+  deferred. These get their own research+design pass each, same
+  discipline as every phase before them, sequenced after Phase F closes
+  (F6-F9, then these, likely reusing the G/H letters or moving straight to
+  new phase letters — decide the exact lettering when Phase F actually
+  closes, not now).
+
+Once all of Generation 1's actual items are done (branch prediction
+[done], caches, variable-latency memory, HPC CSRs, profiler, formal
+verification), that's what closes out "RV32IMAF Research Processor v1.0"
+and hands off to Generation 2 (RV64) under this file's own numbering.
 
 A second, related open question for **Generation 3** (`G-B`/`G-C`/`G-D`:
 MMU/TLB/page tables) specifically: this project's in-progress Sv32 MMU
