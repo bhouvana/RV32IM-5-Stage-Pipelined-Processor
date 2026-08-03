@@ -271,7 +271,7 @@ However: the signal is called `rst` throughout the design but is literally wired
 | I-type ALU | `addi slti sltiu xori srli srai ori andi` (8/8, via `ALUOp=11`) | — |
 | Loads | `lw lb lh lbu lhu` (5/5, funct3-selected width in `DataMemoryBRAM.v`) | — |
 | Stores | `sw sb sh` (3/3) | — |
-| Branches | `beq bne blt bge bltu bgeu` (6/6 standard) plus custom `ble bgt` (funct3=100/101, using the two funct3 codes standard RV32I leaves for `bltu`/`bgeu` — those got the two *other* free codes, funct3=110/111; see `docs/adr/0005`) | — |
+| Branches | `beq bne blt bge bltu bgeu` (6/6 standard, all at real spec funct3 positions) plus custom `ble bgt` (funct3=010/011, the two funct3 codes real RV32I spec reserves and leaves undefined; moved here from the real `blt`/`bge` spec positions by `docs/adr/0030-branch-encoding-fix.md` — see that ADR and `docs/adr/0005` for the historical positions) | — |
 | Jumps | `jal jalr` (both fully wired: target, PC+4 link, forwarding correction) | — |
 | Upper-immediate | `lui auipc` (both reuse the ALU's `ADD` via an A-operand override, no new writeback path) | — |
 | Custom | `ctz`-like instruction, opcode `0101010`, `ALUOp=10`, funct7=`1`/funct3=`111` pattern | — |

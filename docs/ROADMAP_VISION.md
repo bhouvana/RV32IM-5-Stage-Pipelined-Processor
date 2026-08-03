@@ -181,6 +181,12 @@ question above: this is very likely a new MMU design against RV64/Sv39,
 not a reuse of the current Phase F's RV32/Sv32 `Tlb.v`/`Ptw.v`, even though
 the lessons carry over.)*
 
+**Prerequisite done**: the branch-encoding fix (Phase N,
+`docs/adr/0030-branch-encoding-fix.md`) that real Linux boot needed —
+`blt`/`bge` now sit at real RISC-V spec funct3 positions, so a stock
+`riscv64-gcc`-compiled kernel's branches decode correctly. Generation 3
+itself (privilege/MMU/TLB/page-tables/Linux-boot below) can now start.
+
 **Objective:** build a Linux-capable processor.
 
 - **Privilege architecture** — M/S/U modes. (Substantial overlap with the
