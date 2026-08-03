@@ -18,5 +18,6 @@ mret                                  # 32: -> U mode, fetch at 0x5000 -> ITLB m
 m_handler:
 csrrs x11, mcause, x0                   # 36: expect 12 (MCAUSE_INSTRUCTION_PAGE_FAULT)
 csrrs x13, 0x343, x0                      # 40: mtval -- expect 0x5000 (the faulting VA)
+fence
 halt:
 jal x0, halt                                # 44

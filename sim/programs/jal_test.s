@@ -10,6 +10,7 @@ addi x2, x0, 888    # poison #2 (must be squashed)
 target:
 add  x3, x1, x1     # depends on jal's link register with a 1-instruction gap
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

@@ -6,6 +6,7 @@ addi x1, x0, 1
 addi x2, x0, 99    # filler; unrelated destination, occupies the forwarding gap
 add  x3, x1, x1    # 1+1=2, must come from MEM/WB forwarding
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

@@ -411,6 +411,13 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
 
     if len(instrs) in labels_at:
         out.append(labels_at[len(instrs)] + ":")
+    # docs/adr/0023-caches.md (Phase G7). fence immediately before the halt
+    # spin -- under CACHE_MODE=1 (write-back D$), a store's dirty data can
+    # sit in the cache, invisible to the harness's own post-halt dump
+    # (which reads DataMemoryBRAM.v's backing array directly, bypassing any
+    # cache). Harmless, real no-op under CACHE_MODE=0 (fence has nothing to
+    # flush there).
+    out.append("fence")
     # Spin here instead of running off the end into instruction memory's
     # zero-filled remainder -- opcode 0000000 is not a valid instruction and
     # (correctly, after docs/adr/0011-csr-and-exceptions.md) now traps.
@@ -434,6 +441,25 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
         prefix = (
             pde_lines + ["sw x1, 0(x0)"] +                      # level-1[VPN1=0] <- PDE (satp_ppn=0 -> table at addr 0)
             ["lui x3, 0x1"] + pte_lines + ["sw x2, 0(x3)"] +      # level-0[VPN0=0] <- identity PTE (level-0 table @ 0x1000)
+            # docs/adr/0023-caches.md (Phase G6). Under CACHE_MODE=1, these
+            # two stores go through the write-back D$ like any other store
+            # and can stay dirty there -- but Ptw.v's own bus-master reads
+            # bypass DCache.v entirely (by design, same "plain mux, no real
+            # arbiter/coherency" scope docs/adr/0022 already established for
+            # sharing the bus with the LSU). Without a flush here, the very
+            # first page-table walk (triggered below by mret's own itlb_miss
+            # at the U-mode target) reads the REAL backing memory directly
+            # and sees a stale, pre-write (all-zero) PDE -- an immediate
+            # page fault, trapping to mtvec's reset default of 0 and
+            # silently restarting the entire program from address 0,
+            # forever (found by running CACHE_MODE=1 --mmu constrained-
+            # random programs, not anticipated in the design). A real OS
+            # has the identical obligation (flush/fence page-table writes
+            # before relying on translation through them) -- this is the
+            # generator's own equivalent, mirroring its existing
+            # "generator-guaranteed-valid page table" discipline (F7) one
+            # step further: guaranteed *visible*, not just well-formed.
+            ["fence"] +
             satp_lines + ["csrrw x0, 0x180, x1"] +
             ["addi x1, x0, __MEPC_PLACEHOLDER__", "csrrw x0, mepc, x1", "mret"]
         )

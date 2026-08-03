@@ -71,5 +71,6 @@ csrrs x21, 0x303, x0
 csrrw x0, 0x302, x1     # medeleg (old value discarded)
 csrrs x22, 0x302, x0
 
+fence
 halt:
 jal x0, halt

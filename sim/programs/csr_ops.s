@@ -13,6 +13,7 @@ csrrwi x8, mscratch, 10     # mscratch: 6 -> 10,     x8 = old (6)
 csrrsi x9, mscratch, 5      # mscratch: 10 -> 10|5=15, x9 = old (10)
 csrrci x10, mscratch, 2     # mscratch: 15 -> 15&~2=13, x10 = old (15)
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

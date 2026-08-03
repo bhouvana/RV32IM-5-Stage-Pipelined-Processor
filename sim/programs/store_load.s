@@ -8,6 +8,7 @@ addi x6, x0, 1234
 sw   x6, 0(x5)
 lw   x7, 0(x5)
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

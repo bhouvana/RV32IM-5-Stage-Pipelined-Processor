@@ -68,6 +68,7 @@ OP_LUI = 0b0110111
 OP_AUIPC = 0b0010111
 OP_CUSTOM = 0b0101010
 OP_SYSTEM = 0b1110011
+OP_MISC_MEM = 0b0001111  # fence (docs/adr/0023-caches.md, Phase G1)
 
 CSR_ADDR = {  # standard RISC-V machine-mode addresses (docs/adr/0011-csr-and-exceptions.md,
               # docs/adr/0020-soc-integration.md Phase D7 for mie/mip)
@@ -308,6 +309,16 @@ def sfence_vma(rs1, rs2):
     return (FUNCT7_SFENCE_VMA << 25) | (rs2 << 20) | (rs1 << 15) | OP_SYSTEM
 
 
+def fence():
+    # docs/adr/0023-caches.md (Phase G1). rd=rs1=0, funct3=000 (the only
+    # decoded MISC-MEM encoding this core recognizes -- see Control.v).
+    # pred/succ (inst[27:20], all-1s = "order everything") and fm
+    # (inst[31:28]=0) are encoded faithfully even though the RTL doesn't
+    # read them yet (this phase always does a full flush, see the ADR).
+    pred_succ_fm = 0b0000_1111_1111  # fm=0000, pred=1111, succ=1111
+    return (pred_succ_fm << 20) | OP_MISC_MEM
+
+
 def assemble(lines):
     # pass 1: strip comments/whitespace, record label addresses
     stmts = []
@@ -382,6 +393,8 @@ def assemble(lines):
             rs1 = reg(args[0]) if len(args) > 0 else 0
             rs2 = reg(args[1]) if len(args) > 1 else 0
             words.append(sfence_vma(rs1, rs2))
+        elif mn == "fence":
+            words.append(fence())
         elif mn == "word":
             # Raw 32-bit word, for encodings this assembler has no mnemonic
             # for -- e.g. an opcode this core doesn't implement, to exercise

@@ -12,6 +12,7 @@ addi x4, x0, -8           # 0xFFFFFFF8
 srl  x5, x4, x1             # logical: 0xFFFFFFF8>>3 = 0x1FFFFFFF
 sra  x6, x4, x1              # arithmetic: -8>>>3 = -1 (0xFFFFFFFF), sign preserved
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

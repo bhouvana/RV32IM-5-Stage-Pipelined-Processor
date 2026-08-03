@@ -13,6 +13,7 @@ add  x3, x1, x1       # depends on jalr's link register immediately -- exercises
                        # the same EX/MEM forwarding correction jal needed (jalr
                        # also sets `jump`, so it's covered by the same fix)
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

@@ -41,10 +41,27 @@ BRANCH_PREDICTOR=0 (PREDICTOR_STATIC, the default) and =1
 measured benefit of speculative fetch on branch/loop-heavy kernels, not a
 hypothetical.
 
+--compare-cache does the same for caching (docs/adr/0023-caches.md, Phase
+G8): every benchmark under both CACHE_MODE=0 (CACHE_NONE, the default) and
+=1 (CACHE_WRITEBACK_SETASSOC, 4-way/4KB/16B I$+D$), reporting the
+cycle-count delta plus I$/D$ hit/miss counters (sim/tb/bench_template.v's
+own testbench-side taps -- evidence the cache mode is doing real work, not
+precise hardware performance counters, which is a separate, real
+docs/ROADMAP_VISION.md Generation-1 item).
+
+--compare-latency does the same for variable-latency memory (docs/adr/0024-
+variable-latency-memory.md, Phase I6): every benchmark under both
+MEM_LATENCY_I=MEM_LATENCY_D=0 (the default, bit-exact) and whatever
+--mem-latency-i/--mem-latency-d were passed (both default to 3 specifically
+when --compare-latency is used and neither was set, since comparing 0
+against 0 would be a no-op), reporting the cycle-count delta.
+
 Usage: python bench_runner.py --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-strategies --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-profiles --iverilog-dir /c/iverilog/bin
        python bench_runner.py --compare-predictors --iverilog-dir /c/iverilog/bin
+       python bench_runner.py --compare-cache --iverilog-dir /c/iverilog/bin
+       python bench_runner.py --compare-latency --iverilog-dir /c/iverilog/bin
 """
 import argparse
 import glob
@@ -89,7 +106,7 @@ def load_words(mem_path):
 
 
 def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0,
-              branch_predictor=0):
+              branch_predictor=0, cache_mode=0, mem_latency_i=0, mem_latency_d=0):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
@@ -117,8 +134,20 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
     # only ever removes cycles relative to the static baseline, so the same
     # generous margin (computed independent of branch_predictor) still
     # covers PREDICTOR_DYNAMIC_BHT_BTB runs too.
-    max_time = (instrs * 60 + 500) * 10
-    tag = f"{name}_hs{hazard_strategy}_p{pipeline_profile}_bp{branch_predictor}"
+    # docs/adr/0023-caches.md (Phase G8): CACHE_MODE=1 needs its own flat
+    # extra margin -- every bench_*.s kernel now ends in `fence` (Phase G7),
+    # whose own flush scans all 256 lines at the real 4-way/4KB/16B default
+    # sizing even to skip the clean ones (~277 cycles, confirmed directly
+    # while debugging G6/G7), plus a smaller one-time cold-fill cost the
+    # first time through each kernel's own tiny (<=512B) code/data -- both
+    # bounded, one-time costs, not a per-instruction multiplier.
+    # docs/adr/0024-variable-latency-memory.md (Phase I6): each added
+    # wait-state cycle costs at most one extra cycle per instruction
+    # (memory-bound kernels access memory roughly once per instruction) --
+    # a flat per-instruction margin, not tuned per-kernel.
+    max_time = (instrs * (60 + 2 * (mem_latency_i + mem_latency_d)) + 500) * 10 + (4000 if cache_mode else 0)
+    tag = (f"{name}_hs{hazard_strategy}_p{pipeline_profile}_bp{branch_predictor}_cm{cache_mode}"
+           f"_li{mem_latency_i}_ld{mem_latency_d}")
     dump_v = os.path.join(work_dir, f"{tag}.v")
     out_path = os.path.join(work_dir, f"{tag}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
@@ -130,7 +159,10 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
               .replace("__MEM_SIZE__", str(mem_size))
               .replace("__HAZARD_STRATEGY__", str(hazard_strategy))
               .replace("__PIPELINE_PROFILE__", str(pipeline_profile))
-              .replace("__BRANCH_PREDICTOR__", str(branch_predictor)))
+              .replace("__BRANCH_PREDICTOR__", str(branch_predictor))
+              .replace("__CACHE_MODE__", str(cache_mode))
+              .replace("__MEM_LATENCY_I__", str(mem_latency_i))
+              .replace("__MEM_LATENCY_D__", str(mem_latency_d)))
     with open(dump_v, "w") as f:
         f.write(tpl)
 
@@ -146,9 +178,17 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
         return None, f"simulation error: {r.stdout.strip()[:500]} {r.stderr.strip()[:500]}"
 
     with open(out_path) as f:
-        cycles = int(f.read().strip())
+        vals = [int(l.strip()) for l in f if l.strip()]
+    cycles = vals[0]
+    # docs/adr/0023-caches.md (Phase G8): bench_template.v now always emits
+    # the I$/D$ counters (3 more lines after cycle_count), zero/meaningless
+    # under CACHE_MODE=0 but present either way -- one output format, not
+    # two, so this parsing doesn't need to know which mode produced it.
+    icache_misses, icache_accesses, dcache_misses = vals[1], vals[2], vals[3]
 
-    return {"instructions": instrs, "cycles": cycles, "ipc": instrs / cycles}, None
+    return {"instructions": instrs, "cycles": cycles, "ipc": instrs / cycles,
+            "icache_misses": icache_misses, "icache_accesses": icache_accesses,
+            "dcache_misses": dcache_misses}, None
 
 
 def main():
@@ -163,17 +203,37 @@ def main():
     ap.add_argument("--branch-predictor", type=int, default=0, choices=[0, 1],
                      help="riscvpipeline.v's BRANCH_PREDICTOR (docs/adr/0021): 0=PREDICTOR_STATIC (default), "
                           "1=PREDICTOR_DYNAMIC_BHT_BTB")
+    ap.add_argument("--cache-mode", type=int, default=0, choices=[0, 1],
+                     help="riscvpipeline.v's CACHE_MODE (docs/adr/0023-caches.md): 0=CACHE_NONE (default), "
+                          "1=CACHE_WRITEBACK_SETASSOC")
+    ap.add_argument("--mem-latency-i", type=int, default=0,
+                     help="riscvpipeline.v's MEM_LATENCY_I (docs/adr/0024-variable-latency-memory.md): "
+                          "extra I-side wait-state cycles, 0=bit-exact default")
+    ap.add_argument("--mem-latency-d", type=int, default=0,
+                     help="riscvpipeline.v's MEM_LATENCY_D (docs/adr/0024-variable-latency-memory.md): "
+                          "extra D-side wait-state cycles, 0=bit-exact default")
     compare = ap.add_mutually_exclusive_group()
     compare.add_argument("--compare-strategies", action="store_true",
                           help="run every benchmark under both hazard strategies "
-                               "(at --pipeline-profile/--branch-predictor) and report the delta")
+                               "(at --pipeline-profile/--branch-predictor/--cache-mode) and report the delta")
     compare.add_argument("--compare-profiles", action="store_true",
                           help="run every benchmark under both pipeline profiles "
-                               "(at --hazard-strategy/--branch-predictor) and report the delta")
+                               "(at --hazard-strategy/--branch-predictor/--cache-mode) and report the delta")
     compare.add_argument("--compare-predictors", action="store_true",
                           help="run every benchmark under both branch predictors "
-                               "(at --hazard-strategy/--pipeline-profile) and report the delta")
+                               "(at --hazard-strategy/--pipeline-profile/--cache-mode) and report the delta")
+    compare.add_argument("--compare-cache", action="store_true",
+                          help="run every benchmark under both cache modes "
+                               "(at --hazard-strategy/--pipeline-profile/--branch-predictor) and report the "
+                               "cycle-count delta plus I$/D$ hit/miss counters")
+    compare.add_argument("--compare-latency", action="store_true",
+                          help="run every benchmark under MEM_LATENCY_I=MEM_LATENCY_D=0 and whatever "
+                               "--mem-latency-i/--mem-latency-d were passed (both default to 3 here if neither "
+                               "was set) and report the cycle-count delta")
     args = ap.parse_args()
+
+    if args.compare_latency and args.mem_latency_i == 0 and args.mem_latency_d == 0:
+        args.mem_latency_i = args.mem_latency_d = 3
 
     here = os.path.dirname(os.path.abspath(__file__))
     template = os.path.join(here, "..", "tb", "bench_template.v")
@@ -183,30 +243,45 @@ def main():
         print(f"No bench_*.s programs found under {args.programs_dir}")
         sys.exit(1)
 
-    # pairs are always (hazard_strategy, pipeline_profile, branch_predictor)
-    # 3-tuples; a --compare-* flag varies exactly one of the three while
-    # holding the other two at whatever --hazard-strategy/--pipeline-profile/
-    # --branch-predictor were passed (defaulting to 0 each).
+    # pairs are always (hazard_strategy, pipeline_profile, branch_predictor,
+    # cache_mode, mem_latency_i, mem_latency_d) 6-tuples; a --compare-* flag
+    # varies exactly one axis while holding the rest at whatever
+    # --hazard-strategy/--pipeline-profile/--branch-predictor/--cache-mode/
+    # --mem-latency-i/--mem-latency-d were passed (defaulting to 0 each).
     if args.compare_strategies:
         axis, axis_label = "strategy", "HAZARD_STRATEGY"
         keys = (0, 1)
-        pairs = [(s, args.pipeline_profile, args.branch_predictor) for s in keys]
+        pairs = [(s, args.pipeline_profile, args.branch_predictor, args.cache_mode,
+                  args.mem_latency_i, args.mem_latency_d) for s in keys]
     elif args.compare_profiles:
         axis, axis_label = "profile", "PIPELINE_PROFILE"
         keys = (0, 1)
-        pairs = [(args.hazard_strategy, p, args.branch_predictor) for p in keys]
+        pairs = [(args.hazard_strategy, p, args.branch_predictor, args.cache_mode,
+                  args.mem_latency_i, args.mem_latency_d) for p in keys]
     elif args.compare_predictors:
         axis, axis_label = "predictor", "BRANCH_PREDICTOR"
         keys = (0, 1)
-        pairs = [(args.hazard_strategy, args.pipeline_profile, bp) for bp in keys]
+        pairs = [(args.hazard_strategy, args.pipeline_profile, bp, args.cache_mode,
+                  args.mem_latency_i, args.mem_latency_d) for bp in keys]
+    elif args.compare_cache:
+        axis, axis_label = "cache", "CACHE_MODE"
+        keys = (0, 1)
+        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, cm,
+                  args.mem_latency_i, args.mem_latency_d) for cm in keys]
+    elif args.compare_latency:
+        axis, axis_label = "latency", "MEM_LATENCY_I/D"
+        keys = (0, 1)
+        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
+                  li, ld) for li, ld in ((0, 0), (args.mem_latency_i, args.mem_latency_d))]
     else:
         axis, axis_label = None, None
         keys = (args.hazard_strategy,)  # single run, keyed arbitrarily by hazard_strategy
-        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor)]
+        pairs = [(args.hazard_strategy, args.pipeline_profile, args.branch_predictor, args.cache_mode,
+                  args.mem_latency_i, args.mem_latency_d)]
 
     all_results = {k: [] for k in keys}
     with tempfile.TemporaryDirectory() as work_dir:
-        for key, (strategy, profile, predictor) in zip(keys, pairs):
+        for key, (strategy, profile, predictor, cache_mode, mem_latency_i, mem_latency_d) in zip(keys, pairs):
             if axis == "strategy":
                 print(f"--- HAZARD_STRATEGY={strategy} ({'forwarding' if strategy == 0 else 'stall-only'}) ---")
             elif axis == "profile":
@@ -215,25 +290,36 @@ def main():
             elif axis == "predictor":
                 print(f"--- BRANCH_PREDICTOR={predictor} "
                       f"({'PREDICTOR_STATIC' if predictor == 0 else 'PREDICTOR_DYNAMIC_BHT_BTB'}) ---")
+            elif axis == "cache":
+                print(f"--- CACHE_MODE={cache_mode} "
+                      f"({'CACHE_NONE' if cache_mode == 0 else 'CACHE_WRITEBACK_SETASSOC'}) ---")
+            elif axis == "latency":
+                print(f"--- MEM_LATENCY_I={mem_latency_i} MEM_LATENCY_D={mem_latency_d} ---")
             for prog_s in progs:
                 name = os.path.splitext(os.path.basename(prog_s))[0]
                 mem_size = MEM_SIZE_OVERRIDES.get(name, 128)
                 result, err = run_bench(name, prog_s, work_dir, args.iverilog_dir, template, mem_size,
-                                         strategy, profile, predictor)
+                                         strategy, profile, predictor, cache_mode, mem_latency_i, mem_latency_d)
                 if err:
                     print(f"FAIL  {name}: {err}")
                     all_results[key].append((name, None))
                 else:
+                    cache_info = ""
+                    if cache_mode:
+                        cache_info = (f"  I$miss={result['icache_misses']}/{result['icache_accesses']} "
+                                      f"D$miss={result['dcache_misses']}")
                     print(f"{name:<20} instructions={result['instructions']:<6} "
-                          f"cycles={result['cycles']:<6} IPC={result['ipc']:.3f}")
+                          f"cycles={result['cycles']:<6} IPC={result['ipc']:.3f}{cache_info}")
                     all_results[key].append((name, result))
             print()
 
     if axis is not None:
         labels0 = {"strategy": "forwarding (HS=0)", "profile": "PROFILE_5STAGE (PP=0)",
-                   "predictor": "PREDICTOR_STATIC (BP=0)"}
+                   "predictor": "PREDICTOR_STATIC (BP=0)", "cache": "CACHE_NONE (CM=0)",
+                   "latency": "MEM_LATENCY_I=D=0"}
         labels1 = {"strategy": "stall-only (HS=1)", "profile": "PROFILE_6STAGE_SPLIT_FETCH (PP=1)",
-                   "predictor": "PREDICTOR_DYNAMIC_BHT_BTB (BP=1)"}
+                   "predictor": "PREDICTOR_DYNAMIC_BHT_BTB (BP=1)", "cache": "CACHE_WRITEBACK_SETASSOC (CM=1)",
+                   "latency": f"MEM_LATENCY_I={args.mem_latency_i} MEM_LATENCY_D={args.mem_latency_d}"}
         label0, label1 = labels0[axis], labels1[axis]
         print(f"=== comparison: {label0} vs. {label1} ===")
         by_name_0 = dict(all_results[0])
@@ -245,8 +331,12 @@ def main():
                 continue
             delta = r1["cycles"] - r0["cycles"]
             pct = 100.0 * delta / r0["cycles"]
+            cache_info = ""
+            if axis == "cache":
+                cache_info = (f"   I$miss={r1['icache_misses']}/{r1['icache_accesses']} "
+                              f"D$miss={r1['dcache_misses']}")
             print(f"{name:<20} cycles: {r0['cycles']:<6} -> {r1['cycles']:<6}  "
-                  f"({delta:+d}, {pct:+.1f}%)   IPC: {r0['ipc']:.3f} -> {r1['ipc']:.3f}")
+                  f"({delta:+d}, {pct:+.1f}%)   IPC: {r0['ipc']:.3f} -> {r1['ipc']:.3f}{cache_info}")
 
     failed = [n for results in all_results.values() for n, r in results if r is None]
     total = sum(len(results) for results in all_results.values())

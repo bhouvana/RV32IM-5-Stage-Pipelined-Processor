@@ -1186,6 +1186,15 @@ class ISS:
             self.set_fflags(flags)
             self.pc = next_pc
 
+        elif op == 0b0001111 and f3 == 0b000:  # fence (docs/adr/0023-caches.md,
+            # Phase G1). A cache changes timing only, never architectural
+            # values (same "zero ISS changes" category as branch prediction,
+            # docs/adr/0021) -- a literal no-op is the correct model here,
+            # not a placeholder pending future work. Any other MISC-MEM
+            # funct3 (e.g. fence.i) is unrecognized and falls to the trap
+            # below, matching design/Control.v's own decode.
+            self.pc = next_pc
+
         else:
             # Matches design/Control.v's outer default case (docs/adr/0011):
             # any opcode this core doesn't implement traps as an illegal

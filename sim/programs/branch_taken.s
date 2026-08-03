@@ -22,6 +22,7 @@ target2:
 addi x6, x0, 42
 
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

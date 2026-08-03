@@ -49,6 +49,7 @@ jal  x0, outer
 done_sort:
 lw   x10, 0(x9)        # smallest element (should be 1) -> x10/a0
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

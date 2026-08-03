@@ -24,6 +24,7 @@ lw   x7, 0(x5)      # unrelated load -- must not disturb x1's forwarding to the 
 add  x8, x1, x1     # consumer: needs x1 forwarded from MEM/WB (2 instructions back, across
                     # the load's own stall cycle) -- would be wrong if that forwarding broke
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

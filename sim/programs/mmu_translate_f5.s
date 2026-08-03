@@ -44,5 +44,6 @@ ori  x6, x6, 4                                                  # 84: x6 = 0x100
 addi x11, x0, 777                                                 # 88: value to store
 sw   x11, 0(x6)                                                      # 92: D-side STORE translation
 lw   x12, 0(x6)                                                        # 96: D-side LOAD translation (round trip)
+fence
 halt:
 jal x0, halt                                                             # 100

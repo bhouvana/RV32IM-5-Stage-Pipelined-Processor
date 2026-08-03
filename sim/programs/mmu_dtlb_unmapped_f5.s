@@ -29,5 +29,6 @@ jal x0, halt                                            # 68: unreachable if the
 m_handler:
 csrrs x11, mcause, x0                                     # 72: expect 13 (MCAUSE_LOAD_PAGE_FAULT)
 csrrs x13, 0x343, x0                                        # 76: mtval -- expect 0x5000 (the faulting VA)
+fence
 halt:
 jal x0, halt                                                  # 80

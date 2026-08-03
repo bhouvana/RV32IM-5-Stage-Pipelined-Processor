@@ -28,5 +28,6 @@ _start:
      * instruction memory (docs/adr/0011: opcode 0000000 traps as illegal,
      * not a harmless implicit nop). Same convention every hand-written
      * sim/programs/*.s and sim/benchmarks/*.s test uses. */
+fence
 halt:
     jal     x0, halt

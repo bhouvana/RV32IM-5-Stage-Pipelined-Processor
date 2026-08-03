@@ -16,6 +16,7 @@ lw   x12, 8(x5)                  # full-word readback: must be 0x0000E000, NOT
                                   # bytes (like the original word-only sw), the
                                   # upper half would leak 0xABCD in here.
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

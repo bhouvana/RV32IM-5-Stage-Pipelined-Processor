@@ -37,5 +37,6 @@ jal x0, halt                                                        # 92: unreac
 m_handler:
 csrrs x11, mcause, x0                                                 # 96: expect 15 (MCAUSE_STORE_PAGE_FAULT)
 csrrs x13, 0x343, x0                                                    # 100: mtval -- expect 0x1004
+fence
 halt:
 jal x0, halt                                                              # 104

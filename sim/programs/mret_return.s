@@ -18,5 +18,6 @@ csrrs  x12, mepc, x0        # 32: x12 <- mepc (12, the ecall's own address)
 addi   x12, x12, 4          # 36: x12 <- 16 (skip past the ecall on return)
 csrrw  x0, mepc, x12        # 40: mepc <- 16
 mret                        # 44: pc <- mepc(16), MIE <- MPIE(1), MPIE <- 1
+fence
 halt:
 jal x0, halt                 # 48: spin

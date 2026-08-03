@@ -18,5 +18,6 @@ addi  x1, x1, -1     # 12
 bne   x1, x0, loop   # 16
 addi  x11, x0, 777   # 20: proves the loop exited via correct fall-through, not a skipped/duplicated iteration
 
+fence
 halt:
 jal   x0, halt       # 24: spin here forever

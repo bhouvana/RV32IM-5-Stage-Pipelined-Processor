@@ -25,6 +25,8 @@
 `define OPCODE_AUIPC  7'b0010111
 `define OPCODE_CUSTOM 7'b0101010  // ctz (see design/ALUCtrl.v ALUCtl=10101)
 `define OPCODE_SYSTEM 7'b1110011  // CSR instructions, ecall, ebreak, mret (docs/adr/0011-csr-and-exceptions.md)
+`define OPCODE_MISC_MEM 7'b0001111  // fence (docs/adr/0023-caches.md, Phase G) -- funct3=000 only;
+                                      // other MISC-MEM encodings (fence.i/Zifencei) unimplemented, illegal
 
 // ---- ALUOp (Control.v output -> ALUCtrl.v input) ----
 `define ALUOP_LOAD_STORE 2'b00  // lw/sw/jal: ALU always adds

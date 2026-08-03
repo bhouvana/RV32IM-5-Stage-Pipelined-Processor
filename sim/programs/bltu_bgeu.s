@@ -50,6 +50,7 @@ addi x10, x0, 999
 after_f:
 
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

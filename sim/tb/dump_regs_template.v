@@ -36,6 +36,9 @@
 `include "Ptw.v"
 `include "Bht.v"
 `include "Btb.v"
+`include "ICache.v"
+`include "DCache.v"
+`include "MemoryLatencyModel.v"
 
 // Template for sim/tools/random_gen.py's cross-check driver -- __INIT_FILE__,
 // __MAX_TIME__, __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-
@@ -43,7 +46,11 @@
 // __PIPELINE_PROFILE__ (docs/adr/0018-variable-pipeline-depth.md; 0 or 1,
 // see riscvpipeline.v's PIPELINE_PROFILE parameter), and __BRANCH_PREDICTOR__
 // (docs/adr/0021-branch-prediction.md; 0 or 1, see riscvpipeline.v's
-// BRANCH_PREDICTOR parameter) are substituted per run. Dumps final
+// BRANCH_PREDICTOR parameter), and __CACHE_MODE__ (docs/adr/0023-caches.md;
+// 0 or 1, see riscvpipeline.v's CACHE_MODE parameter), and __MEM_LATENCY_I__/
+// __MEM_LATENCY_D__ (docs/adr/0024-variable-latency-memory.md; extra
+// wait-state cycles, 0 by default) are substituted per
+// run. Dumps final
 // architectural state as one decimal value per line, for comparison against
 // sim/tools/iss.py's own final state on the same program -- the ISS itself
 // doesn't model pipeline microarchitecture (or branch-prediction timing) at
@@ -60,7 +67,8 @@ module dump_regs;
     integer fd;
 
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
-                .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__))
+                .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__),
+                .CACHE_MODE(__CACHE_MODE__), .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__))
                 dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;

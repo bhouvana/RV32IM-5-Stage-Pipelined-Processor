@@ -88,7 +88,41 @@ module PIPELINED #(
     // bigger table buys nothing measurable without a benchmark large enough
     // to exercise it; a real FPGA target running larger programs could
     // override this.
-    parameter BHT_BTB_ENTRIES = 32
+    parameter BHT_BTB_ENTRIES = 32,
+    // docs/adr/0023-caches.md (Phase G). A closed, named enum (same honesty
+    // convention as HAZARD_STRATEGY/PIPELINE_PROFILE/BRANCH_PREDICTOR above).
+    // CACHE_NONE (0, default): today's exact direct-InstructionMemory/
+    // DataMemoryBRAM behavior, bit-exact, what every existing test/ADR/
+    // benchmark in this repo assumes. CACHE_WRITEBACK_SETASSOC (1): a 4-way
+    // set-associative write-back I$/D$ pair (ICache.v/DCache.v) sit in front
+    // of the same backing memories, PIPT-indexed (this core's fetch and
+    // load/store are already PIPT today -- translation resolves
+    // combinationally before the memory array is indexed, see the ADR).
+    // Not yet consumed anywhere as of this commit (G1) -- declared before
+    // any consumer, same staging every prior swappable parameter used.
+    parameter CACHE_MODE = 0,
+    // docs/adr/0023-caches.md (Phase G). I$/D$ sizing, only meaningful
+    // under CACHE_WRITEBACK_SETASSOC -- independently parameterized per
+    // cache (not one shared enum) since a future --compare-cache sweep may
+    // want to vary them independently, same granularity precedent as
+    // HAZARD_STRATEGY/PIPELINE_PROFILE being separate parameters rather
+    // than one combined one. Defaults: 4-way, 4KB, 16B lines (256 lines /
+    // 4 ways = 64 sets) -- the more-ambitious sizing option confirmed with
+    // the user over a smaller 2-way/1KB first pass.
+    parameter ICACHE_WAYS = 4,
+    parameter ICACHE_SIZE_BYTES = 4096,
+    parameter ICACHE_LINE_BYTES = 16,
+    parameter DCACHE_WAYS = 4,
+    parameter DCACHE_SIZE_BYTES = 4096,
+    parameter DCACHE_LINE_BYTES = 16,
+    // docs/adr/0024-variable-latency-memory.md (Phase I). Additional
+    // wait-state cycles beyond each side's own existing baseline timing --
+    // independently configurable (a real system's I-side and D-side memory
+    // can have genuinely different timing behind them), both 0 by default
+    // (bit-exact with every phase before this one, same convention every
+    // other swappable axis in this file already follows).
+    parameter MEM_LATENCY_I = 0,
+    parameter MEM_LATENCY_D = 0
 )(
     input clk,
     input start,
@@ -123,6 +157,12 @@ localparam PROFILE_6STAGE_SPLIT_FETCH = 1;
 // this parameter; not yet consumed anywhere as of this commit.
 localparam PREDICTOR_STATIC = 0;
 localparam PREDICTOR_DYNAMIC_BHT_BTB = 1;
+
+// CACHE_MODE values (docs/adr/0023-caches.md) -- named constants purely for
+// readability at the generate/if sites that consume this parameter; not yet
+// consumed anywhere as of this commit.
+localparam CACHE_NONE = 0;
+localparam CACHE_WRITEBACK_SETASSOC = 1;
 
 wire branch;
 wire memRead;
@@ -167,6 +207,7 @@ wire isEbreak;
 wire isMret;
 wire isSret;         // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
 wire isSfenceVma;    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
+wire isFence;        // docs/adr/0023-caches.md (Phase G1) -- no live consumer yet (G6)
 wire illegalOpcode;
 wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a trap/mret
 
@@ -196,10 +237,145 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
     // translated physical address when translation is active, bit-exact
     // with raw imem_read_addr otherwise -- forward-referenced here, same
     // pattern as pc_stall/priv_mode_w elsewhere in this file.
-    InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_InstMem(
-    .readAddr(imem_phys_addr),
-    .inst(inst)
-    );
+    //
+    // docs/adr/0023-caches.md (Phase G3). CACHE_NONE (default): unchanged
+    // direct InstructionMemory.v instantiation, bit-exact with every prior
+    // phase. CACHE_WRITEBACK_SETASSOC: ICache.v sits at this exact same
+    // feed point instead -- fetch is already PIPT today (translation
+    // resolves combinationally before this address is formed), so the
+    // cache is naturally PIPT too, no VIPT alias-handling needed (see the
+    // ADR). icache_hit is tied to 1 under CACHE_NONE so icache_miss (its
+    // own definition, in the MMU translation block below, alongside
+    // itlb_miss) is always 0 there -- bit-exact with pre-G3 behavior.
+    wire icache_hit;
+    // docs/adr/0024-variable-latency-memory.md (Phase I3). imem_wait: a new
+    // I-side interlock, CACHE_NONE only (CACHE_WRITEBACK_SETASSOC's own
+    // I-side latency is I4's job instead, inside ICache.v's own fill
+    // engine -- a cache hit never touches memory at all). InstructionMemory.v
+    // has no ack/handshake of any kind (a flat combinational array read), so
+    // this is genuinely new machinery, not a rewire of an existing ack --
+    // detects a fresh fetch address (imem_phys_addr changed since the last
+    // one this wait mechanism finished serving; PC/imem_phys_addr are
+    // frozen by pc_stall throughout a wait, so no repeat-while-waiting
+    // ambiguity is possible), gated on translation having resolved
+    // (!translate_enable || itlb_hit, mirrors icache_miss's own gate --
+    // don't start counting against a still-resolving, not-yet-final
+    // physical address) and on !branch_taken && !redirect_squash_extend_r
+    // -- the stall-vs-redirect priority bug this project has now hit three
+    // times (docs/adr/0016, 0022 Finding 1, 0023 G3) -- applied proactively
+    // here from the start instead of discovering it a fourth time by
+    // running.
+    wire imem_wait;
+    generate
+    if (CACHE_MODE == CACHE_NONE) begin : gen_icache_none
+        assign icache_hit = 1'b1;
+        InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_InstMem(
+            .readAddr(imem_phys_addr),
+            .inst(inst)
+        );
+
+        if (MEM_LATENCY_I == 0) begin : gen_imem_latency_none
+            assign imem_wait = 1'b0;
+        end else begin : gen_imem_latency_added
+            reg [XLEN-1:0] imem_served_addr_r;
+            reg            imem_served_valid_r;
+            wire imem_new_addr = !imem_served_valid_r || (imem_phys_addr != imem_served_addr_r);
+            wire imem_latency_busy, imem_latency_done;
+            // A real bug found by running (Phase I3, 3rd finding): without
+            // excluding busy/done here, imem_served_addr_r (a REGISTERED
+            // update, only visible starting the cycle AFTER done) hasn't
+            // caught up yet on the exact cycle `done` fires -- MemoryLatencyModel's
+            // OWN busy_r has ALREADY cleared that same cycle (its "start &&
+            // !busy" guard evaluates busy_r's just-updated value), so
+            // imem_new_addr is STILL true (stale served_addr_r) while busy
+            // is ALSO already false -- imem_latency_start fires again on
+            // that exact cycle and restarts the whole wait for an address
+            // that's already served, silently doubling every wait's real
+            // duration. Excluding busy/done here closes the one-cycle gap
+            // the same way MemoryLatencyModel's own internal "start &&
+            // !busy" guard already protects itself -- this wire needs the
+            // identical protection against its OWN downstream bookkeeping's
+            // one-cycle registered lag.
+            wire imem_latency_start = imem_new_addr && !imem_latency_busy && !imem_latency_done
+                && (!translate_enable || itlb_hit) && !branch_taken && !redirect_squash_extend_r;
+            MemoryLatencyModel #(.LATENCY(MEM_LATENCY_I)) m_ImemLatency(
+                .clk(clk), .rst(start),
+                .start(imem_latency_start),
+                .busy(imem_latency_busy),
+                .done(imem_latency_done)
+            );
+            // A real bug found by running (Phase I3, 2nd finding): gating
+            // pc_stall through a REGISTERED imem_wait_r (as an earlier
+            // version of this block did) leaves a one-cycle gap between
+            // imem_latency_start firing (combinational) and pc_stall
+            // actually freezing reg1 (one cycle later, once imem_wait_r
+            // catches up). InstructionMemory.v is purely combinational (no
+            // real handshake at all), so `inst` is ALREADY valid the exact
+            // cycle a new address appears -- during that one free cycle,
+            // reg1 (not yet stalled) legitimately latches the real
+            // instruction and it advances into reg2 completely normally.
+            // Only THEN does the artificial wait catch up and start
+            // masking pc_stall for an address that's already been
+            // correctly fetched -- reg2 spends the whole (now-pointless)
+            // wait being bubbled, discarding an instruction that was never
+            // actually stale (unlike itlb_miss/icache_miss, which are
+            // purely combinational with no such lag, so reg1 genuinely
+            // never latches anything during their own stalls). Observed
+            // directly only under BRANCH_PREDICTOR=1: a correctly-predicted
+            // self-looping `jal` got bubbled away one cycle after being
+            // correctly decoded, then re-fetched with a stale BTB
+            // prediction, corrupting its own redirect target and running
+            // the CPU off the end of the program. Fixed by gating on the
+            // combinational start/busy pair directly instead of the
+            // registered imem_wait_r -- MemoryLatencyModel's own busy
+            // output already covers every cycle from the one after start
+            // through the done cycle itself, so ORing it with
+            // imem_latency_start (which covers exactly the one cycle busy
+            // hasn't caught up to yet) leaves no gap.
+            wire imem_wait_active = imem_latency_start || imem_latency_busy;
+            // imem_abandoned_r (mirrors docs/adr/0022 Finding 3's
+            // ptw_abandoned_r): once a wait is abandoned mid-flight (a
+            // redirect fires while busy), its eventual `done` must NOT
+            // mark imem_served_addr_r against imem_phys_addr, which has
+            // since moved on to the redirect target -- would otherwise
+            // wrongly mark the NEW address "already served" before its own
+            // wait ever ran.
+            // # ponytail: an abandoned wait still runs to completion
+            // rather than being cancelled early, delaying the redirected
+            // target's own real wait by however many cycles were left --
+            // same accepted simplification ICache.v's own fill engine
+            // already documents; never a correctness issue, only ever
+            // extra (rare) stall cycles.
+            reg imem_abandoned_r;
+            always @(posedge clk) begin
+                if (~start) imem_abandoned_r <= 1'b0;
+                else if (imem_latency_busy && branch_taken) imem_abandoned_r <= 1'b1;
+                else if (imem_latency_done) imem_abandoned_r <= 1'b0;
+            end
+            always @(posedge clk) begin
+                if (~start) imem_served_valid_r <= 1'b0;
+                else if (imem_latency_done && !imem_abandoned_r) begin
+                    imem_served_addr_r  <= imem_phys_addr;
+                    imem_served_valid_r <= 1'b1;
+                end
+            end
+            assign imem_wait = imem_wait_active && !branch_taken && !redirect_squash_extend_r;
+        end
+    end else begin : gen_icache_writeback
+        assign imem_wait = 1'b0;
+        wire icache_busy, icache_done;
+        ICache #(.INIT_FILE(INIT_FILE), .IMEM_SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN),
+                 .WAYS(ICACHE_WAYS), .CACHE_SIZE_BYTES(ICACHE_SIZE_BYTES), .LINE_BYTES(ICACHE_LINE_BYTES),
+                 .MEM_LATENCY(MEM_LATENCY_I)) m_ICache(
+            .clk(clk), .rst(start),
+            .readAddr(imem_phys_addr),
+            .inst(inst),
+            .hit(icache_hit),
+            .busy(icache_busy),
+            .done(icache_done)
+        );
+    end
+    endgenerate
     //
     // docs/adr/0021-branch-prediction.md (Phase E4). Speculative arm: if the
     // predictor guesses this cycle's fetch is a taken branch/jump, override
@@ -448,6 +624,7 @@ wire [6:0] funct7_control;
         .isMret(isMret),
         .isSret(isSret),
         .isSfenceVma(isSfenceVma),
+        .isFence(isFence),
         .illegalOpcode(illegalOpcode),
         .fRegWrite(fRegWrite)
     );
@@ -601,6 +778,7 @@ wire [6:0] funct7_control;
     wire isMret_regde;
     wire isSret_regde;
     wire isSfenceVma_regde;
+    wire isFence_regde;
     wire illegalOpcode_regde;
     //
 reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
@@ -632,7 +810,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     // instruction already in ID before the miss began would be re-latched
     // into EX every stall cycle instead of exactly once -- the same bug
     // class docs/adr/0016 found for HazardNoForward.v's own stall).
-    .flush(flush | float_load_use_hazard | itlb_miss),  // docs/adr/0019 (Phase C7): bubble reg2 while an flw
+    .flush(flush | float_load_use_hazard | itlb_miss | icache_miss | imem_wait),  // docs/adr/0024 (Phase I3): imem_wait joins the same I-side group. docs/adr/0019 (Phase C7): bubble reg2 while an flw
                                           // load-use hazard clears, same "insert a nop, real
                                           // instruction retries from IF/ID" shape as Hazard.v's own
     .branch_taken(branch_taken),
@@ -659,6 +837,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .isMret(isMret),
     .isSret(isSret),
     .isSfenceVma(isSfenceVma),
+    .isFence(isFence),
     .illegalOpcode(illegalOpcode),
 
     .branch_regde(branch_regde),
@@ -696,6 +875,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .isMret_regde(isMret_regde),
     .isSret_regde(isSret_regde),
     .isSfenceVma_regde(isSfenceVma_regde),
+    .isFence_regde(isFence_regde),
     .illegalOpcode_regde(illegalOpcode_regde)
 );
 
@@ -1106,16 +1286,76 @@ endgenerate
     // Tracking readiness against reg3's own occupancy here (reset to 0
     // whenever mem_stall was 0 last cycle, which is exactly when reg3 is
     // about to accept a new occupant) sidesteps that ambiguity entirely.
+    //
+    // docs/adr/0023-caches.md (Phase G5). Generalized from a fixed one-cycle
+    // delay to an externally-driven `mem_access_ready` pulse -- a D$ miss
+    // (G6) needs a variable number of cycles, not always exactly one.
+    // mem_access_ready is tied constant 1 here (no cache logic drives it
+    // yet, CACHE_MODE isn't even consumed by this wire) -- with a constant-1
+    // ready signal, `mem_stall_done_r <= mem_access_ready` whenever
+    // mem_stall is asserted is bit-for-bit equivalent to the original
+    // `mem_stall_done_r <= mem_stall` every cycle (the two differ only in
+    // the mem_stall==0 case, where both branches produce 0 either way) --
+    // this step changes the MECHANISM, not the TIMING, and must stay
+    // bit-identical under CACHE_NONE (docs/adr/0020 D3's own "prove the
+    // plumbing is inert before anything uses it" discipline). G6 replaces
+    // this tie-off with a real CACHE_MODE-selected mux to DCache.v's own
+    // resp_ready; mem_stall's own trigger condition (memRead_regem alone,
+    // never memWrite_regem) is deliberately UNCHANGED here too -- teaching
+    // a plain store to stall is a real behavior change (write-allocate
+    // misses, G6's own job), not something this pure-refactor step may do
+    // even under CACHE_WRITEBACK_SETASSOC.
+    //
+    // docs/adr/0023-caches.md (Phase G6). mem_access_ready now genuinely
+    // varies: DCache.v's own resp_ready for a load/store, or its flush_done
+    // for a retiring fence -- whichever this reg3 occupant is actually
+    // waiting on (dcache_resp_ready/dcache_flush_done/fence_pending_r are
+    // forward-referenced to the MEM-stage bus-master block below, same
+    // pattern this file already relies on for pc_stall/priv_mode_w).
+    // mem_trigger generalizes what USED to be a bare `memRead_regem`:
+    // still exactly that (alone) under CACHE_NONE -- writes never stall,
+    // bit-identical to every existing test's assumption. Under
+    // CACHE_WRITEBACK_SETASSOC: memRead_regem unchanged (a hit-read still
+    // costs its one real registered cycle, same as today); memWrite_regem
+    // ONLY when DCache doesn't already show combinational readiness -- a
+    // hit-write's genuinely zero-stall commit (mirrors RamWishboneAdapter's
+    // own "writes never stall" precedent) must not gain a spurious cycle
+    // just because the trigger technically matched; fence_pending_r for a
+    // retiring flush's own (possibly multi-cycle) duration.
+    // docs/adr/0024-variable-latency-memory.md (Phase I2). CACHE_NONE's
+    // branch used to be a hardcoded 1'b1 here -- harmless only because
+    // RamWishboneAdapter's real timing happened to always be exactly 1
+    // cycle, which the constant was silently calibrated to match (lsu_ack
+    // itself, declared above, was reserved but deliberately unconsumed for
+    // exactly this reason). Now genuinely tracks lsu_ack, so MEM_LATENCY_D
+    // actually has an effect under CACHE_NONE too. At MEM_LATENCY_D==0,
+    // lsu_ack pulses on the exact same cycle the old constant already
+    // matched -- bit-exact by construction, not coincidence, this time.
+    // mem_trigger's write clause mirrors CACHE_WRITEBACK_SETASSOC's own
+    // existing write-miss shape (memWrite_regem && !dcache_resp_ready): a
+    // write only ever stalls once MEM_LATENCY_D>0 makes !lsu_ack true on
+    // its own first cycle; at the default 0, RamWishboneAdapter still acks
+    // writes combinationally same-cycle, so this OR arm is always false --
+    // "writes never stall under CACHE_NONE" stays true at the default.
+    wire mem_access_ready = (CACHE_MODE == CACHE_NONE) ? lsu_ack :
+        (fence_pending_r ? dcache_flush_done : dcache_resp_ready);
+    wire mem_trigger = (CACHE_MODE == CACHE_NONE) ? (memRead_regem || (memWrite_regem && !lsu_ack)) :
+        (memRead_regem || (memWrite_regem && !dcache_resp_ready) || fence_pending_r);
     reg mem_stall_done_r;
-    wire mem_stall = memRead_regem && !mem_stall_done_r;
+    wire mem_stall = mem_trigger && !mem_stall_done_r;
     always @(posedge clk) begin
         if (~start) mem_stall_done_r <= 1'b0;
-        else mem_stall_done_r <= mem_stall;
+        else if (!mem_stall) mem_stall_done_r <= 1'b0;
+        else mem_stall_done_r <= mem_access_ready;
     end
 
     // docs/adr/00NN-mmu-sv32.md (Phase F5): itlb_miss/dtlb_miss are defined
     // in the MMU translation block below (forward-referenced here).
-    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard | itlb_miss | dtlb_miss;
+    // docs/adr/0023-caches.md (Phase G3): icache_miss joins them, same
+    // forward-reference pattern, always 0 under CACHE_NONE.
+    // docs/adr/0024-variable-latency-memory.md (Phase I3): imem_wait joins
+    // them, always 0 under CACHE_WRITEBACK_SETASSOC and at MEM_LATENCY_I=0.
+    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard | itlb_miss | dtlb_miss | icache_miss | imem_wait;
 
     // reg2's own hold condition, factored out for reuse below (CSR.v's write
     // gating needs to know exactly the same thing reg2 does: "is this
@@ -1664,6 +1904,21 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
 // of needing a directed test (store_load.s) to stumble into it.
 `ifdef ASSERT_ON
 reg [XLEN-1:0] expected_store_data;
+// docs/adr/0023-caches.md (Phase G6). A second gap in this same assertion,
+// found by running: it re-checked EVERY cycle memWrite_regem stayed high,
+// an assumption that only ever held because writes never used to stall
+// (mem_stall was gated on memRead_regem alone). A write-allocate MISS can
+// now hold reg3's store for multiple cycles -- readData2_regem correctly
+// stays frozen throughout (reg3's own `hold` does exactly its job), but
+// expected_store_data kept sampling the LIVE dtlb_store_data wire every
+// cycle regardless, which drifts to whatever's now transiently in reg2/
+// Forward.v for the NEXT (unrelated) instruction once the store has
+// already moved past EX -- a spurious failure, not a real RTL bug (caught
+// directly: tb_fence_flush_g7.v's first-ever write-allocate miss). Fixed
+// the same "distinguish fresh from repeat" way mem_stall_done_r itself
+// already does: only compare on the cycle memWrite_regem is FIRST seen,
+// not on every held-repeat cycle after it.
+reg store_already_checked_r;
 always @(posedge clk) begin
     // docs/adr/00NN-mmu-sv32.md (Phase F5): tracks dtlb_store_data, not
     // the raw expression -- reg3 now legitimately latches the frozen
@@ -1672,12 +1927,17 @@ always @(posedge clk) begin
     // (see dtlb_vaddr_r's own comment); this assertion must track the
     // same value reg3 actually receives, or it would spuriously fire.
     expected_store_data <= dtlb_store_data;
-    if (start && memWrite_regem && (readData2_regem !== expected_store_data))
-        begin
-            $display("ASSERTION FAILED @t=%0t: reg3 store-data mismatch: readData2_regem=%0d, expected (last cycle's forwarded readData2_final)=%0d",
-                      $time, readData2_regem, expected_store_data);
-            $finish;
-        end
+    if (~start || !memWrite_regem)
+        store_already_checked_r <= 1'b0;
+    else if (!store_already_checked_r) begin
+        store_already_checked_r <= 1'b1;
+        if (readData2_regem !== expected_store_data)
+            begin
+                $display("ASSERTION FAILED @t=%0t: reg3 store-data mismatch: readData2_regem=%0d, expected (last cycle's forwarded readData2_final)=%0d",
+                          $time, readData2_regem, expected_store_data);
+                $finish;
+            end
+    end
 end
 `endif
 
@@ -1701,9 +1961,9 @@ end
     wire [3:0] lsu_sel = (funct3_regem[1:0] == 2'b00) ? (4'b0001 << ALUOut_regem[1:0]) :  // byte
                           (funct3_regem[1:0] == 2'b01) ? (4'b0011 << ALUOut_regem[1:0]) :  // halfword
                                                           4'b1111;                          // word
-    wire lsu_ack;  // reserved for a future variable-latency-peripheral generalization --
-                    // see mem_stall's own comment below for why it is deliberately NOT
-                    // consumed here.
+    wire lsu_ack;  // docs/adr/0024-variable-latency-memory.md (Phase I2): now genuinely
+                    // consumed by mem_access_ready/mem_trigger's own CACHE_NONE branch below,
+                    // closing the gap this comment used to flag.
 
     // ==========================================================================
     // MMU translation (docs/adr/00NN-mmu-sv32.md, Phase F5). Wires Tlb.v/
@@ -1775,7 +2035,47 @@ end
     // were both found with), not reasoned out in advance. Fixed the same
     // way docs/adr/0016 fixed it: gate the whole stall condition on
     // !branch_taken, not just the specific path that motivated finding it.
-    wire itlb_miss = translate_enable && !itlb_hit && !(ptw_done_i && ptw_fault) && !branch_taken;
+    //
+    // docs/adr/0023-caches.md (Phase G3). A SECOND, related bug in this same
+    // gating, found by running CACHE_MODE=1 constrained-random programs
+    // under PIPELINE_PROFILE=1 (6-stage split-fetch) -- !branch_taken alone
+    // isn't sufficient there. reg1a.v (docs/adr/0018) relays pc_o one cycle
+    // behind by construction, EXCEPT for exactly one cycle immediately after
+    // a redirect, where it catches up to equal pc_o (the "one instruction
+    // already in flight" gap momentarily collapses to zero) -- that's the
+    // same cycle redirect_squash_extend_r squashes reg1's fetch to a nop
+    // regardless of what was actually fetched there. If a NEW pc_stall
+    // source (itlb_miss here, icache_miss below) asserts on that exact
+    // collapsed-gap cycle, PC.v and reg1a freeze TOGETHER at the now-equal
+    // value; when the stall later clears, reg1a's next relay redundantly
+    // re-samples pc_o's still-unchanged value one extra time, silently
+    // duplicating the fetch of the redirect target -- a new trigger for the
+    // exact "duplicate fetch" bug shape docs/adr/0018's own A3 step first
+    // found and fixed for the plain (non-stalled) redirect case. Since that
+    // cycle's fetch result is discarded unconditionally either way, there's
+    // nothing to stall for -- fixed by also gating on
+    // !redirect_squash_extend_r, mirroring the !branch_taken gate immediately
+    // above it structurally, not by touching reg1a/redirect_squash_extend_r
+    // themselves (this project's "an object entering a store must trust the
+    // store" convention elsewhere: the new stall source is what must respect
+    // an existing invariant, not the other way around).
+    wire itlb_miss = translate_enable && !itlb_hit && !(ptw_done_i && ptw_fault)
+        && !branch_taken && !redirect_squash_extend_r;
+    // docs/adr/0023-caches.md (Phase G3). Joins itlb_miss's own front-end-
+    // only interlock category (freeze PC/reg1 via pc_stall, bubble reg2 --
+    // see both instantiations below). Gated on (!translate_enable ||
+    // itlb_hit), not just itlb_hit alone: icache_hit/imem_phys_addr aren't
+    // meaningful until translation resolves (this core's fetch is PIPT),
+    // but when translation is disabled entirely (Bare mode/M-mode) the
+    // physical address is available immediately and the cache shouldn't
+    // wait on a TLB hit that will never come from a query it was never
+    // asked to perform. Gated on !branch_taken and !redirect_squash_extend_r
+    // for the same reasons itlb_miss just above is (both the original
+    // docs/adr/0016/0022 lesson and this phase's own collapsed-gap finding).
+    // Always 0 under CACHE_NONE (icache_hit tied to 1 above), bit-exact with
+    // pre-G3 behavior.
+    wire icache_miss = (!translate_enable || itlb_hit) && !icache_hit
+        && !branch_taken && !redirect_squash_extend_r;
     // ptw_abandoned_r (defined below, near ptw_done_i/ptw_done_d) excludes
     // a stale, already-abandoned walk's fault result -- see its own
     // comment for the real bug this closes.
@@ -1877,6 +2177,69 @@ end
     wire sfence_priv_violation = isSfenceVma_regde & (priv_mode_w == `PRIV_U);
     wire sfence_real = isSfenceVma_regde & !sfence_priv_violation;
 
+    // docs/adr/0023-caches.md (Phase G6). `fence` has no privilege
+    // restriction in the base ISA (unlike sfence.vma) -- isFence_regde
+    // alone is the real condition, no violation check needed.
+    //
+    // fence_pending_r is a LEVEL (not a one-shot pulse like sfence_real's
+    // own use): set the cycle fence first lands in reg3 (mirrors
+    // memRead_regem/memWrite_regem's own EX->reg3 latch timing), held for
+    // the flush's entire (possibly multi-cycle) duration, cleared only once
+    // DCache.v's own flush_done pulses. This is what mem_trigger (above)
+    // and DCache's own .flush_all input (below) both key off, the same
+    // "front the multi-cycle operation with a held level, let the unit's
+    // own internal guard prevent re-triggering" shape mem_stall's own
+    // generalization (G5) already established.
+    //
+    // Also gated on !ptw_busy: a walk started earlier (e.g. an itlb_miss
+    // for a LATER instruction, detected before fence itself even reached
+    // EX -- Ptw walking doesn't freeze EX/MEM/WB, only the front end) can
+    // still be busy by the time fence reaches reg3. DCache.v has no
+    // visibility into Ptw.v at all (a fully standalone module, F4/G4-style)
+    // -- gating the flush_all LEVEL itself here, externally, is what makes
+    // "wait your turn for the shared bus" apply to fence's flush the same
+    // way it already applies to Ptw.v vs. the plain LSU (ptw_start's own
+    // !lsu_cyc gate below). Bit-exact under CACHE_NONE regardless (see
+    // mem_trigger's own CACHE_NONE branch, which never references this).
+    wire fence_real = isFence_regde;
+    reg fence_pending_r;
+    always @(posedge clk) begin
+        if (~start) fence_pending_r <= 1'b0;
+        else if (dcache_flush_done) fence_pending_r <= 1'b0;
+        else if (CACHE_MODE != CACHE_NONE && fence_real && !reg2_hold) fence_pending_r <= 1'b1;
+    end
+    // docs/adr/0023-caches.md (Phase G7). A real bug found by running MMU+
+    // cache constrained-random programs: fence_pending_r (above) and
+    // DCache.v's own internal flush_active_r clear ONE CYCLE APART --
+    // flush_active_r drops the same edge flush_done_r first pulses, but
+    // fence_pending_r (driven combinationally into DCache's own flush_all
+    // input) doesn't drop until the FOLLOWING cycle (it samples
+    // dcache_flush_done, itself a registered one-cycle pulse). For that one
+    // in-between cycle, DCache's own S_IDLE re-evaluates
+    // `flush_all && !flush_active_r` with flush_all STILL 1 (fence_pending_r
+    // hasn't cleared yet) and flush_active_r ALREADY 0 (just cleared) --
+    // spuriously re-triggering a second, fully redundant ~256-line scan
+    // pass. Harmless on its own (nothing left dirty to write back), but it
+    // silently doubles the flush's real latency, and mem_stall/reg3 had
+    // ALREADY released by then (fence_pending_r's own one-cycle-late clear
+    // means the pipeline moves on before the spurious second pass
+    // finishes) -- the fixed simulation time budget run_random_tests.py
+    // computes per program doesn't know to wait for this unplanned extra
+    // ~256 cycles, so the post-halt memory dump can sample WHILE the
+    // spurious pass is still draining. Same "distinguish fresh from
+    // repeat" shape this project uses everywhere for this bug class
+    // (mem_stall_done_r, the docs/adr/0003 store-data assertion fix
+    // earlier this same phase): latch "a flush has already been started
+    // for this fence" the cycle DCache.v's own flush_busy first goes high,
+    // and gate flush_all on NOT having started one yet -- closes the
+    // one-cycle window regardless of exactly how fence_pending_r/
+    // flush_active_r end up interleaved.
+    reg fence_flush_started_r;
+    always @(posedge clk) begin
+        if (~start || !fence_pending_r) fence_flush_started_r <= 1'b0;
+        else if (dcache_flush_busy) fence_flush_started_r <= 1'b1;
+    end
+
     // -- Shared Ptw.v: exactly one instance, arbitrated between the two
     // requesters above. D-side always wins when both are pending (older
     // instruction, program-order priority) -- this only needs to be
@@ -1905,7 +2268,12 @@ end
     // of exactly when the walk itself is allowed to start.
     wire ptw_req_d = dtlb_miss;
     wire ptw_req_i = itlb_miss && !dtlb_miss;
-    wire ptw_start = (ptw_req_d || ptw_req_i) && !lsu_cyc;
+    // docs/adr/0023-caches.md (Phase G6): !dcache_flush_busy joins !lsu_cyc
+    // -- a retiring fence's own flush (no memRead_regem/memWrite_regem at
+    // all, so lsu_cyc alone wouldn't see it) can genuinely be using the
+    // shared bus too; tied 0 under CACHE_NONE, so this term is a no-op
+    // there (see the DCache instantiation block below).
+    wire ptw_start = (ptw_req_d || ptw_req_i) && !lsu_cyc && !dcache_flush_busy;
     // dtlb_vaddr (not raw ALUOut): if ptw_start is itself delayed past the
     // first dtlb_miss cycle (the !lsu_cyc gate below can do that), ALUOut
     // may have already drifted by the time the walk actually latches it --
@@ -1977,36 +2345,141 @@ end
     assign ptw_fill_perm_x = ptw_result_perm_x;
     assign ptw_fill_perm_u = ptw_result_perm_u;
 
-    // -- Bus mux: Ptw.v's own master port shares the LSU's existing single
-    // master port on WbDecoder, per the phase's own "a walk only ever
-    // happens while the pipeline is already stalled, so a plain mux
-    // suffices, no real arbiter needed" reasoning. m_WbDecoder's own
-    // instantiation below is wired to these instead of the raw lsu_*/
-    // ALUOut_regem/readData2_regem signals; m_data_i(readData)/
-    // m_ack(lsu_ack) stay shared/unchanged either way -- see Ptw.v's own
-    // .m_data_i/.m_ack connections above for why reusing the same wires
-    // for both potential "readers" of the response is safe (only one of
-    // Ptw or the real LSU is ever the active requester at a time).
-    wire wb_m_cyc  = ptw_busy ? ptw_m_cyc  : lsu_cyc;
-    wire wb_m_stb  = ptw_busy ? ptw_m_stb  : lsu_stb;
-    wire wb_m_we   = ptw_busy ? ptw_m_we   : lsu_we;
-    wire [XLEN-1:0] wb_m_addr   = ptw_busy ? ptw_m_addr   : ALUOut_regem;
-    wire [XLEN-1:0] wb_m_data_o = ptw_busy ? ptw_m_data_o : readData2_regem;
-    wire [3:0] wb_m_sel = ptw_busy ? ptw_m_sel : lsu_sel;
-    // A real bug found by running: RamWishboneAdapter.v's `funct3` port is
-    // a side-band tag (docs/adr/0020 D2 -- not part of the standard
-    // Wishbone signal set, needed because DataMemoryBRAM.v bakes load
-    // width/signedness into funct3 rather than a pure byte-enable mask).
-    // Left wired to the real LSU's own funct3_regem unconditionally, a
-    // Ptw.v word read during a walk was silently reinterpreted as whatever
-    // width/signedness the real LSU's last (unrelated, possibly stale-
-    // reset-value) funct3 happened to be -- observed directly: a real PTE
-    // word (0x401) came back as 0x1, its own low byte, sign-extension
-    // irrelevant since bit7 was already 0. Every PTE read is always a
-    // plain 4-byte-aligned full word (funct3=3'b010, lw's own encoding,
-    // the only width Ptw.v ever needs), muxed the same way every other
-    // master-side signal already is.
-    wire [2:0] wb_m_funct3 = ptw_busy ? 3'b010 : funct3_regem;
+    // docs/adr/0023-caches.md (Phase G6). DCache.v sits between the LSU's
+    // MEM-stage request and the shared bus -- CACHE_NONE: not instantiated
+    // at all (bit-exact, same "unselected generate branch costs nothing"
+    // convention every prior swappable parameter used); CACHE_WRITEBACK_
+    // SETASSOC: a real Wishbone-master-shaped fill/writeback engine (G4,
+    // standalone-verified) now wired live. req_addr is ALUOut_regem, NOT a
+    // separately-translated address -- ex_result (EX stage) already
+    // substitutes mem_paddr for a load/store (see its own comment, Phase
+    // F5), so ALUOut_regem is already the post-translation physical
+    // address by the time it reaches MEM -- PIPT, no extra translation
+    // needed here. req_wdata is readData2_regem, reg3's own already-
+    // forwarded/frozen store value (docs/adr/0003, Phase F5's own
+    // dtlb_store_data_r).
+    //
+    // dcache_req_read/write are gated on !ptw_busy: a walk started earlier
+    // for a completely unrelated (younger fetch's) itlb_miss can still be
+    // busy by the time THIS instruction reaches reg3 and wants its own
+    // cache access -- DCache.v has no visibility into Ptw.v at all, so
+    // masking its request here is what makes it wait its turn for the
+    // shared bus, the same "D-side always wins... this only needs to be
+    // correct at the moment Ptw.v is idle" discipline already governing
+    // itlb_miss vs. dtlb_miss above, now extended to a THIRD requester.
+    // mem_trigger (above) stays 1 throughout this masked wait (dcache_resp_
+    // ready can't pulse while its own request is masked), correctly
+    // holding reg3 until Ptw.v frees the bus.
+    wire dcache_resp_ready, dcache_flush_busy, dcache_flush_done;
+    wire [XLEN-1:0] dcache_resp_rdata;
+    wire dcache_m_cyc, dcache_m_stb, dcache_m_we;
+    wire [XLEN-1:0] dcache_m_addr, dcache_m_data_o;
+    wire [3:0] dcache_m_sel;
+    wire [2:0] dcache_m_funct3;
+    generate
+    if (CACHE_MODE == CACHE_NONE) begin : gen_dcache_none
+        assign dcache_resp_ready = 1'b0;
+        assign dcache_resp_rdata = {XLEN{1'b0}};
+        assign dcache_flush_busy = 1'b0;
+        assign dcache_flush_done = 1'b0;
+        assign dcache_m_cyc = 1'b0;
+        assign dcache_m_stb = 1'b0;
+        assign dcache_m_we = 1'b0;
+        assign dcache_m_addr = {XLEN{1'b0}};
+        assign dcache_m_data_o = {XLEN{1'b0}};
+        assign dcache_m_sel = 4'b0000;
+        assign dcache_m_funct3 = 3'b000;
+    end else begin : gen_dcache_writeback
+        DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
+                 .LINE_BYTES(DCACHE_LINE_BYTES)) m_DCache(
+            .clk(clk), .rst(start),
+            .req_read(memRead_regem && !ptw_busy),
+            .req_write(memWrite_regem && !ptw_busy),
+            .req_addr(ALUOut_regem), .req_wdata(readData2_regem), .req_funct3(funct3_regem),
+            .resp_rdata(dcache_resp_rdata), .resp_ready(dcache_resp_ready),
+            .flush_all(fence_pending_r && !ptw_busy && !fence_flush_started_r),
+            .flush_busy(dcache_flush_busy), .flush_done(dcache_flush_done),
+            .m_cyc(dcache_m_cyc), .m_stb(dcache_m_stb), .m_we(dcache_m_we),
+            .m_addr(dcache_m_addr), .m_data_o(dcache_m_data_o), .m_sel(dcache_m_sel),
+            .m_funct3(dcache_m_funct3),
+            .m_data_i(readData), .m_ack(lsu_ack)
+        );
+    end
+    endgenerate
+
+    // dcache_resp_rdata is combinational and TRANSIENT (valid for exactly
+    // the one cycle DCache.v's own state produces it -- a hit-read's single
+    // S_HIT_RD cycle, or a miss's own last fill cycle), but reg4 doesn't
+    // actually sample it until mem_stall_done_r's own one-cycle-LATER
+    // release (the same lag DataMemoryBRAM.v's persistent registered output
+    // already tolerates for free under CACHE_NONE, since that value simply
+    // doesn't change again before reg4 gets to it). Captured here into a
+    // real register so reg4 sees a stable value at the cycle it actually
+    // samples, mirroring how this file already captures other transient,
+    // done-pulse-only results (Ptw.v's own result_ppn) at their one valid
+    // cycle rather than assuming a later consumer can read them live.
+    reg [XLEN-1:0] dcache_rdata_captured_r;
+    always @(posedge clk) begin
+        if (dcache_resp_ready) dcache_rdata_captured_r <= dcache_resp_rdata;
+    end
+
+    // -- Bus mux: both Ptw.v's own master port and (now) DCache.v's own
+    // fill/writeback engine share the LSU's existing single master port on
+    // WbDecoder, per the phase's own "a walk/fill only ever happens while
+    // the pipeline is already stalled, so a plain mux suffices, no real
+    // arbiter needed" reasoning, now extended from two requesters to three.
+    // CACHE_NONE keeps the original two-way mux verbatim (dcache_m_cyc is
+    // tied 0 there, so its own arm is dead code, but the generate split
+    // below keeps the *meaning* honest -- under CACHE_WRITEBACK_SETASSOC,
+    // raw LSU signals no longer touch the real bus AT ALL, every real
+    // access is mediated by DCache.v; keeping a live-but-never-selected
+    // lsu_* arm there would be misleading, not just redundant).
+    wire wb_m_cyc, wb_m_stb, wb_m_we;
+    wire [XLEN-1:0] wb_m_addr, wb_m_data_o;
+    wire [3:0] wb_m_sel;
+    wire [2:0] wb_m_funct3;
+    generate
+    if (CACHE_MODE == CACHE_NONE) begin : gen_bus_mux_none
+        assign wb_m_cyc  = ptw_busy ? ptw_m_cyc  : lsu_cyc;
+        assign wb_m_stb  = ptw_busy ? ptw_m_stb  : lsu_stb;
+        assign wb_m_we   = ptw_busy ? ptw_m_we   : lsu_we;
+        assign wb_m_addr   = ptw_busy ? ptw_m_addr   : ALUOut_regem;
+        assign wb_m_data_o = ptw_busy ? ptw_m_data_o : readData2_regem;
+        assign wb_m_sel = ptw_busy ? ptw_m_sel : lsu_sel;
+        // A real bug found by running: RamWishboneAdapter.v's `funct3` port
+        // is a side-band tag (docs/adr/0020 D2 -- not part of the standard
+        // Wishbone signal set, needed because DataMemoryBRAM.v bakes load
+        // width/signedness into funct3 rather than a pure byte-enable
+        // mask). Left wired to the real LSU's own funct3_regem
+        // unconditionally, a Ptw.v word read during a walk was silently
+        // reinterpreted as whatever width/signedness the real LSU's last
+        // (unrelated, possibly stale-reset-value) funct3 happened to be --
+        // observed directly: a real PTE word (0x401) came back as 0x1, its
+        // own low byte, sign-extension irrelevant since bit7 was already 0.
+        // Every PTE read is always a plain 4-byte-aligned full word
+        // (funct3=3'b010, lw's own encoding, the only width Ptw.v ever
+        // needs), muxed the same way every other master-side signal
+        // already is.
+        assign wb_m_funct3 = ptw_busy ? 3'b010 : funct3_regem;
+    end else begin : gen_bus_mux_cached
+        // docs/adr/0023-caches.md (Phase G6). DCache.v's own fill/writeback
+        // traffic takes priority (it's the newest, most granular requester
+        // -- a single line-fill/writeback transaction, vs. Ptw.v's own
+        // multi-transaction walk); the two are mutually exclusive by
+        // construction (ptw_start's own !dcache_flush_busy/!lsu_cyc gates,
+        // and dcache_req_read/write's own !ptw_busy gate above, prevent
+        // either from starting while the other is genuinely using the
+        // bus). No raw lsu_* arm here at all -- see this block's own header
+        // comment for why keeping one would be misleading under this mode.
+        assign wb_m_cyc  = dcache_m_cyc ? 1'b1            : (ptw_busy ? ptw_m_cyc  : 1'b0);
+        assign wb_m_stb  = dcache_m_cyc ? dcache_m_stb    : (ptw_busy ? ptw_m_stb  : 1'b0);
+        assign wb_m_we   = dcache_m_cyc ? dcache_m_we     : (ptw_busy ? ptw_m_we   : 1'b0);
+        assign wb_m_addr   = dcache_m_cyc ? dcache_m_addr   : (ptw_busy ? ptw_m_addr   : {XLEN{1'b0}});
+        assign wb_m_data_o = dcache_m_cyc ? dcache_m_data_o : (ptw_busy ? ptw_m_data_o : {XLEN{1'b0}});
+        assign wb_m_sel = dcache_m_cyc ? dcache_m_sel : (ptw_busy ? ptw_m_sel : 4'b0000);
+        assign wb_m_funct3 = dcache_m_cyc ? dcache_m_funct3 : (ptw_busy ? 3'b010 : 3'b000);
+    end
+    endgenerate
 
     // docs/adr/0020-soc-integration.md (Phase D8). NUM_SLAVES=3: slave 0
     // is RAM, slave 1 is Uart.v, slave 2 is Timer.v -- indices/BASE/SIZE
@@ -2032,6 +2505,60 @@ end
         .s_data_i(wb_s_data_i), .s_ack(wb_s_ack)
     );
 
+    // docs/adr/0024-variable-latency-memory.md (Phase I2). The request
+    // reaches RamWishboneAdapter UNDELAYED -- its own already-correct ack
+    // generation runs at its natural timing, same as every phase before
+    // this one. What gets delayed is EXPOSING that result to the real
+    // master by MEM_LATENCY_D cycles. RamWishboneAdapter's own instance
+    // name (dut.m_DataMemory) stays outside any generate block on purpose
+    // -- check_tasks.vh and every dump template's memory-dump loop depend
+    // on that exact hierarchical path; nesting it per-branch would rename
+    // it and break dozens of existing tests.
+    //
+    // Two real bugs found by running ruled out simpler designs:
+    // 1. Delaying the ack/data pair alone (a plain N-deep shift register)
+    //    breaks Ptw.v: it holds m_stb continuously across TWO separate,
+    //    different-address reads (level1 then level0) without ever
+    //    dropping it between them, and RamWishboneAdapter's own ack is a
+    //    LEVEL tied to however long stb stays asserted -- once a delayed
+    //    ack makes the real master wait longer, that level, echoed through
+    //    a plain shift register, produces a stale tail from the FIRST
+    //    read bleeding into where the SECOND read's real ack belongs.
+    //    Observed directly: a real page fault, RTL reading the first
+    //    level's stale PDE where the second level's real PTE should have
+    //    been.
+    // 2. Delaying the REQUEST into RamWishboneAdapter instead (time-shift
+    //    the whole cyc/stb/addr waveform) has the identical problem one
+    //    level removed: the real master's own stb is ALSO held for the
+    //    entire round trip now (however long that takes), so replaying
+    //    that whole held duration through the delay still produces
+    //    multiple acks for what both DCache.v and Ptw.v treat as one
+    //    logical, m_ack-gated request (confirmed by reading DCache.v's own
+    //    S_FILL/S_WB: `if (m_ack) ... else fill_word_r <= fill_word_r+1`
+    //    -- it does NOT free-run one word per cycle, it waits for m_ack
+    //    exactly like Ptw.v does between its two levels).
+    //
+    // The actual distinguishing signal between "still the same outstanding
+    // request" and "a genuinely new one" is neither ack nor stb -- both
+    // DCache.v and Ptw.v hold cyc/stb continuously across sub-requests and
+    // only change ADDRESS when starting a new one. So: track the (addr, we)
+    // of whatever request is currently being serviced; a live cyc&&stb
+    // whose (addr, we) differs from that (or arrives with nothing currently
+    // tracked) is a genuinely new request -- latch it, capture the FIRST
+    // real ack/data RamWishboneAdapter produces for it (ram_ack_raw can
+    // itself still be a multi-cycle level while the real master waits;
+    // captured_this_req_r is the same "distinguish fresh from repeat"
+    // one-shot-per-occupant discipline this project uses everywhere --
+    // mem_stall_done_r, the docs/adr/0003 store-data assertion, DCache.v's
+    // own served_addr_r), and delay EXPOSING that capture to the real
+    // master by MEM_LATENCY_D cycles via MemoryLatencyModel's own
+    // start/busy/done contract, retriggered by the same new-request pulse.
+    // MEM_LATENCY_D==0: the mux below selects the live ack/data directly,
+    // bit-exact with every phase before this one. UART/Timer slaves are
+    // untouched -- this models memory latency specifically, not peripheral
+    // latency.
+    wire [XLEN-1:0] ram_data_raw;
+    wire            ram_ack_raw;
     RamWishboneAdapter #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE)) m_DataMemory(
         .clk(clk), .rst(start),
         .s_cyc(wb_s_cyc[0]), .s_stb(wb_s_stb[0]), .s_we(wb_s_we),
@@ -2040,8 +2567,52 @@ end
         // fixed word-width tag during a Ptw.v walk -- see the MMU
         // translation block above.
         .funct3(wb_m_funct3),
-        .s_data_i(wb_s_data_i[0*XLEN +: XLEN]), .s_ack(wb_s_ack[0])
+        .s_data_i(ram_data_raw), .s_ack(ram_ack_raw)
     );
+
+    generate
+    if (MEM_LATENCY_D == 0) begin : gen_dmem_latency_none
+        assign wb_s_data_i[0*XLEN +: XLEN] = ram_data_raw;
+        assign wb_s_ack[0] = ram_ack_raw;
+    end else begin : gen_dmem_latency_added
+        reg            req_active_r;
+        reg [XLEN-1:0] req_addr_r;
+        reg            req_we_r;
+        wire is_new_request = wb_s_cyc[0] && wb_s_stb[0] &&
+            (!req_active_r || wb_s_addr != req_addr_r || wb_s_we != req_we_r);
+
+        wire delay_busy, delay_done;
+        MemoryLatencyModel #(.LATENCY(MEM_LATENCY_D)) m_DMemLatency(
+            .clk(clk), .rst(start),
+            .start(is_new_request),
+            .busy(delay_busy),
+            .done(delay_done)
+        );
+
+        always @(posedge clk) begin
+            if (~start) req_active_r <= 1'b0;
+            else if (is_new_request) begin
+                req_active_r <= 1'b1;
+                req_addr_r   <= wb_s_addr;
+                req_we_r     <= wb_s_we;
+            end
+            else if (delay_done) req_active_r <= 1'b0;
+        end
+
+        reg            captured_this_req_r;
+        reg [XLEN-1:0] captured_data_r;
+        always @(posedge clk) begin
+            if (~start || is_new_request) captured_this_req_r <= 1'b0;
+            else if (ram_ack_raw && !captured_this_req_r) begin
+                captured_this_req_r <= 1'b1;
+                captured_data_r     <= ram_data_raw;
+            end
+        end
+
+        assign wb_s_data_i[0*XLEN +: XLEN] = captured_data_r;
+        assign wb_s_ack[0] = delay_done;
+    end
+    endgenerate
 
     wire uart_rx_irq;  // docs/adr/0020 Phase D8: the PLIC-lite's sole external source -> mip.MEIP
     Uart #(.CLKS_PER_BIT(UART_CLKS_PER_BIT)) m_Uart(
@@ -2079,7 +2650,13 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
     .fRegWrite_regem(fRegWrite_regem),
-    .readData(readData),
+    // docs/adr/0023-caches.md (Phase G6): under CACHE_WRITEBACK_SETASSOC,
+    // the architectural WB-stage value comes from DCache.v's own captured
+    // response (dcache_rdata_captured_r, defined in the MEM section above)
+    // instead of the raw bus response -- see that register's own comment
+    // for why a captured value, not DCache's live/transient resp_rdata, is
+    // what reg4 must sample here.
+    .readData((CACHE_MODE == CACHE_NONE) ? readData : dcache_rdata_captured_r),
     .ALUOut_regem(ALUOut_regem),
     .write_to_Reg_regem(write_to_Reg_regem),
     .jump_regem(jump_regem),

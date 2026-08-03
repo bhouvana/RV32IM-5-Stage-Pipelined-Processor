@@ -16,5 +16,6 @@ addi  x9, x0, 222          # 16: skipped
 
 handler:
 addi x10, x0, 77           # 20: proves the trap handler ran
+fence
 halt:
 jal x0, halt                # 24: spin

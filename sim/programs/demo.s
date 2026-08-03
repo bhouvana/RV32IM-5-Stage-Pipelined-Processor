@@ -15,6 +15,7 @@ addi x8, x0, 888      # poison (squashed)
 target:
 addi x8, x0, 42
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

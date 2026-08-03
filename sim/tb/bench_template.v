@@ -36,18 +36,24 @@
 `include "Ptw.v"
 `include "Bht.v"
 `include "Btb.v"
+`include "ICache.v"
+`include "DCache.v"
+`include "MemoryLatencyModel.v"
 
 // Template for sim/tools/bench_runner.py (docs/ROADMAP.md Phase 10).
 // __INIT_FILE__/__MAX_TIME__/__OUT_FILE__/__MEM_SIZE__/__HAZARD_STRATEGY__/
-// __PIPELINE_PROFILE__/__BRANCH_PREDICTOR__ substituted per run, same idiom
-// dump_regs_template.v (docs/ROADMAP.md V-4) already established.
-// __HAZARD_STRATEGY__ (docs/adr/0016-swappable-hazard-strategy.md) is what
-// makes this runner double as the "compare hazard strategies" tool
-// docs/ROADMAP.md Phase 6 named as a research-platform goal;
-// __PIPELINE_PROFILE__ (docs/adr/0018-variable-pipeline-depth.md, Phase A6)
-// does the same for "compare pipeline depths"; __BRANCH_PREDICTOR__
-// (docs/adr/0021-branch-prediction.md, Phase E5) does the same for
-// "compare branch predictors".
+// __PIPELINE_PROFILE__/__BRANCH_PREDICTOR__/__CACHE_MODE__/__MEM_LATENCY_I__/
+// __MEM_LATENCY_D__ substituted per run, same idiom dump_regs_template.v
+// (docs/ROADMAP.md V-4) already established. __HAZARD_STRATEGY__ (docs/adr/
+// 0016-swappable-hazard-strategy.md) is what makes this runner double as the
+// "compare hazard strategies" tool docs/ROADMAP.md Phase 6 named as a
+// research-platform goal; __PIPELINE_PROFILE__ (docs/adr/0018-variable-
+// pipeline-depth.md, Phase A6) does the same for "compare pipeline depths";
+// __BRANCH_PREDICTOR__ (docs/adr/0021-branch-prediction.md, Phase E5) does
+// the same for "compare branch predictors"; __CACHE_MODE__ (docs/adr/0023-
+// caches.md, Phase G8) does the same for "compare cache configurations";
+// __MEM_LATENCY_I__/__MEM_LATENCY_D__ (docs/adr/0024-variable-latency-
+// memory.md, Phase I6) does the same for "compare memory latencies".
 //
 // Detects "program finished" generically, without needing to know any
 // program's specific halt-label address: every benchmark (like every other
@@ -65,7 +71,7 @@ module bench_run;
     integer cycle_count;
     reg done;
 
-    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__), .HAZARD_STRATEGY(__HAZARD_STRATEGY__), .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
+    PIPELINED #(.INIT_FILE("__INIT_FILE__"), .MEM_SIZE_BYTES(__MEM_SIZE__), .HAZARD_STRATEGY(__HAZARD_STRATEGY__), .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .CACHE_MODE(__CACHE_MODE__), .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__)) dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;
 
@@ -73,7 +79,51 @@ module bench_run;
         start = 0;
         cycle_count = 0;
         done = 0;
+        icache_miss_count = 0;
+        icache_access_count = 0;
+        dcache_miss_count = 0;
+        icache_miss_prev_r = 1'b0;
+        pc_o_prev_r = 32'hFFFFFFFF;   // sentinel, never a real reset PC -- guarantees the first fetch counts
+        mem_stall_run_r = 2'd0;
         #10 start = 1;
+    end
+
+    // docs/adr/0023-caches.md (Phase G8). Hit/miss counters, tapped purely
+    // from the testbench side (no new RTL) via the same hierarchical-dot
+    // pattern this file already uses for dut.unconditional_redirect --
+    // matches --compare-cache's own need for "is this cache mode doing
+    // anything real" evidence, not a claim of precise hardware performance
+    // counters (docs/ROADMAP_VISION.md's own separate, real HPC-CSR item).
+    // I$: icache_miss_count is a rising-edge count of dut.icache_miss
+    // (always defined and tied 0 under CACHE_NONE, so naturally 0 there);
+    // icache_access_count counts every cycle pc_o changes (a fresh fetch
+    // address), a simple, honest proxy for "how many distinct fetches
+    // happened" without needing a second RTL tap. D$: dcache_miss_count
+    // distinguishes a genuine miss from a routine 1-cycle hit-read stall
+    // by run-length -- mem_stall lasts exactly one cycle for a hit (state=
+    // S_HIT_RD) but LINE_WORDS+ cycles for a real miss (S_WB/S_FILL); a
+    // run reaching its SECOND consecutive cycle is what a plain 1-cycle
+    // hit-read stall can never do, so that's the miss signal, counted once
+    // per run (not once per cycle of the run).
+    integer icache_miss_count;
+    integer icache_access_count;
+    integer dcache_miss_count;
+    reg icache_miss_prev_r;
+    reg [31:0] pc_o_prev_r;
+    reg [1:0] mem_stall_run_r;
+    always @(posedge clk) begin
+        if (start) begin
+            if (dut.icache_miss && !icache_miss_prev_r) icache_miss_count = icache_miss_count + 1;
+            icache_miss_prev_r <= dut.icache_miss;
+            if (dut.pc_o !== pc_o_prev_r) icache_access_count = icache_access_count + 1;
+            pc_o_prev_r <= dut.pc_o;
+
+            if (dut.mem_stall && (dut.memRead_regem || dut.memWrite_regem)) begin
+                if (mem_stall_run_r == 2'd1) dcache_miss_count = dcache_miss_count + 1;
+                if (mem_stall_run_r != 2'd2) mem_stall_run_r <= mem_stall_run_r + 1'b1;
+            end
+            else mem_stall_run_r <= 2'd0;
+        end
     end
 
     always @(posedge clk) begin
@@ -83,6 +133,9 @@ module bench_run;
                 done = 1;
                 fd = $fopen("__OUT_FILE__", "w");
                 $fdisplay(fd, "%0d", cycle_count);
+                $fdisplay(fd, "%0d", icache_miss_count);
+                $fdisplay(fd, "%0d", icache_access_count);
+                $fdisplay(fd, "%0d", dcache_miss_count);
                 $fclose(fd);
                 $finish;
             end

@@ -25,5 +25,6 @@ m_handler2:
 csrrs x21, mcause, x0                   # 48: x21 = mcause (expect 2 = MCAUSE_ILLEGAL_INSTRUCTION)
 csrrs x22, mstatus, x0                    # 52: x22 = mstatus (expect MPP=S=01 at bits[12:11] -> 0x800)
 
+fence
 halt:
 jal x0, halt                                # 56

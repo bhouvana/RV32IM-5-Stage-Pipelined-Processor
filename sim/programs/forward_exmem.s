@@ -9,6 +9,7 @@ add  x1, x1, x1   # 4+4=8
 add  x1, x1, x1   # 8+8=16
 add  x1, x1, x1   # 16+16=32
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

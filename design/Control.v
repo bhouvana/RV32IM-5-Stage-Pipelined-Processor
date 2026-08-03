@@ -42,6 +42,10 @@ module Control (
     // (isSfenceVma, flushing Tlb.v).
     output reg isSret,
     output reg isSfenceVma,
+    // docs/adr/0023-caches.md (Phase G1). No live behavior yet -- decodes
+    // correctly, riscvpipeline.v doesn't consume it until G6 (real
+    // cache-flush semantics).
+    output reg isFence,
     output reg illegalOpcode, // opcode itself unrecognized -- see riscvpipeline.v for the
                                // other exception source (ALUCtl==ILLEGAL, a recognized
                                // opcode with an unrecognized funct7/funct3)
@@ -74,6 +78,7 @@ always@(*)begin
     isMret    = 0;
     isSret    = 0;
     isSfenceVma = 0;
+    isFence   = 0;
     illegalOpcode = 0;
     fRegWrite = 0;
 
@@ -236,6 +241,18 @@ case(opcode)
     `OPCODE_MADD, `OPCODE_MSUB, `OPCODE_NMSUB, `OPCODE_NMADD:  // fmadd.s/fmsub.s/fnmsub.s/fnmadd.s
     begin
         fRegWrite = 1;
+    end
+
+    // docs/adr/0023-caches.md (Phase G1). Only funct3=000 (the real `fence`
+    // encoding) is recognized; every other MISC-MEM funct3 (e.g. fence.i,
+    // Zifencei, unimplemented) falls to illegalOpcode below, same as any
+    // other unrecognized encoding.
+    `OPCODE_MISC_MEM:
+    begin
+        if (funt3 == 3'b000)
+            isFence = 1;
+        else
+            illegalOpcode = 1;
     end
 
     default:

@@ -25,5 +25,6 @@ csrrs x10, mscratch, x0               # 28: PRIVILEGE VIOLATION (U attempting an
 jal x0, halt                             # 32: unreachable if the trap fires correctly
 m_handler:
 csrrs x11, mcause, x0                      # 36: expect 2 (MCAUSE_ILLEGAL_INSTRUCTION)
+fence
 halt:
 jal x0, halt                                 # 40

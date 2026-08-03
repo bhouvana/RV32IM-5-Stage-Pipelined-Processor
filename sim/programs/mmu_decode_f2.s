@@ -20,5 +20,6 @@ csrrw x0, 0x141, x9       # 24: sepc <- 36 (a known, safe sret landing point)
 sret                       # 28: real F3 behavior: redirect to sepc (36), priv_mode <- SPP (U, reset default)
 addi x10, x10, 1            # 32: UNREACHABLE if sret correctly redirected
 
+fence
 halt:
 jal x0, halt           # 36

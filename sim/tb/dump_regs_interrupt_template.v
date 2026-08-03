@@ -36,6 +36,9 @@
 `include "Ptw.v"
 `include "Bht.v"
 `include "Btb.v"
+`include "ICache.v"
+`include "DCache.v"
+`include "MemoryLatencyModel.v"
 
 // docs/adr/0020-soc-integration.md (Phase D10). Interrupt-mode sibling of
 // dump_regs_template.v -- used only by sim/tools/run_random_tests.py's
@@ -65,7 +68,9 @@ module dump_regs_interrupt;
 
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .MEM_SIZE_BYTES(__MEM_SIZE__),
-                .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .UART_CLKS_PER_BIT(4))
+                .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .CACHE_MODE(__CACHE_MODE__),
+                .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
+                .UART_CLKS_PER_BIT(4))
         dut(.clk(clk), .start(start), .uart_rx(uart_rx), .uart_tx(uart_tx));
 
     always #5 clk = ~clk;

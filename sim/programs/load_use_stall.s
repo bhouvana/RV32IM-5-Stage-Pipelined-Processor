@@ -13,6 +13,7 @@ nop                 # let the setup store fully drain before the timed part begi
 lw   x7, 0(x5)      # load-use hazard starts here
 add  x8, x7, x7     # must stall one cycle to get the correct (post-load) x7
 
+fence
 halt:
 jal x0, halt   # spin here forever instead of running off the end of the
                # program into instruction memory's zero-filled remainder --

@@ -34,6 +34,7 @@
     isMret_regde <= 0; \
     isSret_regde <= 0; \
     isSfenceVma_regde <= 0; \
+    isFence_regde <= 0; \
     illegalOpcode_regde <= 0;
 
 `define ZERO_DECODE_CONTEXT \
@@ -144,6 +145,7 @@ module reg2 #(
     input isMret,
     input isSret,        // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
     input isSfenceVma,    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
+    input isFence,        // docs/adr/0023-caches.md (Phase G1) -- no live consumer yet (G6)
     input illegalOpcode,
 
     output reg branch_regde,
@@ -181,6 +183,7 @@ module reg2 #(
     output reg isMret_regde,
     output reg isSret_regde,
     output reg isSfenceVma_regde,
+    output reg isFence_regde,
     output reg illegalOpcode_regde
 
 );
@@ -252,6 +255,7 @@ begin
         isMret_regde <= isMret;
         isSret_regde <= isSret;
         isSfenceVma_regde <= isSfenceVma;
+        isFence_regde <= isFence;
         illegalOpcode_regde <= illegalOpcode;
         `PASS_DECODE_CONTEXT
         inst_regde <= inst_regfd;
