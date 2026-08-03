@@ -140,7 +140,17 @@ module PIPELINED #(
     // instantiate its own external UART peer simply leaves rx idle-high
     // (matching a real disconnected serial line) and ignores tx.
     output uart_tx,
-    input  uart_rx
+    input  uart_rx,
+
+    // docs/adr/0027-formal-verification.md (Phase L4). Formal-observability
+    // taps only, same "unconnected changes nothing" shape as debug_x10
+    // above -- the whole-pipeline formal property (a committing register
+    // write is always from a real, non-squashed instruction) needs to
+    // observe these two WB-stage signals from outside this module, and
+    // Yosys's read_verilog can't resolve a hierarchical peek the way
+    // iverilog's simulator can (confirmed by running in Phase L1/L3).
+    output debug_regwrite_commit,  // regWrite_regwb
+    output debug_valid_commit      // valid_regwb
 );
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
@@ -1716,7 +1726,21 @@ endgenerate
     // CSR.v's own `trap_taken` already relies on for exactly-once firing.
     .stall_cycle_pulse(pc_stall),
     .interrupt_pulse(interrupt_taken),
-    .exception_pulse(exception_taken & !reg2_hold)
+    .exception_pulse(exception_taken & !reg2_hold),
+    // docs/adr/0026-performance-profiler.md (Phase K1). The 9 raw per-cause
+    // wires whose OR already forms `pc_stall` above (riscvpipeline.v:1365),
+    // exposed individually so the profiler can select one onto a counter.
+    // No new detection logic -- these wires already exist for `pc_stall`'s
+    // own sake.
+    .stall_hazard_pulse(stall),
+    .stall_div_pulse(div_stall),
+    .stall_mem_pulse(mem_stall),
+    .stall_fp_pulse(fp_stall),
+    .stall_float_lu_pulse(float_load_use_hazard),
+    .stall_itlb_pulse(itlb_miss),
+    .stall_dtlb_pulse(dtlb_miss),
+    .stall_icache_pulse(icache_miss),
+    .stall_imem_wait_pulse(imem_wait)
     );
     wire mstatus_mie, mie_mtie, mie_meie;
     wire [1:0] priv_mode_w;
@@ -2722,6 +2746,7 @@ end
 wire memtoReg_regwb;
 wire regWrite_regwb;
 wire fRegWrite_regwb;
+wire valid_regwb;  // docs/adr/0027-formal-verification.md (Phase L2)
 wire [XLEN-1:0] readData_regwb;
 wire [XLEN-1:0] ALUOut_regwb;
 wire [XLEN-1:0] readData_regem;
@@ -2737,6 +2762,7 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
     .fRegWrite_regem(fRegWrite_regem),
+    .valid_regem(valid_regem),  // docs/adr/0027-formal-verification.md (Phase L2)
     // docs/adr/0023-caches.md (Phase G6): under CACHE_WRITEBACK_SETASSOC,
     // the architectural WB-stage value comes from DCache.v's own captured
     // response (dcache_rdata_captured_r, defined in the MEM section above)
@@ -2761,6 +2787,7 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .memtoReg_regwb(memtoReg_regwb),
     .regWrite_regwb(regWrite_regwb),
     .fRegWrite_regwb(fRegWrite_regwb),
+    .valid_regwb(valid_regwb),
     .readData_regwb(readData_regwb),
     .ALUOut_regwb(ALUOut_regwb),
     .write_to_Reg_regwb(write_to_Reg_regwb),
@@ -2788,6 +2815,8 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     );
 
     assign debug_x10 = m_Register.regs[10];
+    assign debug_regwrite_commit = regWrite_regwb;
+    assign debug_valid_commit = valid_regwb;
 
 endmodule
 

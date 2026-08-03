@@ -1,0 +1,14 @@
+[options]
+mode prove
+depth 5
+
+[engines]
+smtbmc boolector
+
+[script]
+read_verilog -sv -I ../../design register_formal.sv
+prep -top register_formal
+
+[files]
+register_formal.sv
+../../design/Register.v

@@ -1,0 +1,14 @@
+[options]
+mode prove
+depth 2
+
+[engines]
+smtbmc boolector
+
+[script]
+read_verilog -sv -I ../../design forward_formal.sv
+prep -top forward_formal
+
+[files]
+forward_formal.sv
+../../design/Forward.v

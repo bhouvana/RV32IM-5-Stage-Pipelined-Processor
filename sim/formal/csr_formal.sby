@@ -1,0 +1,15 @@
+[options]
+mode prove
+depth 4
+
+[engines]
+smtbmc boolector
+
+[script]
+read_verilog -sv -I ../../design csr_formal.sv
+prep -top csr_formal
+
+[files]
+csr_formal.sv
+../../design/CSR.v
+../../design/riscv_defs.vh

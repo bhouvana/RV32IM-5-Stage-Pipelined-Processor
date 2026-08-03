@@ -1,0 +1,63 @@
+[options]
+mode bmc
+depth 15
+
+[engines]
+smtbmc boolector
+
+[script]
+read_verilog -sv -I ../../design pipeline_formal.sv
+hierarchy -top pipeline_formal
+blackbox FRegister FForward
+blackbox WbDecoder RamWishboneAdapter Uart Timer
+blackbox Tlb Ptw
+blackbox Bht Btb ICache DCache MemoryLatencyModel
+prep -top pipeline_formal
+
+[files]
+pipeline_formal.sv
+dummy.mem
+sim/programs/arith.mem dummy.mem
+../../design/riscvpipeline.v
+../../design/PC.v
+../../design/Adder.v
+../../design/ALU.v
+../../design/ALUCtrl.v
+../../design/Control.v
+../../design/DataMemoryBRAM.v
+../../design/ImmGen.v
+../../design/InstructionMemory.v
+../../design/Mux2to1.v
+../../design/Mux4to1.v
+../../design/MuxN.v
+../../design/FRegister.v
+FALU.v stubs/FALU.v
+FDivider.v stubs/FDivider.v
+FSqrt.v stubs/FSqrt.v
+FMADDUnit.v stubs/FMADDUnit.v
+../../design/Register.v
+../../design/ShiftLeftOne.v
+../../design/reg1.v
+../../design/reg1a.v
+../../design/reg2.v
+../../design/reg3.v
+../../design/reg4.v
+../../design/Hazard.v
+../../design/HazardNoForward.v
+../../design/Forward.v
+../../design/FForward.v
+../../design/Divider.v
+../../design/CSR.v
+../../design/WbDecoder.v
+../../design/RamWishboneAdapter.v
+../../design/Uart.v
+../../design/Timer.v
+../../design/Tlb.v
+../../design/Ptw.v
+../../design/Bht.v
+../../design/Btb.v
+../../design/ICache.v
+../../design/DCache.v
+../../design/MemoryLatencyModel.v
+../../design/riscv_defs.vh
+../../design/wb_defs.vh

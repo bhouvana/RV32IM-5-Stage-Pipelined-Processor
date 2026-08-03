@@ -104,6 +104,22 @@ module CSR #(
     output mie_mtie,     // mie's machine-timer-interrupt enable bit
     output mie_meie,     // mie's machine-external-interrupt enable bit
 
+    // docs/adr/0027-formal-verification.md (Phase L3). Formal-
+    // observability outputs only -- no live consumer in riscvpipeline.v.
+    // Mirrors mstatus_mie's own exact idiom (a single bit of `mstatus`
+    // exposed as its own named output) for the remaining bits a formal
+    // property needs to observe. Added because Yosys's `read_verilog`
+    // can't resolve a hierarchical `dut.mstatus`-style peek from outside
+    // this module (confirmed by running -- it silently becomes an
+    // implicitly-declared, driverless stand-in signal, unlike iverilog's
+    // simulator, which resolves this hierarchy path natively); an
+    // ordinary port is the portable way to expose it to both toolchains.
+    output mstatus_mpie,        // mstatus[7]
+    output mstatus_sie,         // mstatus[1]
+    output mstatus_spie,        // mstatus[5]
+    output mstatus_spp,         // mstatus[8]
+    output [1:0] mstatus_mpp,   // mstatus[12:11]
+
     output [XLEN-1:0] mtvec_val,  // trap target for the redirect mux
     output [XLEN-1:0] mepc_val,   // mret target for the redirect mux
 
@@ -146,7 +162,28 @@ module CSR #(
     input dcache_miss_pulse,
     input stall_cycle_pulse,
     input interrupt_pulse,
-    input exception_pulse
+    input exception_pulse,
+
+    // Phase K (docs/adr/0026-performance-profiler.md). Nine more countable
+    // events (indices 10-18) -- the same raw per-cause wires whose OR
+    // already forms `stall_cycle_pulse`/`pc_stall` above, exposed
+    // individually so a program can select one of them onto a counter
+    // instead of only ever seeing the aggregate. Each is a LEVEL (true for
+    // every cycle that cause is part of the active stall), matching
+    // `stall_cycle_pulse`'s own "count cycles, not occurrences" shape --
+    // NOT the edge-detected occurrence-pulses events 3/4 already use for
+    // I$ hit/miss (icache_hit_pulse/icache_miss_pulse), which is a
+    // deliberately different question ("how many misses happened" vs.
+    // "how many cycles did a miss cost").
+    input stall_hazard_pulse,      // riscvpipeline.v's own `stall` (Hazard.v/HazardNoForward.v)
+    input stall_div_pulse,         // div_stall
+    input stall_mem_pulse,         // mem_stall
+    input stall_fp_pulse,          // fp_stall
+    input stall_float_lu_pulse,    // float_load_use_hazard
+    input stall_itlb_pulse,        // itlb_miss
+    input stall_dtlb_pulse,        // dtlb_miss
+    input stall_icache_pulse,      // icache_miss
+    input stall_imem_wait_pulse    // imem_wait
 );
 
     reg [XLEN-1:0] mstatus;  // bit3(MIE)/bit7(MPIE) real since docs/adr/0011; bit1(SIE)/bit5(SPIE)/
@@ -196,18 +233,24 @@ module CSR #(
     // trap-entry coupling), unlike every other CSR in this file, which is
     // why this is the one place CSR.v reaches for an array/loop instead of
     // its usual all-named-registers style (mirrors Tlb.v's own indexed-
-    // array precedent). `mhpmevent[i]` holds a 4-bit event index (0=off,
-    // 1-9 select one of `hpm_event_pulse`'s entries below); reset default
-    // is `i+1` so a fresh boot already has all 9 events observable
-    // 1:1 with zero software configuration, while staying fully
-    // reconfigurable per the real spec's own mhpmevent semantics.
+    // array precedent). `mhpmevent[i]` holds a 5-bit event index (0=off,
+    // 1-9 this file's original hardware events, 10-18 Phase K's per-cause
+    // stall breakdown -- widened from 4 to 5 bits since 18 no longer fits
+    // 4 bits); reset default is `i+1` so a fresh boot already has all 9
+    // original events observable 1:1 with zero software configuration,
+    // while staying fully reconfigurable per the real spec's own mhpmevent
+    // semantics (a program reprograms mhpmeventN to 10-18 to observe a
+    // stall cause instead).
     reg [XLEN-1:0] mcycle_lo, mcycle_hi;
     reg [XLEN-1:0] minstret_lo, minstret_hi;
     reg [XLEN-1:0] mcountinhibit;
     reg [XLEN-1:0] mhpmcounter_lo [0:`NUM_HPM_COUNTERS-1];
     reg [XLEN-1:0] mhpmcounter_hi [0:`NUM_HPM_COUNTERS-1];
-    reg [3:0]      mhpmevent      [0:`NUM_HPM_COUNTERS-1];
+    reg [4:0]      mhpmevent      [0:`NUM_HPM_COUNTERS-1];
     integer hpm_i;
+
+    // Phase K: highest valid event index (9 original + 9 stall-cause).
+    localparam NUM_HPM_EVENTS = 18;
 
     localparam [XLEN-1:0] MCOUNTINHIBIT_MASK = {XLEN{1'b0}} |
         12'hFFD;  // bits 0,2-11 real (CY, IR, HPM3-11); bit1 and bits12+ hardwired 0
@@ -217,7 +260,7 @@ module CSR #(
     // Every entry here is already the exactly-once-per-real-event pulse
     // riscvpipeline.v's own comments document -- CSR.v does no further
     // gating, just selects and counts.
-    wire [`NUM_HPM_COUNTERS:0] hpm_event_pulse;
+    wire [NUM_HPM_EVENTS:0] hpm_event_pulse;
     assign hpm_event_pulse[0] = 1'b0;
     assign hpm_event_pulse[1] = branch_retired_pulse;
     assign hpm_event_pulse[2] = mispredict_pulse;
@@ -228,6 +271,16 @@ module CSR #(
     assign hpm_event_pulse[7] = stall_cycle_pulse;
     assign hpm_event_pulse[8] = interrupt_pulse;
     assign hpm_event_pulse[9] = exception_pulse;
+    // Phase K (docs/adr/0026): stall cause breakdown, indices 10-18.
+    assign hpm_event_pulse[10] = stall_hazard_pulse;
+    assign hpm_event_pulse[11] = stall_div_pulse;
+    assign hpm_event_pulse[12] = stall_mem_pulse;
+    assign hpm_event_pulse[13] = stall_fp_pulse;
+    assign hpm_event_pulse[14] = stall_float_lu_pulse;
+    assign hpm_event_pulse[15] = stall_itlb_pulse;
+    assign hpm_event_pulse[16] = stall_dtlb_pulse;
+    assign hpm_event_pulse[17] = stall_icache_pulse;
+    assign hpm_event_pulse[18] = stall_imem_wait_pulse;
 
     // Reading `mhpmcounter_lo/hi`/`mhpmevent` via a variable index directly
     // inside the `always @(*)` read block below would make Icarus flag it
@@ -240,10 +293,10 @@ module CSR #(
     genvar hgi;
     wire [XLEN-1:0] hpm_lo_acc [0:`NUM_HPM_COUNTERS];
     wire [XLEN-1:0] hpm_hi_acc [0:`NUM_HPM_COUNTERS];
-    wire [3:0]      hpm_ev_acc [0:`NUM_HPM_COUNTERS];
+    wire [4:0]      hpm_ev_acc [0:`NUM_HPM_COUNTERS];
     assign hpm_lo_acc[0] = {XLEN{1'b0}};
     assign hpm_hi_acc[0] = {XLEN{1'b0}};
-    assign hpm_ev_acc[0] = 4'b0;
+    assign hpm_ev_acc[0] = 5'b0;
     generate
         for (hgi = 0; hgi < `NUM_HPM_COUNTERS; hgi = hgi + 1) begin : gen_hpm_rd
             assign hpm_lo_acc[hgi+1] = hpm_lo_acc[hgi] |
@@ -251,12 +304,12 @@ module CSR #(
             assign hpm_hi_acc[hgi+1] = hpm_hi_acc[hgi] |
                 ((csr_addr == `CSR_ADDR_MHPMCOUNTER3H_BASE + hgi) ? mhpmcounter_hi[hgi] : {XLEN{1'b0}});
             assign hpm_ev_acc[hgi+1] = hpm_ev_acc[hgi] |
-                ((csr_addr == `CSR_ADDR_MHPMEVENT3_BASE + hgi)    ? mhpmevent[hgi]      : 4'b0);
+                ((csr_addr == `CSR_ADDR_MHPMEVENT3_BASE + hgi)    ? mhpmevent[hgi]      : 5'b0);
         end
     endgenerate
     wire [XLEN-1:0] hpm_counter_lo_rd = hpm_lo_acc[`NUM_HPM_COUNTERS];
     wire [XLEN-1:0] hpm_counter_hi_rd = hpm_hi_acc[`NUM_HPM_COUNTERS];
-    wire [3:0]      hpm_event_rd      = hpm_ev_acc[`NUM_HPM_COUNTERS];
+    wire [4:0]      hpm_event_rd      = hpm_ev_acc[`NUM_HPM_COUNTERS];
 
     // mip: bits 7(MTIP)/11(MEIP) stay exactly as before this phase --
     // read-only, hardware-driven straight from Timer.v/the PLIC-lite,
@@ -296,6 +349,11 @@ module CSR #(
     assign mepc_val = mepc;
     assign frm_val = frm;
     assign mstatus_mie = mstatus[3];
+    assign mstatus_mpie = mstatus[7];
+    assign mstatus_sie = mstatus[`MSTATUS_SIE_BIT];
+    assign mstatus_spie = mstatus[`MSTATUS_SPIE_BIT];
+    assign mstatus_spp = mstatus[`MSTATUS_SPP_BIT];
+    assign mstatus_mpp = mstatus[`MSTATUS_MPP_LO+1:`MSTATUS_MPP_LO];
     assign mie_mtie = mie[`MIE_MTIE_BIT];
     assign mie_meie = mie[`MIE_MEIE_BIT];
     assign priv_mode_val = priv_mode;
@@ -372,7 +430,7 @@ module CSR #(
             csr_rdata = hpm_counter_hi_rd;
         else if (csr_addr >= `CSR_ADDR_MHPMEVENT3_BASE &&
                  csr_addr <  `CSR_ADDR_MHPMEVENT3_BASE + `NUM_HPM_COUNTERS)
-            csr_rdata = {{(XLEN-4){1'b0}}, hpm_event_rd};
+            csr_rdata = {{(XLEN-5){1'b0}}, hpm_event_rd};
     end
 
     wire [XLEN-1:0] new_val = (csr_op == 2'b10) ? (csr_rdata | csr_wdata) :   // csrrs: set
@@ -489,7 +547,7 @@ module CSR #(
             for (hpm_i = 0; hpm_i < `NUM_HPM_COUNTERS; hpm_i = hpm_i + 1) begin
                 mhpmcounter_lo[hpm_i] <= {XLEN{1'b0}};
                 mhpmcounter_hi[hpm_i] <= {XLEN{1'b0}};
-                mhpmevent[hpm_i] <= hpm_i[3:0] + 4'd1;
+                mhpmevent[hpm_i] <= hpm_i[4:0] + 5'd1;
             end
         end
         else begin
@@ -723,13 +781,13 @@ module CSR #(
                     mhpmcounter_lo[hpm_i] <= new_val;
                 else if (csr_write_en && csr_addr == `CSR_ADDR_MHPMCOUNTER3H_BASE + hpm_i)
                     mhpmcounter_hi[hpm_i] <= new_val;
-                else if (!mcountinhibit[3+hpm_i] && (mhpmevent[hpm_i] != 4'd0) &&
+                else if (!mcountinhibit[3+hpm_i] && (mhpmevent[hpm_i] != 5'd0) &&
                          hpm_event_pulse[mhpmevent[hpm_i]])
                     {mhpmcounter_hi[hpm_i], mhpmcounter_lo[hpm_i]} <=
                         {mhpmcounter_hi[hpm_i], mhpmcounter_lo[hpm_i]} + 64'd1;
 
                 if (csr_write_en && csr_addr == `CSR_ADDR_MHPMEVENT3_BASE + hpm_i)
-                    mhpmevent[hpm_i] <= new_val[3:0];
+                    mhpmevent[hpm_i] <= new_val[4:0];
             end
         end
     end

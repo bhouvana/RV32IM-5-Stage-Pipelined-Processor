@@ -16,6 +16,13 @@ module reg4 #(
     input memtoReg_regem,
     input regWrite_regem,
     input fRegWrite_regem,  // docs/adr/0019-f-extension.md: writes FRegister.v, not Register.v
+    // docs/adr/0027-formal-verification.md (Phase L2). Trivial passthrough,
+    // identical shape to regWrite_regwb's own -- closes the loop reg2/reg3
+    // already opened (docs/adr/0025 Phase J3's valid_regde/valid_regem) so
+    // a WB-stage "this is a real, non-squashed instruction" signal exists
+    // for the whole-pipeline formal property to assert against
+    // (regWrite_regwb implies valid_regwb).
+    input valid_regem,
     input [XLEN-1:0] readData,
     input [XLEN-1:0] ALUOut_regem,
     input [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
@@ -34,6 +41,7 @@ module reg4 #(
     output reg memtoReg_regwb,
     output reg regWrite_regwb,
     output reg fRegWrite_regwb,
+    output reg valid_regwb,
     output reg [XLEN-1:0] readData_regwb,
     output reg [XLEN-1:0] ALUOut_regwb,
     output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regwb,
@@ -48,6 +56,7 @@ begin
     memtoReg_regwb <= 0;
     regWrite_regwb <= 0;
     fRegWrite_regwb <= 0;
+    valid_regwb <= 0;
     readData_regwb <= 0;
     ALUOut_regwb <= 0;
     write_to_Reg_regwb <=0;
@@ -64,6 +73,7 @@ begin
     memtoReg_regwb <= memtoReg_regem;
     regWrite_regwb <= regWrite_regem;
     fRegWrite_regwb <= fRegWrite_regem;
+    valid_regwb <= valid_regem;
     readData_regwb <= readData;
     ALUOut_regwb <= ALUOut_regem;
     write_to_Reg_regwb <= write_to_Reg_regem;

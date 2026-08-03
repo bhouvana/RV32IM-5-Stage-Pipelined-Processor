@@ -81,7 +81,10 @@ module tb_perf_csr_probe_j2;
         check_reg(12, 32'hFFFFFFFF, "mhpmcounter3h readback: unmasked");
 
         check_reg(13, 32'h00000001, "mhpmevent3 reset default: event index 1");
-        check_reg(15, 32'h0000000F, "mhpmevent3 readback: only low 4 bits real (0xf)");
+        // docs/adr/0026-performance-profiler.md (Phase K1): mhpmevent widened
+        // 4->5 bits real (10 new stall-cause event codes, 10-18, no longer
+        // fit 4 bits) -- was 0xF (only low 4 bits real).
+        check_reg(15, 32'h0000001F, "mhpmevent3 readback: only low 5 bits real (0x1f)");
 
         check_reg(16, 32'h00000009, "mhpmevent11 reset default: event index 9 (top of the range)");
         check_reg(17, 32'h00000000, "csrrw x17,mhpmcounter11,-1: x17 = old value (0)");

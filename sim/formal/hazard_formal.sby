@@ -1,0 +1,14 @@
+[options]
+mode prove
+depth 2
+
+[engines]
+smtbmc boolector
+
+[script]
+read_verilog -sv -I ../../design hazard_formal.sv
+prep -top hazard_formal
+
+[files]
+hazard_formal.sv
+../../design/Hazard.v
