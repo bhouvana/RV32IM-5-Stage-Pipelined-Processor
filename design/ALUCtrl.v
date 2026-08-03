@@ -57,19 +57,23 @@ else if(ALUOp == `ALUOP_RTYPE)
 
 else if(ALUOp == `ALUOP_BRANCH)
     begin
+    // Generation 3 prerequisite (Phase N, docs/adr/0030-branch-encoding-fix.md): blt/bge
+    // moved to their real RISC-V spec funct3 positions (100/101); this core's own custom
+    // ble/bgt moved to the now-vacant reserved positions (010/011). A real GCC-compiled
+    // program's blt/bge previously misdecoded as this core's custom ble/bgt.
     case(concat2)
         5'b01000: //beq
         ALUCtl = `ALUCTL_BEQ;
         5'b01001: //bne
         ALUCtl = `ALUCTL_BNE;
-        5'b01010: //blt
-        ALUCtl = `ALUCTL_BLT;
-        5'b01011: //bge
-        ALUCtl = `ALUCTL_BGE;
-        5'b01100: //ble (custom)
+        5'b01010: //ble (custom, moved here from 100)
         ALUCtl = `ALUCTL_BLE;
-        5'b01101: // bgt (custom)
+        5'b01011: //bgt (custom, moved here from 101)
         ALUCtl = `ALUCTL_BGT;
+        5'b01100: //blt (real spec position, moved here from 010)
+        ALUCtl = `ALUCTL_BLT;
+        5'b01101: //bge (real spec position, moved here from 011)
+        ALUCtl = `ALUCTL_BGE;
         5'b01110: //bltu
         ALUCtl = `ALUCTL_BLTU;
         5'b01111: //bgeu
