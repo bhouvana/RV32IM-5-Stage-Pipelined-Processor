@@ -111,58 +111,56 @@ else if(ALUOp == `ALUOP_BRANCH)
 - [ ] **Step 3: Write the new bit-level unit test**
 
 Open `sim/tb/tb_aluctrl_unit.v`. It already has `ALUOp`, `funct7_c`, `funct3_c` regs, the `dut`
-instance, and a `check_ctl` task. Add a second `initial begin ... end` block (Verilog allows
-multiple `initial` blocks; keep this separate from the existing SRL/SRA one so either can be
-read independently) right after the existing one, before `endmodule`:
+instance, and a `check_ctl` task, all inside one `initial begin ... end` block that ends with a
+pass/fail summary and `$finish`. Do NOT add a second `initial` block — both blocks would drive
+the same DUT inputs (`ALUOp`/`funct7_c`/`funct3_c`) and, having started at the same time-0, would
+race on which one's assignment wins at any timestep they overlap (Verilog does not order separate
+`initial` blocks against each other). Instead, insert the new checks into the *existing* block,
+after its last `check_ctl` call and before its `if (fails == 0)` summary line:
 
 ```verilog
-initial begin
-    #2; // let the first initial block's checks finish before this one starts driving DUT inputs
-    ALUOp = `ALUOP_BRANCH;
-    funct7_c = 0; // branches don't use funct7
+        // Phase N (docs/adr/0030-branch-encoding-fix.md): blt/bge moved to real RISC-V spec
+        // funct3 positions (100/101); this core's custom ble/bgt moved to the vacated reserved
+        // positions (010/011). bltu/bgeu (110/111) already matched spec, unchanged.
+        ALUOp = `ALUOP_BRANCH;
+        funct7_c = 0; // branches don't use funct7
 
-    funct3_c = 3'b100;
-    #1 check_ctl(`ALUCTL_BLT, "funct3=100 -> BLT (real spec position)");
-    funct3_c = 3'b101;
-    #1 check_ctl(`ALUCTL_BGE, "funct3=101 -> BGE (real spec position)");
-    funct3_c = 3'b010;
-    #1 check_ctl(`ALUCTL_BLE, "funct3=010 -> BLE (custom, moved to reserved slot)");
-    funct3_c = 3'b011;
-    #1 check_ctl(`ALUCTL_BGT, "funct3=011 -> BGT (custom, moved to reserved slot)");
-    funct3_c = 3'b110;
-    #1 check_ctl(`ALUCTL_BLTU, "funct3=110 -> BLTU (unchanged)");
-    funct3_c = 3'b111;
-    #1 check_ctl(`ALUCTL_BGEU, "funct3=111 -> BGEU (unchanged)");
-
-    if (fails == 0)
-        $display("PASS  aluctrl_branch_encoding (%0d checks)", checks);
-    else
-        $display("FAIL  aluctrl_branch_encoding (%0d/%0d checks failed)", fails, checks);
-end
+        funct3_c = 3'b100;
+        #1 check_ctl(`ALUCTL_BLT, "funct3=100 -> BLT (real spec position)");
+        funct3_c = 3'b101;
+        #1 check_ctl(`ALUCTL_BGE, "funct3=101 -> BGE (real spec position)");
+        funct3_c = 3'b010;
+        #1 check_ctl(`ALUCTL_BLE, "funct3=010 -> BLE (custom, moved to reserved slot)");
+        funct3_c = 3'b011;
+        #1 check_ctl(`ALUCTL_BGT, "funct3=011 -> BGT (custom, moved to reserved slot)");
+        funct3_c = 3'b110;
+        #1 check_ctl(`ALUCTL_BLTU, "funct3=110 -> BLTU (unchanged)");
+        funct3_c = 3'b111;
+        #1 check_ctl(`ALUCTL_BGEU, "funct3=111 -> BGEU (unchanged)");
 ```
 
-Note: the existing `initial begin` block already ends with `$finish;` — `$finish` terminates the
-whole simulation immediately, so this new block's checks would never run if it stays there.
-Remove the `$finish;` call from the *first* `initial` block's end (keep its two `$display` summary
-lines) and add a single `$finish;` as the very last line of the *new* second `initial` block
-instead, so both blocks' checks complete before the simulation ends.
+The existing summary block (`if (fails == 0) ... $display(...) ... $finish;`) stays exactly where
+it is, after this new code, and now reports on all 10 checks (4 original SRL/SRA + 6 new branch
+ones) combined — that's fine, one combined pass/fail count for the whole file is simpler than
+tracking two separate ones, and every check's own `$display` line inside `check_ctl` still
+identifies exactly which one failed if anything does.
 
 - [ ] **Step 4: Run the unit test to confirm it currently fails**
 
 Run: `iverilog -g2005 -o /tmp/tb_aluctrl sim/tb/tb_aluctrl_unit.v && vvp /tmp/tb_aluctrl`
 
-Expected: the four new checks (`funct3=100 -> BLT`, `funct3=101 -> BGE`, `funct3=010 -> BLE`,
-`funct3=011 -> BGT`) currently exist only if Step 2 already ran — if you run this test *before*
-Step 2, expect these four specifically to FAIL (old mapping still in place). If you're running
-Step 4 after Step 2 (recommended order — RTL first), skip the "confirm it fails" framing and go
+Expected: the four checks touching the swapped positions (`funct3=100 -> BLT`,
+`funct3=101 -> BGE`, `funct3=010 -> BLE`, `funct3=011 -> BGT`) FAIL if Step 2 (the RTL swap)
+hasn't run yet. If you're doing Step 2 before Step 3/4 (recommended order — RTL first, so this
+test is written against already-correct RTL), skip the "confirm it fails" framing and go
 straight to Step 5's "confirm it passes" instead.
 
 - [ ] **Step 5: Confirm the test passes with the Step 2 fix in place**
 
 Run: `iverilog -g2005 -o /tmp/tb_aluctrl sim/tb/tb_aluctrl_unit.v && vvp /tmp/tb_aluctrl`
 
-Expected: `PASS  aluctrl_unit (4 checks)` (existing SRL/SRA block) and
-`PASS  aluctrl_branch_encoding (6 checks)` (new block), zero `FAIL` lines.
+Expected: `PASS  aluctrl_unit (10 checks)` (4 original SRL/SRA + 6 new branch-encoding checks,
+one combined summary), zero `FAIL` lines.
 
 - [ ] **Step 6: Zero-warning compile check across the whole design tree**
 
