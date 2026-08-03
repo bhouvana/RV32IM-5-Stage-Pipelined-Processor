@@ -9,6 +9,14 @@ module reg3 #(
 ) (
     input clk,
     input rst,
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J3). Plain passthrough/
+    // hold/reset, same shape as every other field here -- the call site
+    // (riscvpipeline.v) pre-computes `valid_regde && !reg3_bubble` before
+    // wiring it in, the same `_to_reg3` treatment `regWrite_to_reg3` etc.
+    // already get, so this module itself needs no bubble-awareness of its
+    // own. `instret_pulse = valid_regem && !mem_stall` (computed at the
+    // call site, not here) is minstret's own increment condition.
+    input valid_regde,
     input memtoReg_regde,
     input regWrite_regde,
     input fRegWrite_regde,  // docs/adr/0019-f-extension.md: writes FRegister.v, not Register.v
@@ -27,6 +35,7 @@ module reg3 #(
                   // `hold` (docs/adr/0009) -- highest priority, no field-
                   // assignment logic needed.
 
+    output reg valid_regem,
     output reg memtoReg_regem,
     output reg regWrite_regem,
     output reg fRegWrite_regem,
@@ -44,6 +53,7 @@ always@(posedge clk)
 begin
 if(~rst)
     begin
+    valid_regem <=0;
     memtoReg_regem <=0;
     regWrite_regem <=0;
     fRegWrite_regem <=0;
@@ -62,6 +72,7 @@ else if(hold)
     end
 else
     begin
+    valid_regem <=valid_regde;
     memtoReg_regem <=memtoReg_regde;
     regWrite_regem <=regWrite_regde;
     fRegWrite_regem <=fRegWrite_regde;

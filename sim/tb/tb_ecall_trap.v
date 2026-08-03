@@ -52,6 +52,10 @@ module tb_ecall_trap;
         check_val(dut.m_CSR.mepc, 32'd8,    "mepc = ecall's own address");
         check_val(dut.m_CSR.mcause, 32'd11, "mcause = 11 (ECALL_FROM_M)");
         check_val(dut.m_CSR.mtvec, 32'd20,  "mtvec unchanged from setup");
+        // docs/adr/0025-hpc-performance-csrs.md (Phase J6). mhpmcounter11
+        // (array index 8) defaults to event 9 (exceptions taken) with zero
+        // configuration -- exactly one real exception in this program.
+        check_val(dut.m_CSR.mhpmcounter_lo[8], 32'd1, "mhpmcounter11 (exceptions, default event): 1");
 
         report("ecall_trap");
 `ifdef COVERAGE

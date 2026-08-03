@@ -170,7 +170,7 @@ This matches the diagram in [README.md](../README.md) but adds the two feedback 
 | `DataMemoryBRAM` | `DataMemoryBRAM.v` | `SIZE_BYTES`, `XLEN` (`docs/adr/0012`, `0015`; access-width logic itself stays literal, see `0015`) | Data RAM, byte/halfword/word access; synchronous (registered) read |
 | `DCache` | `DCache.v` | `WAYS`, `CACHE_SIZE_BYTES`, `LINE_BYTES`, `XLEN` (`docs/adr/0023`) | PIPT write-back + write-allocate D-cache, `CACHE_MODE=CACHE_WRITEBACK_SETASSOC` only (default 4-way/4KB/16B lines); Wishbone-master-shaped fill/writeback engine shared between capacity eviction and `fence`'s `flush_all` |
 | `reg4` | `reg4.v` | `XLEN`, `NUM_REGS` (`docs/adr/0015`) | MEM/WB register; `hold` freezes it during `mem_stall` (`docs/adr/0013`) |
-| `CSR` | `CSR.v` | `XLEN` (`docs/adr/0015`; `csr_addr` stays a fixed 12 bits) | Machine-mode CSR file, trap/`mret` entry-exit |
+| `CSR` | `CSR.v` | `XLEN` (`docs/adr/0015`; `csr_addr` stays a fixed 12 bits) | Machine-mode CSR file, trap/`mret` entry-exit, plus `mcycle`/`minstret`/`mcountinhibit`/9 generic `mhpmcounter`/`mhpmevent` performance counters (`docs/adr/0025`) |
 | `Divider` | `Divider.v` | `XLEN` (`docs/adr/0015`) | Multi-cycle restoring divider for `div`/`divu`/`rem`/`remu` |
 
 `XLEN`/`NUM_REGS` are named parameters, not truly variable at other values — RV32I's own instruction encoding fixes a 32-bit instruction word and 5-bit rs1/rs2/rd fields regardless of what they're set to (see `docs/adr/0015`'s Design section for exactly which fields did and didn't get parameterized, and why).

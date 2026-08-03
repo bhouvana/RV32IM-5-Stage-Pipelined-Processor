@@ -15,6 +15,7 @@
 // `` `define`` text macros -- a portable, toolchain-agnostic way to get the
 // same "assign this named group of fields" effect.
 `define ZERO_CONTROL_FIELDS \
+    valid_regde <= 0; \
     branch_regde <= 0; \
     memRead_regde <= 0; \
     memtoReg_regde <= 0; \
@@ -109,6 +110,16 @@ module reg2 #(
     input [XLEN-1:0] inst_regfd,
     input flush,
     input branch_taken,
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J3). "Is reg1's current
+    // output a real fetched instruction, or a squash-produced bubble" --
+    // wired to `!id_bubble_r` at the call site (riscvpipeline.v already
+    // computes this, mirroring reg1's own squash>hold>fresh priority
+    // exactly; see its own comment). Squashed to 0 by this stage's own
+    // branch_taken/flush arms below (folded into ZERO_CONTROL_FIELDS,
+    // same as every other control field), passed straight through
+    // otherwise -- minstret counts a retiring instruction by this bit
+    // surviving all the way to reg3 (see reg3.v/riscvpipeline.v).
+    input valid,
     input hold,   // multi-cycle divide interlock (docs/adr/0009): freeze every
                   // field exactly as-is while a div/rem's result isn't ready
                   // yet. Distinct from `flush`: flush *bubbles* (zeros
@@ -148,6 +159,7 @@ module reg2 #(
     input isFence,        // docs/adr/0023-caches.md (Phase G1) -- no live consumer yet (G6)
     input illegalOpcode,
 
+    output reg valid_regde,
     output reg branch_regde,
     output reg memRead_regde,
     output reg memtoReg_regde,
@@ -236,6 +248,7 @@ begin
     begin
         // Normal cycle: control fields take their real decoded values;
         // decode context passes straight through same as the flush arm.
+        valid_regde <= valid;
         branch_regde <= branch;
         memRead_regde <= memRead;
         memtoReg_regde <= memtoReg;

@@ -49,6 +49,22 @@ module tb_load_use_stall;
 
         check_reg(7, 32'd77,  "lw x7 <- mem[32] == 77");
         check_reg(8, 32'd154, "load-use stall: x8=x7+x7=154 (would be 0 if stall were broken)");
+        // docs/adr/0025-hpc-performance-csrs.md (Phase J6). mhpmcounter9
+        // (array index 6) defaults to event 7 (pc_stall, counted every
+        // cycle it's 1 -- duration, not discrete occurrences). Safe to
+        // check at this program's own existing checkpoint despite the
+        // long halt-loop spin afterward: pc_stall has no branch-redirect
+        // component (a mispredicted jal squashes via reg1/reg2 flush, not
+        // by freezing PC), so the spin loop itself contributes zero
+        // further stall cycles once steady-state -- this count is
+        // therefore stable, not growing with simulation time. 3 total:
+        // the one Hazard.v-detected load-use stall this program exists to
+        // exercise, plus one mem_stall cycle each for the `sw` and the
+        // `lw` (every load/store's own registered-read latency under
+        // CACHE_NONE, docs/adr/0013 -- confirmed against a debug run, not
+        // just paper-derived, since this is the first test to ever count
+        // stall cycles as a discrete number).
+        check_val(dut.m_CSR.mhpmcounter_lo[6], 32'd3, "mhpmcounter9 (stall cycles, default event): 3");
 
         report("load_use_stall");
 `ifdef COVERAGE

@@ -76,7 +76,20 @@ module DCache #(
     output     [`WB_SEL_WIDTH-1:0]  m_sel,
     output     [2:0]                m_funct3,
     input      [XLEN-1:0]           m_data_i,
-    input                           m_ack
+    input                           m_ack,
+
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J5). One-cycle pulses,
+    // exactly once per genuine new access (not per stall/fill cycle): the
+    // `state==S_IDLE && (req_read||req_write)` guard below is the FSM's
+    // own pre-existing "is this a real new request, not idle" condition
+    // (already load-bearing for the FSM itself), so no separate run-length
+    // tracking is needed the way the testbench's own indirect mem_stall-
+    // duration heuristic (bench_template.v) needs -- `state` leaves
+    // S_IDLE the same cycle a miss is recognized, so `access_miss` can
+    // never re-fire during the multi-cycle S_WB/S_FILL service that
+    // follows.
+    output                          access_hit,
+    output                          access_miss
 );
 
 localparam LINE_WORDS    = LINE_BYTES / 4;
@@ -126,6 +139,32 @@ endgenerate
 wire hit = |way_hit;
 wire [XLEN-1:0]          hit_data     = hit_data_acc[WAYS];
 wire [LINE_IDX_BITS-1:0] hit_line_idx = hit_lineidx_acc[WAYS];
+
+// docs/adr/0025-hpc-performance-csrs.md (Phase J5). `access_miss` fires
+// exactly once at the S_IDLE cycle a miss is recognized (state leaves
+// S_IDLE for S_WB/S_FILL immediately after and doesn't return until the
+// whole fill completes, by which point the caller has long since
+// advanced -- confirmed clean by a calibration trace, no repeat risk).
+// `access_hit` is NOT simply the write-hit/read-hit mirror of that same
+// S_IDLE condition -- a real bug found by running, not anticipated in the
+// original hand-trace: a write-hit resolves combinationally in the SAME
+// S_IDLE cycle (safe, matches resp_ready's own S_IDLE&&req_write arm
+// below), but a read-hit transitions to S_HIT_RD and only comes BACK to
+// S_IDLE one cycle later -- at which point the caller (riscvpipeline.v)
+// may not have advanced reg3 yet (mem_stall's own drop lags one cycle
+// behind resp_ready), so the SAME still-stale req_read/req_addr looks
+// like a second genuine S_IDLE request and would double-count the
+// identical access. Fixed by counting a read-hit at its own S_HIT_RD
+// completion cycle instead (mirroring resp_ready's own read arm exactly,
+// `state==S_HIT_RD && req_read && req_addr==served_addr_r` -- gated on
+// the same latched-address-match docs/adr/0023's own G7 bugfix
+// established, for the identical "a bare level/state can't distinguish
+// still-the-same-request from a new one" reason), which fires exactly
+// once per read-hit since state can't re-enter S_HIT_RD without a fresh
+// S_IDLE request first.
+assign access_hit  = (state == S_IDLE && req_write && hit) ||
+                      (state == S_HIT_RD && req_read && req_addr == served_addr_r);
+assign access_miss = (state == S_IDLE) && (req_read || req_write) && !hit;
 
 // Width/sign extension for a load, mirroring DataMemoryBRAM.v's own
 // funct3-keyed case exactly, generalized with a byte_off since this

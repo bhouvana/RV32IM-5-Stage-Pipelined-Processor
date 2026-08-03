@@ -291,6 +291,32 @@
 `define CSR_ADDR_MEDELEG 12'h302
 `define CSR_ADDR_MIDELEG 12'h303
 
+// docs/adr/0025-hpc-performance-csrs.md (Phase J). Standard mcycle/minstret
+// (64-bit each via a `h` high-half register, spec-standard addresses) plus
+// mcountinhibit (spec-standard: bit0=CY inhibits mcycle, bit2=IR inhibits
+// minstret, bits[3+i] inhibit mhpmcounter[3+i] -- bit1 and every bit past
+// what this core implements are hardwired 0) and 9 generic mhpmcounter3-11/
+// mhpmevent3-11 pairs -- one per Generation-1 event this core actually
+// wants to observe (see riscv_defs.vh's own event-index comment at
+// CSR.v's `hpm_event_pulse` declaration for what index 1-9 each select).
+// Read-write per the real privileged spec (an OS can save/restore these
+// across a context switch); this core has no OS today, but the real spec
+// behavior costs nothing extra to implement (docs/adr/0025).
+`define CSR_ADDR_MCOUNTINHIBIT 12'h320
+`define CSR_ADDR_MCYCLE        12'hB00
+`define CSR_ADDR_MCYCLEH       12'hB80
+`define CSR_ADDR_MINSTRET      12'hB02
+`define CSR_ADDR_MINSTRETH     12'hB82
+// mhpmcounter3/mhpmevent3 are the base of a 9-entry contiguous range
+// (mhpmcounter3-11 / mhpmevent3-11); CSR.v derives every other address in
+// each range arithmetically off these two bases (`csr_addr - BASE`) rather
+// than needing 9 independent `\`define`s per range, the same derived-
+// address precedent `TIMER_BASE` already uses off `UART_BASE` above.
+`define CSR_ADDR_MHPMCOUNTER3_BASE  12'hB03
+`define CSR_ADDR_MHPMCOUNTER3H_BASE 12'hB83
+`define CSR_ADDR_MHPMEVENT3_BASE    12'h323
+`define NUM_HPM_COUNTERS 9
+
 // New mcause values this phase adds, same "already-assigned spec numbering,
 // the interrupt bit is what disambiguates, not a disjoint range" convention
 // docs/adr/0020 established for the timer/external interrupt causes.

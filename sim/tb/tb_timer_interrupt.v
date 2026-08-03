@@ -79,6 +79,13 @@ module tb_timer_interrupt;
             $display("  pass  mepc in-loop bounds check: mepc = 0x%08h", dut.m_CSR.mepc);
         end
 
+        // docs/adr/0025-hpc-performance-csrs.md (Phase J6). mhpmcounter10
+        // (array index 7) defaults to event 8 (interrupts taken) with zero
+        // configuration -- exactly one real timer interrupt in this
+        // program (mtimecmp is reprogrammed huge before mret specifically
+        // to prevent a second one, per this file's own header comment).
+        check_val(dut.m_CSR.mhpmcounter_lo[7], 32'd1, "mhpmcounter10 (interrupts, default event): 1");
+
         report("timer_interrupt");
 `ifdef COVERAGE
         dut.dump_coverage;

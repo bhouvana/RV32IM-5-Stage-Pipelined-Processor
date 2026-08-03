@@ -740,6 +740,7 @@ wire [6:0] funct7_control;
     end
     endgenerate
 //
+    wire valid_regde;  // docs/adr/0025-hpc-performance-csrs.md (Phase J3)
     wire branch_regde;
     wire memRead_regde;
     wire memtoReg_regde;
@@ -814,6 +815,11 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
                                           // load-use hazard clears, same "insert a nop, real
                                           // instruction retries from IF/ID" shape as Hazard.v's own
     .branch_taken(branch_taken),
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J3). id_bubble_r
+    // (declared below, near interrupt_taken) already tracks exactly this;
+    // `id_bubble_r` is itself declared later in this file but Verilog
+    // doesn't require declare-before-use ordering within a module.
+    .valid(!id_bubble_r),
     .hold(reg2_hold),   // multi-cycle divide interlock (docs/adr/0009) OR MEM-stage
                          // interlock (docs/adr/0013) -- either way, ID/EX must not
                          // advance past the instruction reg3 isn't ready to accept yet.
@@ -840,6 +846,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .isFence(isFence),
     .illegalOpcode(illegalOpcode),
 
+    .valid_regde(valid_regde),
     .branch_regde(branch_regde),
     .memRead_regde(memRead_regde),
     .memtoReg_regde(memtoReg_regde),
@@ -1670,7 +1677,46 @@ endgenerate
     .trap_target_is_s(trap_target_is_s),
     // docs/adr/00NN-mmu-sv32.md (Phase F5).
     .satp_mode_val(satp_mode_w),
-    .satp_ppn_val(satp_ppn_w)
+    .satp_ppn_val(satp_ppn_w),
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J3). instret_pulse is
+    // exactly-once-per-real-retiring-instruction: `valid_regem` (survived
+    // every squash from reg1 through reg3 -- see reg2.v/reg3.v's own
+    // `valid` threading) gated on `!mem_stall`, the same "gate on the
+    // producer's own hold signal at the point of transition, not the
+    // consumer's already-latched level" shape as the existing
+    // `bp_update_valid` below. Using `mem_stall`-held reg4 output instead
+    // would double-count every instruction riding out a multi-cycle
+    // mem_stall (the docs/adr/0009/0013/0014 "a held level can't tell a
+    // repeat from a new one" bug class) -- see docs/adr/0025's Design
+    // section for the full hand-trace.
+    .instret_pulse(valid_regem && !mem_stall),
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J4). `bp_update_valid`
+    // (riscvpipeline.v:1504) is already exactly-once-per-real-branch/jump
+    // reaching EX, gated on `!reg2_hold` -- reused verbatim, no new
+    // gating needed. `mispredict` gets the identical `!reg2_hold` gate,
+    // applied consistently for the same "count exactly once, not once per
+    // held cycle" reason.
+    .branch_retired_pulse(bp_update_valid),
+    .mispredict_pulse(mispredict & !reg2_hold),
+    // Remaining event pulses tied to 0 until J5-J6 wire each one live,
+    // same "declare state before consumers" staging every prior phase's
+    // own step 1/2 has used (F1, G1, I1).
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J5).
+    .icache_hit_pulse(icache_hit_pulse_w),
+    .icache_miss_pulse(icache_miss_pulse_w),
+    .dcache_hit_pulse(dcache_hit_pulse_w),
+    .dcache_miss_pulse(dcache_miss_pulse_w),
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J6). `pc_stall` is
+    // already the aggregate "a cycle lost to any stall source" signal --
+    // counted every cycle it's 1, the one event that measures duration
+    // rather than discrete occurrences (deliberate, matches how "cycles
+    // lost to stalling" is normally reported). `interrupt_taken` is
+    // already `!pc_stall`-gated (riscvpipeline.v:1545), no extra gating
+    // needed. `exception_taken` reuses the same `!reg2_hold` pattern
+    // CSR.v's own `trap_taken` already relies on for exactly-once firing.
+    .stall_cycle_pulse(pc_stall),
+    .interrupt_pulse(interrupt_taken),
+    .exception_pulse(exception_taken & !reg2_hold)
     );
     wire mstatus_mie, mie_mtie, mie_meie;
     wire [1:0] priv_mode_w;
@@ -1796,6 +1842,7 @@ endgenerate
 
 //
 wire [REG_ADDR_WIDTH-1:0] write_to_Reg_regde;
+wire valid_regem;  // docs/adr/0025-hpc-performance-csrs.md (Phase J3)
 wire memtoReg_regem;
 wire regWrite_regem;
 wire fRegWrite_regem;
@@ -1843,6 +1890,10 @@ wire [2:0] funct3_regem;
     // every cycle the condition holds, the same multi-cycle-bubble shape
     // div_stall/fp_stall already have.
     wire reg3_bubble = div_stall | fp_stall | dtlb_miss | exception_taken;
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J3). Same treatment as
+    // every other `_to_reg3` wire here -- a bubbled instruction (for any
+    // reg3_bubble reason) must never count toward minstret.
+    wire valid_to_reg3         = reg3_bubble ? 1'b0 : valid_regde;
     wire memtoReg_to_reg3      = reg3_bubble ? 1'b0 : memtoReg_regde;
     wire regWrite_to_reg3      = reg3_bubble ? 1'b0 : regWrite_regde;
     wire fRegWrite_to_reg3     = reg3_bubble ? 1'b0 : fRegWrite_regde;
@@ -1854,6 +1905,7 @@ wire [2:0] funct3_regem;
 reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
     .clk(clk),
     .rst(start),
+    .valid_regde(valid_to_reg3),
     .memtoReg_regde(memtoReg_to_reg3),
     .regWrite_regde(regWrite_to_reg3),
     .fRegWrite_regde(fRegWrite_to_reg3),
@@ -1879,6 +1931,7 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
                         // DataMemoryBRAM yet -- reg2 must not be allowed to push
                         // the next instruction in on top of it.
 
+    .valid_regem(valid_regem),
     .memtoReg_regem(memtoReg_regem),
     .regWrite_regem(regWrite_regem),
     .fRegWrite_regem(fRegWrite_regem),
@@ -2076,6 +2129,28 @@ end
     // pre-G3 behavior.
     wire icache_miss = (!translate_enable || itlb_hit) && !icache_hit
         && !branch_taken && !redirect_squash_extend_r;
+
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J5). `icache_hit`/
+    // `icache_miss` are LEVELS held for as long as PC stays frozen on the
+    // same address (icache_miss for the whole fill; icache_hit trivially,
+    // every cycle an unrelated stall re-presents an already-cached line to
+    // a PC that hasn't moved) -- bench_template.v needs an edge-detector
+    // to count icache_miss once for exactly this reason. A one-cycle pulse
+    // pair needs a genuinely NEW gate: `pc_stall_r` (was fetch already
+    // stalled last cycle) -- when 0, PC.v advanced to a fresh address this
+    // cycle, so THIS is the one cycle a real access is being made, not a
+    // repeat of the same address. Reuses icache_miss's own qualifying
+    // conditions (translation-resolved, not itself a stale squashed fetch)
+    // so hit/miss are exact complements whenever `icache_access_new` fires.
+    reg pc_stall_r;
+    always @(posedge clk) begin
+        if (~start) pc_stall_r <= 1'b0;
+        else pc_stall_r <= pc_stall;
+    end
+    wire icache_access_new = !pc_stall_r && (!translate_enable || itlb_hit)
+        && !branch_taken && !redirect_squash_extend_r;
+    wire icache_hit_pulse_w  = icache_access_new && icache_hit;
+    wire icache_miss_pulse_w = icache_access_new && !icache_hit;
     // ptw_abandoned_r (defined below, near ptw_done_i/ptw_done_d) excludes
     // a stale, already-abandoned walk's fault result -- see its own
     // comment for the real bug this closes.
@@ -2376,6 +2451,15 @@ end
     wire [XLEN-1:0] dcache_m_addr, dcache_m_data_o;
     wire [3:0] dcache_m_sel;
     wire [2:0] dcache_m_funct3;
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J5). access_hit/
+    // access_miss are already exactly-once-per-real-access by
+    // construction -- see DCache.v's own updated header comment on
+    // access_hit for the real read-hit double-counting bug found (and
+    // fixed, inside DCache.v itself) while calibrating this phase's own
+    // directed test.
+    wire dcache_access_hit, dcache_access_miss;
+    wire dcache_hit_pulse_w  = dcache_access_hit;
+    wire dcache_miss_pulse_w = dcache_access_miss;
     generate
     if (CACHE_MODE == CACHE_NONE) begin : gen_dcache_none
         assign dcache_resp_ready = 1'b0;
@@ -2389,6 +2473,8 @@ end
         assign dcache_m_data_o = {XLEN{1'b0}};
         assign dcache_m_sel = 4'b0000;
         assign dcache_m_funct3 = 3'b000;
+        assign dcache_access_hit = 1'b0;
+        assign dcache_access_miss = 1'b0;
     end else begin : gen_dcache_writeback
         DCache #(.XLEN(XLEN), .WAYS(DCACHE_WAYS), .CACHE_SIZE_BYTES(DCACHE_SIZE_BYTES),
                  .LINE_BYTES(DCACHE_LINE_BYTES)) m_DCache(
@@ -2402,7 +2488,8 @@ end
             .m_cyc(dcache_m_cyc), .m_stb(dcache_m_stb), .m_we(dcache_m_we),
             .m_addr(dcache_m_addr), .m_data_o(dcache_m_data_o), .m_sel(dcache_m_sel),
             .m_funct3(dcache_m_funct3),
-            .m_data_i(readData), .m_ack(lsu_ack)
+            .m_data_i(readData), .m_ack(lsu_ack),
+            .access_hit(dcache_access_hit), .access_miss(dcache_access_miss)
         );
     end
     endgenerate

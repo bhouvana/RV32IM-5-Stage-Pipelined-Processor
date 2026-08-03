@@ -77,7 +77,22 @@ module tb_branch_predictor;
     initial begin
         start = 0;
         #10 start = 1;
-        #400;
+        // docs/adr/0025-hpc-performance-csrs.md (Phase J4). An early
+        // checkpoint at t=270, BEFORE the original #400 one below --
+        // confirmed against a cycle-by-cycle debug trace: all 5 real
+        // branches resolve by t=245, but the mandatory `halt: jal x0,halt`
+        // spin loop's own first iteration reaches EX at t=285 (and would
+        // keep counting every further spin-loop retirement/misprediction
+        // past this program's own interesting part, the same "genuine
+        // event, not a repeat" pulse discipline as everywhere else in this
+        // phase) -- also confirmed x11's own writeback (777) doesn't land
+        // until t=295, *after* that first spin-loop jal, so this early
+        // checkpoint can only check the new branch/mispredict counters,
+        // not x11 (the original #400 checkpoint below still does that).
+        #260;
+        check_val(dut.m_CSR.mhpmcounter_lo[0], 32'd5, "mhpmcounter3 (branches retired, default event): 5");
+        check_val(dut.m_CSR.mhpmcounter_lo[1], 32'd3, "mhpmcounter4 (mispredicts, default event): 3");
+        #140;
 
         // Architectural correctness: unaffected by misprediction timing.
         check_reg(10, 32'd5, "x10 (loop accumulator) = 5: every iteration ran exactly once");

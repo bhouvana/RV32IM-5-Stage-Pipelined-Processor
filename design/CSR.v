@@ -126,7 +126,27 @@ module CSR #(
     // invalidation, see the phase plan's own scoping default), so it's
     // not exposed here.
     output satp_mode_val,
-    output [21:0] satp_ppn_val
+    output [21:0] satp_ppn_val,
+
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J). One pulse input per
+    // hardware-countable event (index 1-9 into `hpmevent`'s own selector
+    // range -- see `hpm_event_pulse` below for the exact mapping), plus
+    // `instret_pulse` for minstret specifically (architecturally fixed to
+    // "an instruction retired," not reconfigurable, matching the real
+    // spec -- minstret isn't one of the generic mhpmcounters). Every pulse
+    // here is already the caller's own responsibility to gate exactly-once
+    // per real event (riscvpipeline.v's own comments document each one);
+    // CSR.v just counts whatever it's handed.
+    input instret_pulse,
+    input branch_retired_pulse,
+    input mispredict_pulse,
+    input icache_hit_pulse,
+    input icache_miss_pulse,
+    input dcache_hit_pulse,
+    input dcache_miss_pulse,
+    input stall_cycle_pulse,
+    input interrupt_pulse,
+    input exception_pulse
 );
 
     reg [XLEN-1:0] mstatus;  // bit3(MIE)/bit7(MPIE) real since docs/adr/0011; bit1(SIE)/bit5(SPIE)/
@@ -164,6 +184,79 @@ module CSR #(
     reg [XLEN-1:0] medeleg;  // exception causes; every bit this core can actually raise
                                // (illegal instruction, breakpoint, ecall from U/S, the three
                                // page faults) is independently delegable per spec
+
+    // docs/adr/0025-hpc-performance-csrs.md (Phase J). mcycle/minstret: free-
+    // running/retirement-gated 64-bit counters, spec-standard low/high-half
+    // register pairs. mcountinhibit: spec-standard (bit0=CY, bit2=IR,
+    // bit[3+i]=this core's own mhpmcounter[3+i]); bit1 and every bit past
+    // `NUM_HPM_COUNTERS` are hardwired 0 (this core has nothing else to
+    // inhibit). mhpmcounter3-11/mhpmevent3-11: a genuine indexed array (not
+    // 9 hand-unrolled registers) -- these 9 counters are structurally
+    // identical (same 64-bit up-counter, same event-select mux, zero
+    // trap-entry coupling), unlike every other CSR in this file, which is
+    // why this is the one place CSR.v reaches for an array/loop instead of
+    // its usual all-named-registers style (mirrors Tlb.v's own indexed-
+    // array precedent). `mhpmevent[i]` holds a 4-bit event index (0=off,
+    // 1-9 select one of `hpm_event_pulse`'s entries below); reset default
+    // is `i+1` so a fresh boot already has all 9 events observable
+    // 1:1 with zero software configuration, while staying fully
+    // reconfigurable per the real spec's own mhpmevent semantics.
+    reg [XLEN-1:0] mcycle_lo, mcycle_hi;
+    reg [XLEN-1:0] minstret_lo, minstret_hi;
+    reg [XLEN-1:0] mcountinhibit;
+    reg [XLEN-1:0] mhpmcounter_lo [0:`NUM_HPM_COUNTERS-1];
+    reg [XLEN-1:0] mhpmcounter_hi [0:`NUM_HPM_COUNTERS-1];
+    reg [3:0]      mhpmevent      [0:`NUM_HPM_COUNTERS-1];
+    integer hpm_i;
+
+    localparam [XLEN-1:0] MCOUNTINHIBIT_MASK = {XLEN{1'b0}} |
+        12'hFFD;  // bits 0,2-11 real (CY, IR, HPM3-11); bit1 and bits12+ hardwired 0
+
+    // Index 0 is "off" (tied low); 1-9 are this core's 9 countable hardware
+    // events, in the same order docs/adr/0025's Design section lists them.
+    // Every entry here is already the exactly-once-per-real-event pulse
+    // riscvpipeline.v's own comments document -- CSR.v does no further
+    // gating, just selects and counts.
+    wire [`NUM_HPM_COUNTERS:0] hpm_event_pulse;
+    assign hpm_event_pulse[0] = 1'b0;
+    assign hpm_event_pulse[1] = branch_retired_pulse;
+    assign hpm_event_pulse[2] = mispredict_pulse;
+    assign hpm_event_pulse[3] = icache_hit_pulse;
+    assign hpm_event_pulse[4] = icache_miss_pulse;
+    assign hpm_event_pulse[5] = dcache_hit_pulse;
+    assign hpm_event_pulse[6] = dcache_miss_pulse;
+    assign hpm_event_pulse[7] = stall_cycle_pulse;
+    assign hpm_event_pulse[8] = interrupt_pulse;
+    assign hpm_event_pulse[9] = exception_pulse;
+
+    // Reading `mhpmcounter_lo/hi`/`mhpmevent` via a variable index directly
+    // inside the `always @(*)` read block below would make Icarus flag it
+    // as "sensitive to all N words" (DCache.v/ICache.v's own header
+    // comments already document hitting this exact warning for their own
+    // per-way arrays and avoiding it with `generate`+`assign` instead of a
+    // procedural loop) -- this project's zero-warning bar, so the same
+    // fix applies here: an OR-accumulator built by `generate`, one term
+    // per counter, each term zero unless `csr_addr` actually selects it.
+    genvar hgi;
+    wire [XLEN-1:0] hpm_lo_acc [0:`NUM_HPM_COUNTERS];
+    wire [XLEN-1:0] hpm_hi_acc [0:`NUM_HPM_COUNTERS];
+    wire [3:0]      hpm_ev_acc [0:`NUM_HPM_COUNTERS];
+    assign hpm_lo_acc[0] = {XLEN{1'b0}};
+    assign hpm_hi_acc[0] = {XLEN{1'b0}};
+    assign hpm_ev_acc[0] = 4'b0;
+    generate
+        for (hgi = 0; hgi < `NUM_HPM_COUNTERS; hgi = hgi + 1) begin : gen_hpm_rd
+            assign hpm_lo_acc[hgi+1] = hpm_lo_acc[hgi] |
+                ((csr_addr == `CSR_ADDR_MHPMCOUNTER3_BASE + hgi)  ? mhpmcounter_lo[hgi] : {XLEN{1'b0}});
+            assign hpm_hi_acc[hgi+1] = hpm_hi_acc[hgi] |
+                ((csr_addr == `CSR_ADDR_MHPMCOUNTER3H_BASE + hgi) ? mhpmcounter_hi[hgi] : {XLEN{1'b0}});
+            assign hpm_ev_acc[hgi+1] = hpm_ev_acc[hgi] |
+                ((csr_addr == `CSR_ADDR_MHPMEVENT3_BASE + hgi)    ? mhpmevent[hgi]      : 4'b0);
+        end
+    endgenerate
+    wire [XLEN-1:0] hpm_counter_lo_rd = hpm_lo_acc[`NUM_HPM_COUNTERS];
+    wire [XLEN-1:0] hpm_counter_hi_rd = hpm_hi_acc[`NUM_HPM_COUNTERS];
+    wire [3:0]      hpm_event_rd      = hpm_ev_acc[`NUM_HPM_COUNTERS];
 
     // mip: bits 7(MTIP)/11(MEIP) stay exactly as before this phase --
     // read-only, hardware-driven straight from Timer.v/the PLIC-lite,
@@ -252,6 +345,34 @@ module CSR #(
             `CSR_ADDR_MEDELEG:  csr_rdata = medeleg;
             default:            csr_rdata = {XLEN{1'b0}};  // unimplemented CSR reads as 0 rather than trapping
         endcase
+
+        // docs/adr/0025-hpc-performance-csrs.md (Phase J). The 9 generic
+        // HPM counters/event-selectors are contiguous address ranges,
+        // decoded by subtraction (a real indexed array, see the storage
+        // declaration above) rather than an explicit `case` arm per
+        // address -- `case` items must be constant expressions, which
+        // can't express "one of 9 addresses computed from a loop index."
+        // Evaluated after the case above so these addresses simply
+        // override that block's own `default: 0` arm.
+        if (csr_addr == `CSR_ADDR_MCOUNTINHIBIT)
+            csr_rdata = mcountinhibit;
+        else if (csr_addr == `CSR_ADDR_MCYCLE)
+            csr_rdata = mcycle_lo;
+        else if (csr_addr == `CSR_ADDR_MCYCLEH)
+            csr_rdata = mcycle_hi;
+        else if (csr_addr == `CSR_ADDR_MINSTRET)
+            csr_rdata = minstret_lo;
+        else if (csr_addr == `CSR_ADDR_MINSTRETH)
+            csr_rdata = minstret_hi;
+        else if (csr_addr >= `CSR_ADDR_MHPMCOUNTER3_BASE &&
+                 csr_addr <  `CSR_ADDR_MHPMCOUNTER3_BASE + `NUM_HPM_COUNTERS)
+            csr_rdata = hpm_counter_lo_rd;
+        else if (csr_addr >= `CSR_ADDR_MHPMCOUNTER3H_BASE &&
+                 csr_addr <  `CSR_ADDR_MHPMCOUNTER3H_BASE + `NUM_HPM_COUNTERS)
+            csr_rdata = hpm_counter_hi_rd;
+        else if (csr_addr >= `CSR_ADDR_MHPMEVENT3_BASE &&
+                 csr_addr <  `CSR_ADDR_MHPMEVENT3_BASE + `NUM_HPM_COUNTERS)
+            csr_rdata = {{(XLEN-4){1'b0}}, hpm_event_rd};
     end
 
     wire [XLEN-1:0] new_val = (csr_op == 2'b10) ? (csr_rdata | csr_wdata) :   // csrrs: set
@@ -355,6 +476,21 @@ module CSR #(
             satp      <= {XLEN{1'b0}};
             mideleg   <= {XLEN{1'b0}};
             medeleg   <= {XLEN{1'b0}};
+            // docs/adr/0025-hpc-performance-csrs.md (Phase J). mcountinhibit
+            // resets to 0 (every counter counting by default, same "reset
+            // to 0" convention every other CSR here already follows).
+            // mhpmevent[i] resets to i+1, not 0 -- see its own declaration
+            // comment above for why (fresh-boot observability default).
+            mcycle_lo <= {XLEN{1'b0}};
+            mcycle_hi <= {XLEN{1'b0}};
+            minstret_lo <= {XLEN{1'b0}};
+            minstret_hi <= {XLEN{1'b0}};
+            mcountinhibit <= {XLEN{1'b0}};
+            for (hpm_i = 0; hpm_i < `NUM_HPM_COUNTERS; hpm_i = hpm_i + 1) begin
+                mhpmcounter_lo[hpm_i] <= {XLEN{1'b0}};
+                mhpmcounter_hi[hpm_i] <= {XLEN{1'b0}};
+                mhpmevent[hpm_i] <= hpm_i[3:0] + 4'd1;
+            end
         end
         else begin
             // docs/adr/0020-soc-integration.md (Phase D11). Each register
@@ -544,6 +680,57 @@ module CSR #(
 
             if (csr_write_en && csr_addr == `CSR_ADDR_MEDELEG)
                 medeleg <= medeleg_masked;
+
+            // docs/adr/0025-hpc-performance-csrs.md (Phase J). mcycle/
+            // minstret/mcountinhibit: no trap-entry coupling at all (unlike
+            // mepc/mcause/mstatus above), so each gets its own simple
+            // independent chain, same discipline as mtvec/mscratch's own
+            // plain csrrX-only chains. A software write to either half
+            // takes priority over the same-cycle hardware auto-increment
+            // (spec-silent on this exact race; this is the simpler,
+            // common real-hardware choice). mcycle is inhibited by
+            // mcountinhibit[0] (CY); minstret by mcountinhibit[2] (IR) and
+            // gated on `instret_pulse` (exactly one real retiring
+            // instruction, never a bubble -- see riscvpipeline.v's own
+            // `valid`-bit threading, docs/adr/0025's Design section).
+            if (csr_write_en && csr_addr == `CSR_ADDR_MCYCLE)
+                mcycle_lo <= new_val;
+            else if (csr_write_en && csr_addr == `CSR_ADDR_MCYCLEH)
+                mcycle_hi <= new_val;
+            else if (!mcountinhibit[0])
+                {mcycle_hi, mcycle_lo} <= {mcycle_hi, mcycle_lo} + 64'd1;
+
+            if (csr_write_en && csr_addr == `CSR_ADDR_MINSTRET)
+                minstret_lo <= new_val;
+            else if (csr_write_en && csr_addr == `CSR_ADDR_MINSTRETH)
+                minstret_hi <= new_val;
+            else if (instret_pulse && !mcountinhibit[2])
+                {minstret_hi, minstret_lo} <= {minstret_hi, minstret_lo} + 64'd1;
+
+            if (csr_write_en && csr_addr == `CSR_ADDR_MCOUNTINHIBIT)
+                mcountinhibit <= new_val & MCOUNTINHIBIT_MASK;
+
+            // mhpmcounter3-11/mhpmevent3-11: one independent chain per
+            // counter via a plain procedural loop over the array declared
+            // above -- safe here (unlike DCache.v/ICache.v's own
+            // `generate`-over-`always @*` choice) because this loop lives
+            // inside a `posedge clk`-sensitive block, not a `always @*`
+            // block sensitive to an entire unpacked array (the specific
+            // Icarus warning DCache.v's own header comment documents
+            // avoiding never applies here).
+            for (hpm_i = 0; hpm_i < `NUM_HPM_COUNTERS; hpm_i = hpm_i + 1) begin
+                if (csr_write_en && csr_addr == `CSR_ADDR_MHPMCOUNTER3_BASE + hpm_i)
+                    mhpmcounter_lo[hpm_i] <= new_val;
+                else if (csr_write_en && csr_addr == `CSR_ADDR_MHPMCOUNTER3H_BASE + hpm_i)
+                    mhpmcounter_hi[hpm_i] <= new_val;
+                else if (!mcountinhibit[3+hpm_i] && (mhpmevent[hpm_i] != 4'd0) &&
+                         hpm_event_pulse[mhpmevent[hpm_i]])
+                    {mhpmcounter_hi[hpm_i], mhpmcounter_lo[hpm_i]} <=
+                        {mhpmcounter_hi[hpm_i], mhpmcounter_lo[hpm_i]} + 64'd1;
+
+                if (csr_write_en && csr_addr == `CSR_ADDR_MHPMEVENT3_BASE + hpm_i)
+                    mhpmevent[hpm_i] <= new_val[3:0];
+            end
         end
     end
 
