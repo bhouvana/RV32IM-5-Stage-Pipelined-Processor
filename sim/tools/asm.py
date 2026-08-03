@@ -98,9 +98,11 @@ I_TYPE = {  # mnemonic: funct3 (funct7[5] used only by srli/srai)
     "addi": 0b000, "slli": 0b001, "slti": 0b010, "sltiu": 0b011,
     "xori": 0b100, "srli": 0b101, "srai": 0b101, "ori": 0b110, "andi": 0b111,
 }
-BRANCH = {  # mnemonic: funct3 -- beq/bne/blt/bge/ble/bgt/bltu/bgeu (ble/bgt custom, see docs/ARCHITECTURE.md sec 5)
-    "beq": 0b000, "bne": 0b001, "blt": 0b010, "bge": 0b011,
-    "ble": 0b100, "bgt": 0b101, "bltu": 0b110, "bgeu": 0b111,
+BRANCH = {  # mnemonic: funct3 -- beq/bne/blt/bge/ble/bgt/bltu/bgeu. blt/bge at real RISC-V
+    # spec positions (100/101); ble/bgt are this core's own custom ops, at the reserved
+    # positions (010/011) real spec leaves unused (docs/adr/0030-branch-encoding-fix.md).
+    "beq": 0b000, "bne": 0b001, "blt": 0b100, "bge": 0b101,
+    "ble": 0b010, "bgt": 0b011, "bltu": 0b110, "bgeu": 0b111,
 }
 LOAD = {"lb": 0b000, "lh": 0b001, "lw": 0b010, "lbu": 0b100, "lhu": 0b101}
 STORE = {"sb": 0b000, "sh": 0b001, "sw": 0b010}

@@ -1003,8 +1003,8 @@ class ISS:
             off = sext((b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1), 13)
             taken = {
                 0: s32(A) == s32(B), 1: s32(A) != s32(B),
-                2: s32(A) < s32(B), 3: s32(A) >= s32(B),
-                4: s32(A) <= s32(B), 5: s32(A) > s32(B),
+                2: s32(A) <= s32(B), 3: s32(A) > s32(B),
+                4: s32(A) < s32(B), 5: s32(A) >= s32(B),
                 6: u32(A) < u32(B), 7: u32(A) >= u32(B),
             }[f3]
             self.pc = u32(self.pc + off) if taken else next_pc

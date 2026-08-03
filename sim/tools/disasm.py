@@ -124,7 +124,7 @@ def disasm(word):
         b10_5 = (word >> 25) & 0x3F
         b4_1 = (word >> 8) & 0xF
         off = sext((b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1), 13)
-        names = {0: "beq", 1: "bne", 2: "blt", 3: "bge", 4: "ble", 5: "bgt", 6: "bltu", 7: "bgeu"}
+        names = {0: "beq", 1: "bne", 2: "ble", 3: "bgt", 4: "blt", 5: "bge", 6: "bltu", 7: "bgeu"}
         return f"{names.get(f3, 'branch?')} x{rs1},x{rs2},{off:+d}"
 
     if op == OPCODE_JAL:
