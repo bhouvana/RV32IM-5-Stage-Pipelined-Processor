@@ -1,18 +1,15 @@
 `include "Uart.v"
 `include "Timer.v"
 
-// docs/adr/0020-soc-integration.md (Phase D4). Standalone unit test for
-// Uart.v, independent of the pipeline -- mirrors tb_fregister_unit.v's
-// shape. Plays *both* roles a real external UART peer would: as a
-// receiver, it samples the DUT's `tx` output pin over time and decodes the
-// serial waveform back into a byte (real framing correctness, not an
-// internal shortcut signal); as a transmitter, it drives the DUT's `rx`
-// input pin with a hand-built serial bit-stream. CLKS_PER_BIT=4 here
-// (small, for fast simulation) -- the framing logic itself doesn't care
-// about the actual divisor value, only that it counts correctly, so this
-// is just as valid a test of correctness as a realistic divisor would be;
-// a real deployment would set CLKS_PER_BIT much higher to match a real
-// baud rate against a real clock.
+// docs/adr/0020-soc-integration.md (Phase D4) / docs/adr/0034-uart-clint-
+// register-compat-phase-r.md (Phase R). Standalone unit test for Uart.v,
+// independent of the pipeline -- mirrors tb_fregister_unit.v's shape. Plays
+// *both* roles a real external UART peer would: as a receiver, it samples
+// the DUT's `tx` output pin over time and decodes the serial waveform back
+// into a byte (real framing correctness, not an internal shortcut signal);
+// as a transmitter, it drives the DUT's `rx` input pin with a hand-built
+// serial bit-stream. CLKS_PER_BIT=4 here (small, for fast simulation) -- the
+// framing logic itself doesn't care about the actual divisor value.
 module tb_uart_unit;
     localparam CLKS_PER_BIT = 4;
 
@@ -25,7 +22,7 @@ module tb_uart_unit;
     wire s_ack;
     wire tx;
     reg rx = 1;
-    wire rx_irq;
+    wire irq;
 
     integer fails = 0;
     integer checks = 0;
@@ -35,15 +32,17 @@ module tb_uart_unit;
         .s_cyc(s_cyc), .s_stb(s_stb), .s_we(s_we),
         .s_addr(s_addr), .s_data_o(s_data_o), .s_sel(s_sel),
         .s_data_i(s_data_i), .s_ack(s_ack),
-        .tx(tx), .rx(rx), .rx_irq(rx_irq)
+        .tx(tx), .rx(rx), .irq(irq)
     );
 
     always #5 clk = ~clk;
 
-    localparam REG_TXDATA  = 32'h0;
-    localparam REG_RXDATA  = 32'h4;
-    localparam REG_STATUS  = 32'h8;
-    localparam REG_CONTROL = 32'hC;
+    // Phase R: ns16550a-compatible word offsets (design/Uart.v's own header).
+    localparam REG_RBR_THR_DLL = 32'h00;
+    localparam REG_IER_DLM     = 32'h04;
+    localparam REG_IIR_FCR     = 32'h08;
+    localparam REG_LCR         = 32'h0C;
+    localparam REG_LSR         = 32'h14;
 
     task check;
         input [31:0] actual, expected;
@@ -136,10 +135,10 @@ module tb_uart_unit;
         @(posedge clk); rst <= 0;
         @(posedge clk); rst <= 1;
 
-        // TX: write a byte, confirm STATUS.tx_busy, decode the serial
-        // output, confirm STATUS.tx_busy clears once the frame completes.
-        wb_read(REG_STATUS, rdata);
-        check_bit(rdata[0], 1'b0, "tx_busy is 0 before any write");
+        // TX: write THR, confirm LSR.THRE clears, decode the serial
+        // output, confirm LSR.THRE/TEMT set again once the frame completes.
+        wb_read(REG_LSR, rdata);
+        check_bit(rdata[5], 1'b1, "LSR.THRE is 1 (ready) before any write");
 
         // Checked via a direct hierarchical reference (dut.tx_busy), not a
         // bus read -- a wb_read here would burn 2 more clock edges before
@@ -149,59 +148,95 @@ module tb_uart_unit;
         // of this test that intermittently decoded garbage for exactly
         // this reason -- the extra read pushed `@(negedge tx)` past the
         // real edge into a later, unintended one mid-frame).
-        wb_write(REG_TXDATA, 32'h000000A5);  // 10100101
-        #1 check_bit(dut.tx_busy, 1'b1, "tx_busy is 1 right after a TXDATA write");
+        wb_write(REG_RBR_THR_DLL, 32'h000000A5);  // THR <- 10100101 (DLAB=0 by reset default)
+        #1 check_bit(dut.tx_busy, 1'b1, "tx_busy is 1 right after a THR write");
 
         sample_tx_byte(got_byte);
         check(got_byte, 8'hA5, "TX: decoded serial waveform matches written byte 0xA5");
 
-        // tx_busy should clear shortly after the stop bit's own sample
-        // point (well within one more bit period).
+        // LSR.THRE/TEMT should set again shortly after the stop bit's own
+        // sample point (well within one more bit period).
         repeat (CLKS_PER_BIT) @(posedge clk);
-        wb_read(REG_STATUS, rdata);
-        check_bit(rdata[0], 1'b0, "tx_busy clears once the frame completes");
+        wb_read(REG_LSR, rdata);
+        check_bit(rdata[5], 1'b1, "LSR.THRE sets again once the frame completes");
+        check_bit(rdata[6], 1'b1, "LSR.TEMT sets again once the frame completes");
 
         // A second TX byte, back to back, confirms the state machine
         // correctly returns to idle and can send again (not stuck).
-        wb_write(REG_TXDATA, 32'h00000042);  // 01000010
+        wb_write(REG_RBR_THR_DLL, 32'h00000042);  // 01000010
         sample_tx_byte(got_byte);
         check(got_byte, 8'h42, "TX: second byte (0x42) also decodes correctly");
 
-        // RX: drive a byte in, confirm RXDATA and STATUS.rx_ready, confirm
-        // reading RXDATA clears rx_ready.
-        wb_read(REG_STATUS, rdata);
-        check_bit(rdata[1], 1'b0, "rx_ready is 0 before any RX frame");
+        // RX: drive a byte in, confirm RBR and LSR.DR, confirm reading RBR
+        // clears DR.
+        wb_read(REG_LSR, rdata);
+        check_bit(rdata[0], 1'b0, "LSR.DR is 0 before any RX frame");
 
         drive_rx_byte(8'hC3);
         #1;
-        wb_read(REG_STATUS, rdata);
-        check_bit(rdata[1], 1'b1, "rx_ready is 1 after a full RX frame");
+        wb_read(REG_LSR, rdata);
+        check_bit(rdata[0], 1'b1, "LSR.DR is 1 after a full RX frame");
 
-        wb_read(REG_RXDATA, rdata);
-        check(rdata, 32'h000000C3, "RXDATA matches the driven byte 0xC3");
+        wb_read(REG_RBR_THR_DLL, rdata);
+        check(rdata, 32'h000000C3, "RBR matches the driven byte 0xC3");
 
-        wb_read(REG_STATUS, rdata);
-        check_bit(rdata[1], 1'b0, "rx_ready clears after RXDATA is read");
+        wb_read(REG_LSR, rdata);
+        check_bit(rdata[0], 1'b0, "LSR.DR clears after RBR is read");
 
-        // RX interrupt: enabling CONTROL.rx_irq_enable makes rx_irq track
-        // rx_ready && enable; disabled (default), it must stay 0 even with
-        // a byte pending.
+        // IIR: with IER=0 (reset default), nothing is ever reported pending,
+        // even with a byte sitting unread.
         drive_rx_byte(8'h55);
         #1;
-        check_bit(rx_irq, 1'b0, "rx_irq stays 0 with rx_irq_enable=0, even though a byte is pending");
-        wb_read(REG_RXDATA, rdata);  // drain it so it doesn't leak into the next check
+        check_bit(irq, 1'b0, "irq stays 0 with IER.ERBFI=0, even though a byte is pending");
+        wb_read(REG_IIR_FCR, rdata);
+        check(rdata[3:0], 4'b0001, "IIR reports 'none pending' while IER.ERBFI=0");
+        wb_read(REG_RBR_THR_DLL, rdata);  // drain it so it doesn't leak into the next check
 
-        wb_write(REG_CONTROL, 32'h00000001);
-        wb_read(REG_CONTROL, rdata);
-        check_bit(rdata[0], 1'b1, "CONTROL.rx_irq_enable reads back as written");
+        // Enable IER.ERBFI: irq/IIR now track RX-data-available.
+        wb_write(REG_IER_DLM, 32'h00000001);
+        wb_read(REG_IER_DLM, rdata);
+        check_bit(rdata[0], 1'b1, "IER.ERBFI reads back as written");
 
         drive_rx_byte(8'h77);
         #1;
-        check_bit(rx_irq, 1'b1, "rx_irq asserts once rx_irq_enable=1 and a byte is pending");
-        wb_read(REG_RXDATA, rdata);
-        check(rdata, 32'h00000077, "RXDATA matches while rx_irq was pending");
+        check_bit(irq, 1'b1, "irq asserts once IER.ERBFI=1 and RX data is pending");
+        wb_read(REG_IIR_FCR, rdata);
+        check(rdata[3:0], 4'b0100, "IIR reports 'RX data available' while pending");
+        wb_read(REG_RBR_THR_DLL, rdata);
+        check(rdata, 32'h00000077, "RBR matches while irq was pending");
         #1;
-        check_bit(rx_irq, 1'b0, "rx_irq clears once RXDATA is read (rx_ready cleared)");
+        check_bit(irq, 1'b0, "irq clears once RBR is read (LSR.DR cleared)");
+        wb_read(REG_IIR_FCR, rdata);
+        check(rdata[3:0], 4'b0001, "IIR reports 'none pending' again after RBR read");
+
+        // Enable IER.ETBEI too: irq/IIR track THR-empty (level-triggered,
+        // true whenever idle+enabled -- confirmed here since nothing is
+        // mid-transmission at this point in the test).
+        wb_write(REG_IER_DLM, 32'h00000003);  // ERBFI | ETBEI
+        #1;
+        check_bit(irq, 1'b1, "irq asserts on IER.ETBEI=1 while idle (THR empty)");
+        wb_read(REG_IIR_FCR, rdata);
+        check(rdata[3:0], 4'b0010, "IIR reports 'THR empty' when only that cause is pending");
+
+        // RX-over-THR priority: with both causes pending simultaneously,
+        // IIR must report the RX cause, matching real 16550A priority.
+        drive_rx_byte(8'h11);
+        #1;
+        wb_read(REG_IIR_FCR, rdata);
+        check(rdata[3:0], 4'b0100, "IIR reports RX-data-available over THR-empty when both pending");
+        wb_read(REG_RBR_THR_DLL, rdata);  // drain
+
+        // LCR.DLAB: gates offset 0x00/0x04 to DLL/DLM instead of RBR/THR-IER.
+        wb_write(REG_LCR, 32'h00000080);  // DLAB <- 1
+        wb_write(REG_RBR_THR_DLL, 32'h0000004E);  // DLL <- 0x4E
+        wb_write(REG_IER_DLM, 32'h00000005);      // DLM <- 0x05
+        wb_read(REG_RBR_THR_DLL, rdata);
+        check(rdata, 32'h4E, "DLL reads back as written while DLAB=1");
+        wb_read(REG_IER_DLM, rdata);
+        check(rdata, 32'h05, "DLM reads back as written while DLAB=1");
+        wb_write(REG_LCR, 32'h00000000);  // DLAB <- 0, restore normal addressing
+        wb_read(REG_IER_DLM, rdata);
+        check(rdata, 32'h03, "IER (ERBFI|ETBEI) unchanged and visible again once DLAB=0");
 
         if (fails == 0)
             $display("PASS  uart_unit (%0d checks)", checks);

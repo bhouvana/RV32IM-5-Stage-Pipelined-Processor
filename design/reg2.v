@@ -36,6 +36,7 @@
     isSret_regde <= 0; \
     isSfenceVma_regde <= 0; \
     isFence_regde <= 0; \
+    isAmo_regde <= 0; \
     illegalOpcode_regde <= 0;
 
 `define ZERO_DECODE_CONTEXT \
@@ -53,7 +54,8 @@
     readReg3_regde <= 0; \
     predict_taken_regde <= 0; \
     predict_target_regde <= 0; \
-    ifetch_fault_regde <= 0;
+    ifetch_fault_regde <= 0; \
+    is_compressed_regde <= 0;
 
 `define PASS_DECODE_CONTEXT \
     pc_o_regde <= pc_o_regfd; \
@@ -70,7 +72,8 @@
     readReg3_regde <= readReg3; \
     predict_taken_regde <= predict_taken; \
     predict_target_regde <= predict_target; \
-    ifetch_fault_regde <= ifetch_fault;
+    ifetch_fault_regde <= ifetch_fault; \
+    is_compressed_regde <= is_compressed;
 
 module reg2 #(
     parameter XLEN = 32,       // docs/adr/0015-xlen-and-regcount-parameterization.md
@@ -146,6 +149,12 @@ module reg2 #(
     // predict_taken/predict_target above, for the same reason (see
     // reg1.v's own port comment).
     input ifetch_fault,
+    // docs/adr/0037-rvc-compressed-instructions-phase-u.md. reg1's own
+    // is_compressed_regfd, carried one more stage to EX -- same decode-
+    // context treatment as ifetch_fault above, needed here because
+    // riscvpipeline.v's own pc_plus4 adder (jal/jalr link value, and the
+    // branch predictor's fallthrough-PC comparison) lives at this stage.
+    input is_compressed,
     input jump,
     input jalr,
     input lui,
@@ -157,6 +166,7 @@ module reg2 #(
     input isSret,        // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
     input isSfenceVma,    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
     input isFence,        // docs/adr/0023-caches.md (Phase G1) -- no live consumer yet (G6)
+    input isAmo,          // docs/adr/0038-a-extension-phase-v.md
     input illegalOpcode,
 
     output reg valid_regde,
@@ -185,6 +195,7 @@ module reg2 #(
     output reg predict_taken_regde,
     output reg [XLEN-1:0] predict_target_regde,
     output reg ifetch_fault_regde,
+    output reg is_compressed_regde,
     output reg jump_regde,
     output reg jalr_regde,
     output reg lui_regde,
@@ -196,6 +207,7 @@ module reg2 #(
     output reg isSret_regde,
     output reg isSfenceVma_regde,
     output reg isFence_regde,
+    output reg isAmo_regde,
     output reg illegalOpcode_regde
 
 );
@@ -269,6 +281,7 @@ begin
         isSret_regde <= isSret;
         isSfenceVma_regde <= isSfenceVma;
         isFence_regde <= isFence;
+        isAmo_regde <= isAmo;
         illegalOpcode_regde <= illegalOpcode;
         `PASS_DECODE_CONTEXT
         inst_regde <= inst_regfd;

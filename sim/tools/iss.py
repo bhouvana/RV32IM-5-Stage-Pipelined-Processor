@@ -26,6 +26,26 @@ def u32(v):
     return v & 0xFFFFFFFF
 
 
+# Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md). s32/u32
+# above stay fixed-32-bit forever -- deliberately reused as-is wherever a
+# value is ALWAYS 32 bits regardless of the core's own XLEN (F-extension
+# float bit patterns, this core's own CSR storage, which docs/adr/0028's own
+# MMU-forced-off-at-XLEN=64 scoping decision keeps exactly RV32-shaped, and
+# the "w"-suffixed family's own 32-bit intermediate computation before its
+# final sign-extension to XLEN). sXLEN/uXLEN below are the *register-width*
+# analogues, consulting an ISS instance's own self.xlen -- Python's
+# arbitrary-precision ints make these correct at any width for free (a
+# negative Python int's bitwise AND with a mask is already real two's-
+# complement truncation, no special-casing needed).
+def sXLEN(v, xlen):
+    v &= (1 << xlen) - 1
+    return v - (1 << xlen) if v & (1 << (xlen - 1)) else v
+
+
+def uXLEN(v, xlen):
+    return v & ((1 << xlen) - 1)
+
+
 def sext(v, bits):
     # Sign-extend a `bits`-wide field to a full-width signed value -- NOT
     # the same as s32(), which only correctly sign-extends a value that is
@@ -75,10 +95,26 @@ PRIV_U, PRIV_S, PRIV_M = 0b00, 0b01, 0b11
 
 MSTATUS_SIE_BIT, MSTATUS_SPIE_BIT, MSTATUS_SPP_BIT, MSTATUS_MPP_LO = 1, 5, 8, 11
 MIE_SSIE_BIT, MIE_STIE_BIT, MIE_SEIE_BIT = 1, 5, 9
+MIE_MSIE_BIT = 3  # docs/adr/0034-uart-clint-register-compat-phase-r.md (Phase R)
+
+# Generation 3, Phase O (docs/adr/0031). RV64-only mstatus.UXL/SXL, matches
+# design/riscv_defs.vh's MSTATUS_UXL_LO/MSTATUS_SXL_LO -- fixed WARL-to-2
+# ("64-bit") read-mux constants, not real storage, matching CSR.v exactly.
+MSTATUS_UXL_LO, MSTATUS_SXL_LO = 32, 34
+MXL_XLEN64 = 2
 
 # Sv32 PTE bit positions, matches design/riscv_defs.vh's PTE_*_BIT exactly.
+# Identical positions in the Sv39 PTE format too (design/Ptw39.v's own
+# header documents this -- PPN starts at bit 10 in both formats regardless
+# of total width), so these are reused verbatim by _translate_sv39 below.
 PTE_V_BIT, PTE_R_BIT, PTE_W_BIT, PTE_X_BIT, PTE_U_BIT = 0, 1, 2, 3, 4
 SATP_MODE_BIT = 31
+
+# docs/adr/00NN-sv39-mmu-phase-p.md (Phase P4). Sv39 satp layout (RV64
+# only), matches design/riscv_defs.vh's SATP64_MODE_HI/LO, SATP64_PPN_HI/LO,
+# SATP_MODE_SV39 exactly.
+SATP64_MODE_LO = 60
+SATP_MODE_SV39 = 8
 
 
 # ==========================================================================
@@ -525,7 +561,12 @@ def f_cvt_from_int(a_bits, rm, unsigned):
 
 
 class ISS:
-    def __init__(self, mem_size=128):
+    def __init__(self, mem_size=128, xlen=32):
+        # Generation 2 (Phase M). Default 32 is bit-exact with every prior
+        # caller. self.sxlen/self.uxlen are the register-width analogues of
+        # the module-level s32/u32 (which stay fixed-32-bit -- see their own
+        # comment above).
+        self.xlen = xlen
         self.regs = [0] * 32
         # sp reset default -- matches design/Register.v's SP_INIT parameter,
         # which riscvpipeline.v ties directly to MEM_SIZE_BYTES, not a fixed
@@ -582,9 +623,15 @@ class ISS:
     def schedule_interrupt(self, after_steps, cause):
         self.pending_interrupt = {"after": after_steps, "cause": cause}
 
+    def sxlen(self, v):
+        return sXLEN(v, self.xlen)
+
+    def uxlen(self, v):
+        return uXLEN(v, self.xlen)
+
     def wr(self, rd, val):
         if rd != 0:
-            self.regs[rd] = u32(val)
+            self.regs[rd] = self.uxlen(val)
 
     def set_fflags(self, flags):
         # docs/adr/0019 Phase C8/C9: sticky hardware accumulation -- every
@@ -622,6 +669,13 @@ class ISS:
             return (((p >> MIE_SSIE_BIT) & 1) << MIE_SSIE_BIT |
                     ((p >> MIE_STIE_BIT) & 1) << MIE_STIE_BIT |
                     ((p >> MIE_SEIE_BIT) & 1) << MIE_SEIE_BIT)
+        # Generation 3, Phase O (docs/adr/0031). Matches design/CSR.v's own
+        # read-mux override exactly: mstatus.UXL/SXL read as fixed 2 at
+        # XLEN=64, applied at read time only (self.csr[CSR_MSTATUS] itself
+        # never gains these bits -- not real storage).
+        if addr == CSR_MSTATUS and self.xlen == 64:
+            return (self.csr.get(addr, 0) |
+                    (MXL_XLEN64 << MSTATUS_UXL_LO) | (MXL_XLEN64 << MSTATUS_SXL_LO))
         return self.csr.get(addr, 0)
 
     def csr_write(self, addr, val):
@@ -650,7 +704,11 @@ class ISS:
             self.csr[CSR_MSTATUS] = u32(keep | new)
             return
         elif addr == CSR_MIE:
-            val &= ((1 << 7) | (1 << 11) | (1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
+            # docs/adr/0034-uart-clint-register-compat-phase-r.md (Phase R):
+            # MIE_MSIE_BIT(3) joins the mask, matching design/CSR.v's own
+            # mie_masked exactly.
+            val &= ((1 << MIE_MSIE_BIT) | (1 << 7) | (1 << 11) |
+                    (1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
         elif addr == CSR_SIE:
             keep = self.csr[CSR_MIE] & ~((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
             new = val & ((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_SEIE_BIT))
@@ -669,8 +727,10 @@ class ISS:
             # actually raise are real bits.
             val &= ((1 << 2) | (1 << 3) | (1 << 8) | (1 << 9) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 15))
         elif addr == CSR_MIDELEG:
-            # Matches CSR.v's mideleg_masked.
-            val &= ((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << 7) | (1 << MIE_SEIE_BIT) | (1 << 11))
+            # Matches CSR.v's mideleg_masked (Phase R added MIE_MSIE_BIT(3)
+            # alongside the pre-existing bits 7/11).
+            val &= ((1 << MIE_SSIE_BIT) | (1 << MIE_STIE_BIT) | (1 << MIE_MSIE_BIT) |
+                    (1 << 7) | (1 << MIE_SEIE_BIT) | (1 << 11))
         if addr in self.csr:
             self.csr[addr] = u32(val)
 
@@ -758,18 +818,31 @@ class ISS:
         return bool(pte_u) if priv_is_u else not bool(pte_u)
 
     def translate(self, vaddr, access):
-        """Sv32 translation, matching design/Ptw.v's own 2-level walk +
-        design/riscvpipeline.v's permission check bit-for-bit. access:
-        'fetch'|'load'|'store'. Returns the translated physical address on
-        success; on a page fault, traps internally (mcause + mtval/stval =
-        the faulting VA, matching design/riscvpipeline.v's trap_value
-        wiring) and returns None -- the caller must check for None and stop
-        (mirrors an ifetch_fault_regde/dtlb_page_fault redirect: the
-        access itself never completes)."""
-        vaddr = u32(vaddr)
+        """Dispatches to Sv32 (XLEN=32) or Sv39 (XLEN=64, Phase P4) real
+        translation, or bypasses (M-mode always does, either XLEN, and
+        satp.MODE=Bare does at either XLEN). access: 'fetch'|'load'|'store'.
+        Returns the translated physical address on success; on a page
+        fault, traps internally (mcause + mtval/stval = the faulting VA,
+        matching design/riscvpipeline.v's trap_value wiring) and returns
+        None -- the caller must check for None and stop (mirrors an
+        ifetch_fault_regde/dtlb_page_fault redirect: the access itself
+        never completes)."""
         satp = self.csr[CSR_SATP]
-        if not ((satp >> SATP_MODE_BIT) & 1) or self.priv_mode == PRIV_M:
-            return vaddr
+        if self.priv_mode == PRIV_M:
+            return self.uxlen(vaddr)
+        if self.xlen == 32:
+            if not ((satp >> SATP_MODE_BIT) & 1):
+                return self.uxlen(vaddr)
+            return self._translate_sv32(vaddr, access, satp)
+        else:
+            if ((satp >> SATP64_MODE_LO) & 0xF) != SATP_MODE_SV39:
+                return self.uxlen(vaddr)
+            return self._translate_sv39(vaddr, access, satp)
+
+    def _translate_sv32(self, vaddr, access, satp):
+        """Sv32 translation, matching design/Ptw.v's own 2-level walk +
+        design/riscvpipeline.v's permission check bit-for-bit."""
+        vaddr = u32(vaddr)
         vpn1 = (vaddr >> 22) & 0x3FF
         vpn0 = (vaddr >> 12) & 0x3FF
         offset = vaddr & 0xFFF
@@ -810,6 +883,81 @@ class ISS:
         ppn20 = (pte0 >> 10) & 0xFFFFF
         return u32((ppn20 << 12) | offset)
 
+    def _read_pte64(self, addr):
+        # docs/adr/00NN-sv39-mmu-phase-p.md (Phase P4). Sv39 PTEs are 8
+        # bytes (RV64), unlike Sv32's 4 -- see _read_pte's own byte-order
+        # convention, extended to 8 bytes.
+        addr &= 0xFFFFFFFF
+        val = 0
+        for i in range(8):
+            val |= self.load_mem_byte(addr + i) << (8 * i)
+        return val
+
+    def _translate_sv39(self, vaddr, access, satp):
+        """Sv39 translation, matching design/Ptw39.v's own 3-level walk +
+        design/riscvpipeline.v's permission check bit-for-bit (Phase P4,
+        docs/adr/00NN-sv39-mmu-phase-p.md). Same low-20-bits PPN truncation
+        Ptw39.v itself documents (this core's real memory is tiny) -- the
+        `pte_ppn20 = (pte >> 10) & 0xFFFFF` slice sits at the identical bit
+        position Sv32's own _translate_sv32 uses, since PPN starts at bit
+        10 in both PTE formats regardless of total width."""
+        vpn2 = (vaddr >> 30) & 0x1FF
+        vpn1 = (vaddr >> 21) & 0x1FF
+        vpn0 = (vaddr >> 12) & 0x1FF
+        offset = vaddr & 0xFFF
+        satp_ppn20 = satp & 0xFFFFF
+        fault_cause = {
+            "fetch": MCAUSE_INSTRUCTION_PAGE_FAULT,
+            "load": MCAUSE_LOAD_PAGE_FAULT,
+            "store": MCAUSE_STORE_PAGE_FAULT,
+        }[access]
+
+        def fault():
+            self.trap(fault_cause, tval=vaddr)
+            return None
+
+        l2_addr = (satp_ppn20 << 12) | (vpn2 << 3)
+        pte2 = self._read_pte64(l2_addr)
+        if not ((pte2 >> PTE_V_BIT) & 1):
+            return fault()
+        if (pte2 >> PTE_R_BIT) & 1 or (pte2 >> PTE_W_BIT) & 1 or (pte2 >> PTE_X_BIT) & 1:
+            # Leaf at level 2: a gigapage. Real PPN[1:0] (pte2[27:10], the
+            # low 18 bits of pte_ppn20) must be 0.
+            pte_ppn20 = (pte2 >> 10) & 0xFFFFF
+            if pte_ppn20 & 0x3FFFF:
+                return fault()
+            if not self._pte_perm_ok(pte2, access):
+                return fault()
+            result_ppn20 = ((pte_ppn20 >> 18) << 18) | (vpn1 << 9) | vpn0
+            return self.uxlen((result_ppn20 << 12) | offset)
+        # Non-leaf: descend to level 1.
+        l1_addr = (((pte2 >> 10) & 0xFFFFF) << 12) | (vpn1 << 3)
+        pte1 = self._read_pte64(l1_addr)
+        if not ((pte1 >> PTE_V_BIT) & 1):
+            return fault()
+        if (pte1 >> PTE_R_BIT) & 1 or (pte1 >> PTE_W_BIT) & 1 or (pte1 >> PTE_X_BIT) & 1:
+            # Leaf at level 1: a megapage. Real PPN[0] (pte1[18:10], the
+            # low 9 bits of pte_ppn20) must be 0.
+            pte_ppn20 = (pte1 >> 10) & 0xFFFFF
+            if pte_ppn20 & 0x1FF:
+                return fault()
+            if not self._pte_perm_ok(pte1, access):
+                return fault()
+            result_ppn20 = ((pte_ppn20 >> 9) << 9) | vpn0
+            return self.uxlen((result_ppn20 << 12) | offset)
+        # Non-leaf: descend to level 0.
+        l0_addr = (((pte1 >> 10) & 0xFFFFF) << 12) | (vpn0 << 3)
+        pte0 = self._read_pte64(l0_addr)
+        if not ((pte0 >> PTE_V_BIT) & 1):
+            return fault()
+        if not ((pte0 >> PTE_R_BIT) & 1 or (pte0 >> PTE_W_BIT) & 1 or (pte0 >> PTE_X_BIT) & 1):
+            # Non-leaf at level 0: Sv39 is exactly 3 levels -- malformed.
+            return fault()
+        if not self._pte_perm_ok(pte0, access):
+            return fault()
+        ppn20 = (pte0 >> 10) & 0xFFFFF
+        return self.uxlen((ppn20 << 12) | offset)
+
     def load_mem_byte(self, addr):
         # docs/adr/0020-soc-integration.md (Phase D10). MMIO_BASE (design/
         # riscv_defs.vh, 0x1000_0000) and above is real peripheral address
@@ -846,48 +994,52 @@ class ISS:
         B = self.regs[rs2]
         next_pc = self.pc + 4
 
-        if op == 0b0110011:  # R-type (base + RV32M)
-            if f7 == 0b0000001:  # RV32M
+        xl = self.xlen
+
+        if op == 0b0110011:  # R-type (base + RV32M/RV64M)
+            if f7 == 0b0000001:  # M extension
                 if f3 == 0b000:
-                    res = u32(A * B)
+                    res = self.uxlen(A * B)
                 elif f3 == 0b001:
                     # Python's >> on a negative int is a floor shift, which is
                     # exactly two's-complement arithmetic right shift -- no
-                    # masking to 64 bits needed first.
-                    res = u32((s32(A) * s32(B)) >> 32)
+                    # masking first needed at any width.
+                    res = self.uxlen((self.sxlen(A) * self.sxlen(B)) >> xl)
                 elif f3 == 0b010:
-                    res = u32((s32(A) * u32(B)) >> 32)
+                    res = self.uxlen((self.sxlen(A) * self.uxlen(B)) >> xl)
                 elif f3 == 0b011:
-                    res = (u32(A) * u32(B)) >> 32
+                    res = (self.uxlen(A) * self.uxlen(B)) >> xl
                 elif f3 == 0b100:  # div
                     if B == 0:
-                        res = 0xFFFFFFFF
-                    elif s32(A) == -2147483648 and s32(B) == -1:
+                        res = self.uxlen(-1)
+                    elif self.sxlen(A) == -(1 << (xl - 1)) and self.sxlen(B) == -1:
                         res = A
                     else:
-                        q = abs(s32(A)) // abs(s32(B))
-                        if (s32(A) < 0) != (s32(B) < 0):
+                        q = abs(self.sxlen(A)) // abs(self.sxlen(B))
+                        if (self.sxlen(A) < 0) != (self.sxlen(B) < 0):
                             q = -q
-                        res = u32(q)
+                        res = self.uxlen(q)
                 elif f3 == 0b101:  # divu
-                    res = 0xFFFFFFFF if B == 0 else (u32(A) // u32(B))
+                    res = self.uxlen(-1) if B == 0 else (self.uxlen(A) // self.uxlen(B))
                 elif f3 == 0b110:  # rem
                     if B == 0:
                         res = A
-                    elif s32(A) == -2147483648 and s32(B) == -1:
+                    elif self.sxlen(A) == -(1 << (xl - 1)) and self.sxlen(B) == -1:
                         res = 0
                     else:
-                        r = abs(s32(A)) % abs(s32(B))
-                        if s32(A) < 0:
+                        r = abs(self.sxlen(A)) % abs(self.sxlen(B))
+                        if self.sxlen(A) < 0:
                             r = -r
-                        res = u32(r)
+                        res = self.uxlen(r)
                 else:  # remu
-                    res = A if B == 0 else (u32(A) % u32(B))
+                    res = A if B == 0 else (self.uxlen(A) % self.uxlen(B))
                 self.wr(rd, res)
-            elif f7 == 0b0100000 and f3 == 0b111:  # custom ctz
+            elif f7 == 0b0100000 and f3 == 0b111:  # custom ctz -- design/ALU.v's
+                # own CTZ case iterates `XLEN-1` cycles, not a fixed 31 --
+                # generalizes the same way here (docs/adr/0028).
                 count = 0
                 done = False
-                for i in range(31):
+                for i in range(xl - 1):
                     if (A >> i) & 1 == 0 and not done:
                         count += 1
                     else:
@@ -895,34 +1047,87 @@ class ISS:
                 self.wr(rd, count)
             else:
                 if f3 == 0 and f7 == 0:
-                    res = u32(A + B)
+                    res = self.uxlen(A + B)
                 elif f3 == 0 and f7 == 0b0100000:
-                    res = u32(A - B)
+                    res = self.uxlen(A - B)
                 elif f3 == 1:
-                    res = u32(A << (B & 0x1F))
+                    res = self.uxlen(A << (B & (xl - 1)))
                 elif f3 == 2:
-                    res = 1 if s32(A) < s32(B) else 0
+                    res = 1 if self.sxlen(A) < self.sxlen(B) else 0
                 elif f3 == 3:
-                    res = 1 if u32(A) < u32(B) else 0
+                    res = 1 if self.uxlen(A) < self.uxlen(B) else 0
                 elif f3 == 4:
-                    res = u32(A ^ B)
+                    res = self.uxlen(A ^ B)
                 elif f3 == 5 and f7 == 0:
-                    res = u32(A) >> (B & 0x1F)
+                    res = self.uxlen(A) >> (B & (xl - 1))
                 elif f3 == 5 and f7 == 0b0100000:
-                    res = u32(s32(A) >> (B & 0x1F))
+                    res = self.uxlen(self.sxlen(A) >> (B & (xl - 1)))
                 elif f3 == 6:
-                    res = u32(A | B)
+                    res = self.uxlen(A | B)
                 elif f3 == 7:
-                    res = u32(A & B)
+                    res = self.uxlen(A & B)
                 else:
                     raise ValueError(f"unknown R-type f3={f3} f7={f7}")
                 self.wr(rd, res)
             self.pc = next_pc
 
+        elif op == 0b0111011:  # Generation 2: OP-32 -- addw/subw/sllw/srlw/
+            # sraw/mulw/divw/divuw/remw/remuw. Same field layout as R-type
+            # above (reuses OP's own funct7/funct3 byte-for-byte), but every
+            # op computes on the low 32 bits (via the fixed-32-bit s32/u32,
+            # NOT self.sxlen/self.uxlen) and sign-extends the 32-bit result
+            # to XLEN via self.wr (which calls self.uxlen -- self.sxlen(...)
+            # first, matching the spec's "always sign-extend the word
+            # result" rule regardless of the op's own signedness, same as
+            # design/ALU.v's wordOp arms and design/riscvpipeline.v's
+            # div_result wrapping).
+            if f7 == 0b0000001:  # divw/divuw/remw/remuw/mulw
+                if f3 == 0b000:  # mulw
+                    res32 = u32(A * B)
+                elif f3 == 0b100:  # divw
+                    if u32(B) == 0:
+                        res32 = 0xFFFFFFFF
+                    elif s32(A) == -2147483648 and s32(B) == -1:
+                        res32 = u32(A)
+                    else:
+                        q = abs(s32(A)) // abs(s32(B))
+                        if (s32(A) < 0) != (s32(B) < 0):
+                            q = -q
+                        res32 = u32(q)
+                elif f3 == 0b101:  # divuw
+                    res32 = 0xFFFFFFFF if u32(B) == 0 else (u32(A) // u32(B))
+                elif f3 == 0b110:  # remw
+                    if u32(B) == 0:
+                        res32 = u32(A)
+                    elif s32(A) == -2147483648 and s32(B) == -1:
+                        res32 = 0
+                    else:
+                        r = abs(s32(A)) % abs(s32(B))
+                        if s32(A) < 0:
+                            r = -r
+                        res32 = u32(r)
+                else:  # remuw
+                    res32 = u32(A) if u32(B) == 0 else (u32(A) % u32(B))
+            else:
+                if f3 == 0 and f7 == 0:  # addw
+                    res32 = u32(A + B)
+                elif f3 == 0 and f7 == 0b0100000:  # subw
+                    res32 = u32(A - B)
+                elif f3 == 1:  # sllw -- shamt always B[4:0], regardless of XLEN
+                    res32 = u32(u32(A) << (B & 0x1F))
+                elif f3 == 5 and f7 == 0:  # srlw
+                    res32 = u32(A) >> (B & 0x1F)
+                elif f3 == 5 and f7 == 0b0100000:  # sraw
+                    res32 = u32(s32(A) >> (B & 0x1F))
+                else:
+                    raise ValueError(f"unknown OP-32 f3={f3} f7={f7}")
+            self.wr(rd, s32(res32))
+            self.pc = next_pc
+
         elif op == 0b0101010:  # custom ctz (opcode 0101010, not 0110011 -- see design/riscv_defs.vh OPCODE_CUSTOM)
             count = 0
             done = False
-            for i in range(31):
+            for i in range(xl - 1):
                 if (A >> i) & 1 == 0 and not done:
                     count += 1
                 else:
@@ -932,47 +1137,86 @@ class ISS:
 
         elif op == 0b0010011:  # I-type ALU
             if f3 in (1, 5):
-                shamt = (word >> 20) & 0x1F
-                if f3 == 1:
-                    res = u32(A << shamt)
-                elif f7 == 0b0100000:
-                    res = u32(s32(A) >> shamt)
+                # Generation 2: 6-bit shamt/6-bit funct6 at xlen>=64,
+                # matching design/ImmGen.v/design/ALUCtrl.v's own split --
+                # bit-exact with the original 5-bit/7-bit form at xlen=32.
+                if xl >= 64:
+                    shamt = (word >> 20) & 0x3F
+                    f6 = (word >> 26) & 0x3F
+                    is_alt = (f6 == 0b010000)
                 else:
-                    res = u32(A) >> shamt
+                    shamt = (word >> 20) & 0x1F
+                    is_alt = (f7 == 0b0100000)
+                if f3 == 1:
+                    res = self.uxlen(A << shamt)
+                elif is_alt:
+                    res = self.uxlen(self.sxlen(A) >> shamt)
+                else:
+                    res = self.uxlen(A) >> shamt
             elif f3 == 0:
-                res = u32(A + imm_i)
+                res = self.uxlen(A + imm_i)
             elif f3 == 2:
-                res = 1 if s32(A) < imm_i else 0
+                res = 1 if self.sxlen(A) < imm_i else 0
             elif f3 == 3:
-                res = 1 if u32(A) < u32(imm_i) else 0
+                res = 1 if self.uxlen(A) < self.uxlen(imm_i) else 0
             elif f3 == 4:
-                res = u32(A ^ u32(imm_i))
+                res = self.uxlen(A ^ self.uxlen(imm_i))
             elif f3 == 6:
-                res = u32(A | u32(imm_i))
+                res = self.uxlen(A | self.uxlen(imm_i))
             elif f3 == 7:
-                res = u32(A & u32(imm_i))
+                res = self.uxlen(A & self.uxlen(imm_i))
             else:
                 raise ValueError(f"unknown I-type f3={f3}")
             self.wr(rd, res)
             self.pc = next_pc
 
+        elif op == 0b0011011:  # Generation 2: OP-IMM-32 -- addiw/slliw/
+            # srliw/sraiw. shamt always exactly 5 bits regardless of XLEN
+            # (unlike OPCODE_I's shamt above) -- this opcode only ever means
+            # a 32-bit result.
+            if f3 in (1, 5):
+                shamt = (word >> 20) & 0x1F
+                if f3 == 1:
+                    res32 = u32(u32(A) << shamt)
+                elif f7 == 0b0100000:
+                    res32 = u32(s32(A) >> shamt)
+                else:
+                    res32 = u32(A) >> shamt
+            elif f3 == 0:  # addiw
+                res32 = u32(A + imm_i)
+            else:
+                raise ValueError(f"unknown OP-IMM-32 f3={f3}")
+            self.wr(rd, s32(res32))
+            self.pc = next_pc
+
         elif op == 0b0000011:  # loads
-            addr = self.translate(u32(A + imm_i), "load")
+            addr = self.translate(self.uxlen(A + imm_i), "load")
             if addr is None:
                 return  # page fault already trapped inside translate()
             if f3 == 0:  # lb
                 v = self.load_mem_byte(addr)
-                res = u32(s32(v | (0xFFFFFF00 if v & 0x80 else 0)))
+                res = s32(v | (0xFFFFFF00 if v & 0x80 else 0))
             elif f3 == 1:  # lh
                 v = self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8)
-                res = u32(s32(v | (0xFFFF0000 if v & 0x8000 else 0)))
-            elif f3 == 2:  # lw
-                res = (self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8) |
-                       (self.load_mem_byte(addr + 2) << 16) | (self.load_mem_byte(addr + 3) << 24))
+                res = s32(v | (0xFFFF0000 if v & 0x8000 else 0))
+            elif f3 == 2:  # lw -- Generation 2: sign-extends to XLEN (was a
+                # real RTL bug fixed in design/DataMemoryBRAM.v -- lw used
+                # to zero-extend; lwu exists specifically because lw doesn't).
+                v = (self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8) |
+                     (self.load_mem_byte(addr + 2) << 16) | (self.load_mem_byte(addr + 3) << 24))
+                res = s32(v)
             elif f3 == 4:  # lbu
                 res = self.load_mem_byte(addr)
             elif f3 == 5:  # lhu
                 res = self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8)
+            elif f3 == 3:  # ld -- Generation 2, real only at xlen>=64
+                v = 0
+                for i in range(8):
+                    v |= self.load_mem_byte(addr + i) << (8 * i)
+                res = v
+            elif f3 == 6:  # lwu -- Generation 2, zero-extends (vs. lw's sign-extend)
+                res = (self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8) |
+                       (self.load_mem_byte(addr + 2) << 16) | (self.load_mem_byte(addr + 3) << 24))
             else:
                 raise ValueError(f"unknown load f3={f3}")
             self.wr(rd, res)
@@ -980,7 +1224,7 @@ class ISS:
 
         elif op == 0b0100011:  # stores
             imm_s = sext(((word >> 25) << 5) | ((word >> 7) & 0x1F), 12)
-            addr = self.translate(u32(A + imm_s), "store")
+            addr = self.translate(self.uxlen(A + imm_s), "store")
             if addr is None:
                 return  # page fault already trapped inside translate()
             if f3 == 0:
@@ -990,6 +1234,9 @@ class ISS:
                 self.store_mem_byte(addr + 1, B >> 8)
             elif f3 == 2:
                 for i in range(4):
+                    self.store_mem_byte(addr + i, B >> (8 * i))
+            elif f3 == 3:  # sd -- Generation 2, real only at xlen>=64
+                for i in range(8):
                     self.store_mem_byte(addr + i, B >> (8 * i))
             else:
                 raise ValueError(f"unknown store f3={f3}")
@@ -1002,12 +1249,12 @@ class ISS:
             b4_1 = (word >> 8) & 0xF
             off = sext((b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1), 13)
             taken = {
-                0: s32(A) == s32(B), 1: s32(A) != s32(B),
-                2: s32(A) <= s32(B), 3: s32(A) > s32(B),
-                4: s32(A) < s32(B), 5: s32(A) >= s32(B),
-                6: u32(A) < u32(B), 7: u32(A) >= u32(B),
+                0: self.sxlen(A) == self.sxlen(B), 1: self.sxlen(A) != self.sxlen(B),
+                2: self.sxlen(A) <= self.sxlen(B), 3: self.sxlen(A) > self.sxlen(B),
+                4: self.sxlen(A) < self.sxlen(B), 5: self.sxlen(A) >= self.sxlen(B),
+                6: self.uxlen(A) < self.uxlen(B), 7: self.uxlen(A) >= self.uxlen(B),
             }[f3]
-            self.pc = u32(self.pc + off) if taken else next_pc
+            self.pc = self.uxlen(self.pc + off) if taken else next_pc
 
         elif op == 0b1101111:  # jal
             b20 = (word >> 31) & 1
@@ -1016,19 +1263,22 @@ class ISS:
             b10_1 = (word >> 21) & 0x3FF
             off = sext((b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1), 21)
             self.wr(rd, next_pc)
-            self.pc = u32(self.pc + off)
+            self.pc = self.uxlen(self.pc + off)
 
         elif op == 0b1100111:  # jalr
-            target = u32((A + imm_i) & ~1)
+            target = self.uxlen((A + imm_i) & ~1)
             self.wr(rd, next_pc)
             self.pc = target
 
-        elif op == 0b0110111:  # lui
-            self.wr(rd, word & 0xFFFFF000)
+        elif op == 0b0110111:  # lui -- Generation 2: the 32-bit result is
+            # sign-extended to XLEN per spec (was a real RTL bug fixed in
+            # design/ImmGen.v -- bit-exact at xlen=32 since s32() is a no-op
+            # there once self.wr's self.uxlen re-masks to 32 bits).
+            self.wr(rd, s32(word & 0xFFFFF000))
             self.pc = next_pc
 
-        elif op == 0b0010111:  # auipc
-            self.wr(rd, u32(self.pc + (word & 0xFFFFF000)))
+        elif op == 0b0010111:  # auipc -- same sign-extension reasoning as lui.
+            self.wr(rd, self.uxlen(self.pc + s32(word & 0xFFFFF000)))
             self.pc = next_pc
 
         elif op == 0b1110011:  # SYSTEM: csrrw/rs/rc(+i), ecall, ebreak, mret, sret, sfence.vma
@@ -1099,7 +1349,7 @@ class ISS:
 
         # docs/adr/0019-f-extension.md (Phase C9): RV32F dispatch.
         elif op == 0b0000111:  # flw
-            addr = self.translate(u32(A + imm_i), "load")
+            addr = self.translate(self.uxlen(A + imm_i), "load")
             if addr is None:
                 return  # page fault already trapped inside translate()
             v = (self.load_mem_byte(addr) | (self.load_mem_byte(addr + 1) << 8) |
@@ -1109,7 +1359,7 @@ class ISS:
 
         elif op == 0b0100111:  # fsw
             imm_s = sext(((word >> 25) << 5) | ((word >> 7) & 0x1F), 12)
-            addr = self.translate(u32(A + imm_s), "store")
+            addr = self.translate(self.uxlen(A + imm_s), "store")
             if addr is None:
                 return  # page fault already trapped inside translate()
             v = self.fregs[rs2]
@@ -1157,18 +1407,34 @@ class ISS:
                 res, flags = f_cvt_to_int(fa, rm, unsigned)
                 self.wr(rd, res)
                 self.set_fflags(flags)
-            elif funct5 == 0b11010:  # fcvt.s.w/fcvt.s.wu -- reads the INTEGER file
+            elif funct5 == 0b11010:  # fcvt.s.w/fcvt.s.wu -- reads the INTEGER
+                # file. Generation 2: fcvt.s.w(u) converts the LOW 32 bits of
+                # an XLEN-wide integer register (spec) -- u32(A) truncates
+                # before f_cvt_from_int's own sign/magnitude split (which
+                # reads bit31 as the 32-bit sign bit either way, so this is
+                # a no-op at xlen=32).
                 unsigned = (rs2 == 0b00001)
-                res, flags = f_cvt_from_int(A, rm, unsigned)
+                res, flags = f_cvt_from_int(u32(A), rm, unsigned)
                 self.fregs[rd] = res
                 self.set_fflags(flags)
             elif funct5 == 0b11100:  # fmv.x.w/fclass.s -- both write the INTEGER file
                 if f3 == 0b001:
                     self.wr(rd, f_class(fa))
                 else:
-                    self.wr(rd, fa)
-            elif funct5 == 0b11110:  # fmv.w.x -- reads the INTEGER file
-                self.fregs[rd] = A
+                    # Generation 2: real spec text for RV64F's fmv.x.w --
+                    # "the higher 32 bits of the destination register are
+                    # filled with copies of the floating-point number's sign
+                    # bit" -- i.e. sign-extended from bit31 of the raw float
+                    # bit pattern, not zero-extended. s32() reinterprets the
+                    # bit pattern as signed; self.wr's self.uxlen re-masks it
+                    # correctly at any width (a no-op at xlen=32).
+                    self.wr(rd, s32(fa))
+            elif funct5 == 0b11110:  # fmv.w.x -- reads the INTEGER file.
+                # Generation 2: spec takes the LOW 32 bits of rs1 (moot at
+                # xlen=32, real at 64 -- e.g. after a sign-extending lui
+                # loaded a negative-looking 32-bit float bit pattern into a
+                # 64-bit register, only its low 32 bits are the real payload).
+                self.fregs[rd] = u32(A)
             else:
                 raise ValueError(f"unknown OP-FP funct5={funct5:#07b}")
             self.pc = next_pc

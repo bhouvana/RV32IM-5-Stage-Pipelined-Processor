@@ -34,6 +34,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 `include "Bht.v"
 `include "Btb.v"
 `include "ICache.v"

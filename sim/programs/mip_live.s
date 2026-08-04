@@ -4,13 +4,12 @@
 # exists yet (D9); this is CSR-read-side only, via csrrs polling loops.
 
 lui x1, 0x10000        # x1 = UART_BASE  = 0x10000000
-lui x2, 0x10000
-addi x2, x2, 16         # x2 = TIMER_BASE = 0x10000010
+lui x2, 0x10104         # x2 = TIMER_BASE + CLINT_OFF_MTIMECMP = 0x1010_4000 (MTIMECMP low, Phase R)
 
 # Timer: MTIMECMP = 50 (small, reachable quickly). Confirm NOT pending
 # immediately after setting a compare value still far ahead of mtime.
 addi x3, x0, 50
-sw x3, 4(x2)             # MTIMECMP = 50
+sw x3, 0(x2)             # MTIMECMP(low) = 50
 # An MMIO store commits at the MEM stage (one cycle behind EX); mip's
 # read-side view of Timer.v's pending is derived from mtimecmp as EX
 # sees it *this* cycle. A csrrs immediately following the sw would race
@@ -33,12 +32,12 @@ csrrs x6, 0x344, x0
 andi x7, x6, 0x80
 beq x7, x0, timer_poll   # loop until MTIP sets (mtime free-runs up to 50)
 
-# UART: enable rx_irq, then poll for a byte the testbench drives into rx
-# (byte reception itself doesn't depend on rx_irq_enable -- only whether
-# rx_irq/MEIP asserts once it's ready does, so this works regardless of
+# UART: enable IER.ERBFI, then poll for a byte the testbench drives into rx
+# (byte reception itself doesn't depend on IER.ERBFI -- only whether
+# irq/MEIP asserts once it's ready does, so this works regardless of
 # exactly when the testbench's stimulus and this enable-write interleave).
 addi x8, x0, 1
-sw x8, 12(x1)             # CONTROL.rx_irq_enable = 1
+sw x8, 4(x1)             # IER.ERBFI = 1
 
 uart_poll:
 csrrs x9, 0x344, x0
@@ -49,9 +48,9 @@ beq x10, x0, uart_poll    # loop until MEIP sets
 csrrs x11, 0x344, x0
 andi x12, x11, -1920      # 0x880 (MTIP|MEIP) -- same signed-immediate note as above
 
-# Reading RXDATA clears rx_ready -> MEIP clears. MTIP has no software
+# Reading RBR clears LSR.DR -> MEIP clears. MTIP has no software
 # clear except reprogramming MTIMECMP past the current mtime, so it stays.
-lw x13, 4(x1)             # RXDATA
+lw x13, 0(x1)             # RBR
 csrrs x14, 0x344, x0
 andi x15, x14, -2048       # 0x800 (MEIP) -- expect 0 (cleared); same signed-immediate note as above
 andi x16, x14, 0x80        # expect 0x80 (MTIP still set)

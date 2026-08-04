@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0020-soc-integration.md (Phase D7, updated for D8): mie/mip's
 // CSR-only plumbing -- masking (only MTIE/MEIE survive a write to mie),
@@ -61,15 +63,15 @@ module tb_mie_mip_csr;
         #300;
 
         // docs/adr/00NN-mmu-sv32.md (Phase F1): 0x7f (bits 0-6) now
-        // includes two real bits that didn't exist through Phase E --
-        // SSIE@1/STIE@5 -- so this write no longer masks to entirely 0.
-        // MTIE@7/SEIE@9/MEIE@11 (the bits 0x7f doesn't reach) still don't
-        // survive, confirming the mask boundary is exactly right, not
-        // simply wider than before.
+        // includes real bits that didn't exist through Phase E -- SSIE@1/
+        // STIE@5 (Phase F), plus MSIE@3 (docs/adr/0034, Phase R) -- so this
+        // write no longer masks to entirely 0. MTIE@7/SEIE@9/MEIE@11 (the
+        // bits 0x7f doesn't reach) still don't survive, confirming the
+        // mask boundary is exactly right, not simply wider than before.
         check_reg(2, 32'h00000000, "csrrw x2,mie,0x7f: x2 = old mie (0)");
-        check_reg(3, 32'h00000022, "mie reads back 0x22 -- SSIE@1/STIE@5 (Phase F, real) survived, nothing above bit6 did");
+        check_reg(3, 32'h0000002A, "mie reads back 0x2a -- SSIE@1/MSIE@3/STIE@5 survived, nothing above bit6 did");
 
-        check_reg(4, 32'h00000022, "csrrw x4,mie,0x80: x4 = old mie (0x22 from the previous csrrw)");
+        check_reg(4, 32'h0000002A, "csrrw x4,mie,0x80: x4 = old mie (0x2a from the previous csrrw)");
         check_reg(5, 32'h00000080, "mie reads back 0x80 -- csrrw REPLACED (0x22 is gone), MTIE alone survived");
 
         check_reg(6, 32'h00000080, "csrrw x6,mie,0x800: x6 = old mie (0x80)");

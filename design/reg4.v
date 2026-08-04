@@ -28,6 +28,12 @@ module reg4 #(
     input [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
     input jump_regem,
     input [XLEN-1:0] pc_plus4_regem,
+    // docs/adr/0038-a-extension-phase-v.md: gates the WB-stage writeback
+    // mux's own new AMO arm (riscvpipeline.v reads amo_captured_read_r --
+    // a plain top-level register, not threaded through this module -- once
+    // this flag says the occupant now in WB really is the lr/sc/amo* that
+    // register was captured for).
+    input isAmo_regem,
     input hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
                   // freeze every field exactly as-is while a load sitting in
                   // reg3 (this register's own source) hasn't come back from
@@ -46,7 +52,8 @@ module reg4 #(
     output reg [XLEN-1:0] ALUOut_regwb,
     output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regwb,
     output reg jump_regwb,
-    output reg [XLEN-1:0] pc_plus4_regwb
+    output reg [XLEN-1:0] pc_plus4_regwb,
+    output reg isAmo_regwb
 );
 
 always@(posedge clk)
@@ -62,6 +69,7 @@ begin
     write_to_Reg_regwb <=0;
     jump_regwb <= 0;
     pc_plus4_regwb <= 0;
+    isAmo_regwb <= 0;
 
     end
     else if(hold)
@@ -79,6 +87,7 @@ begin
     write_to_Reg_regwb <= write_to_Reg_regem;
     jump_regwb <= jump_regem;
     pc_plus4_regwb <= pc_plus4_regem;
+    isAmo_regwb <= isAmo_regem;
     end
 end
 endmodule

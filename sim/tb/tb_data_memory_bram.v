@@ -21,6 +21,20 @@ module tb_data_memory_bram;
                         .address(address), .writeData(writeData), .funct3(funct3),
                         .readData(readData));
 
+    // Generation 2 (Phase M): a second, independent XLEN=64 instance,
+    // sharing clk/rst with the XLEN=32 one above (both are just an ordinary
+    // synchronous reset pulse, no cross-instance dependency).
+    reg memWrite64 = 0;
+    reg memRead64 = 0;
+    reg [63:0] address64 = 0;
+    reg [63:0] writeData64 = 0;
+    reg [2:0] funct3_64 = 0;
+    wire [63:0] readData64;
+
+    DataMemoryBRAM #(.XLEN(64)) dut64(.clk(clk), .rst(rst), .memWrite(memWrite64), .memRead(memRead64),
+                        .address(address64), .writeData(writeData64), .funct3(funct3_64),
+                        .readData(readData64));
+
     always #5 clk = ~clk;
 
     task check;
@@ -34,6 +48,31 @@ module tb_data_memory_bram;
             end else begin
                 $display("pass  %0s: 0x%08h", label, actual);
             end
+        end
+    endtask
+
+    task check64;
+        input [63:0] actual, expected;
+        input [255:0] label;
+        begin
+            checks = checks + 1;
+            if (actual !== expected) begin
+                fails = fails + 1;
+                $display("FAIL  %0s: 0x%016h, expected 0x%016h", label, actual, expected);
+            end else begin
+                $display("pass  %0s: 0x%016h", label, actual);
+            end
+        end
+    endtask
+
+    task store64;
+        input [63:0] addr, data;
+        input [2:0] f3;
+        begin
+            @(posedge clk);
+            memWrite64 <= 1; memRead64 <= 0; address64 <= addr; writeData64 <= data; funct3_64 <= f3;
+            @(posedge clk);
+            memWrite64 <= 0;
         end
     endtask
 
@@ -104,6 +143,27 @@ module tb_data_memory_bram;
         #1 check(readData, 32'd0, "read latency: new request not yet sampled by the DUT, readData still reflects mem_read_r=0");
         @(posedge clk); memRead <= 0;
         #1 check(readData, 32'hAAAAAAAA, "read latency: new value valid exactly one cycle after the DUT saw the request");
+
+        // ---- Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md):
+        // a second, XLEN=64 instance -- ld/sd round trip, and the lw-vs-lwu
+        // sign/zero-extension distinction (the real bug this phase fixed:
+        // lw used to zero-extend at XLEN=64 instead of sign-extending).
+        // sd 0x1122334455667788 @ addr 32, read back as ld.
+        store64(64'd32, 64'h1122334455667788, 3'b011);
+        @(posedge clk); memRead64 <= 1; address64 <= 64'd32; funct3_64 <= 3'b011;
+        @(posedge clk); memRead64 <= 0;
+        #1 check64(readData64, 64'h1122334455667788, "sd/ld round trip (XLEN=64)");
+
+        // sw 0x80000000 @ addr 40 (bit31 set) -- lw must sign-extend to
+        // 64 bits, lwu must zero-extend. Both read the same stored word.
+        store64(64'd40, 64'h0000000080000000, 3'b010);
+        @(posedge clk); memRead64 <= 1; address64 <= 64'd40; funct3_64 <= 3'b010;
+        @(posedge clk); memRead64 <= 0;
+        #1 check64(readData64, 64'hFFFFFFFF80000000, "lw sign-extends bit31 to 64 bits (XLEN=64) -- the fixed bug");
+
+        @(posedge clk); memRead64 <= 1; address64 <= 64'd40; funct3_64 <= 3'b110;
+        @(posedge clk); memRead64 <= 0;
+        #1 check64(readData64, 64'h0000000080000000, "lwu zero-extends the same word (XLEN=64)");
 
         if (fails == 0)
             $display("PASS  data_memory_bram (%0d checks)", checks);

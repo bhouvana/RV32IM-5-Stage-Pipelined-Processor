@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/00NN-mmu-sv32.md (Phase F5). Happy-path integration test -- see
 // sim/programs/mmu_translate_f5.s's own header for the full story: a real
@@ -54,7 +56,7 @@ module tb_mmu_translate_f5;
     always #5 clk = ~clk;
 
     always @(posedge clk) begin
-        if (start && dut.m_Ptw.done)
+        if (start && dut.gen_mmu_ptw_sv32.m_Ptw.done)
             walk_count = walk_count + 1;
     end
 

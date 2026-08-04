@@ -32,12 +32,14 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0020-soc-integration.md (Phase D8): confirms mip.MTIP/MEIP
 // track real, live hardware transitions (Timer.v counting up to a
-// software-programmed MTIMECMP; Uart.v's rx_irq once a real byte arrives
-// and rx_irq_enable is set) -- not just a static snapshot, and that
-// reading RXDATA clears MEIP while MTIP (no software clear except
+// software-programmed MTIMECMP; Uart.v's irq once a real byte arrives
+// and IER.ERBFI is set) -- not just a static snapshot, and that
+// reading RBR clears MEIP while MTIP (no software clear except
 // reprogramming MTIMECMP) stays sticky. No interrupt redirect exists yet
 // (D9) -- this is entirely CSR-read-side, via software polling loops.
 module tb_mip_live;
@@ -79,7 +81,7 @@ module tb_mip_live;
 
         check_reg(5,  32'h00000000, "MTIP clear right after setting MTIMECMP=50 (mtime still near 0)");
         check_reg(7,  32'h00000080, "MTIP set once the timer_poll loop observes mtime >= 50");
-        check_reg(10, 32'h00000800, "MEIP set once the uart_poll loop observes the driven byte, rx_irq_enable=1");
+        check_reg(10, 32'h00000800, "MEIP set once the uart_poll loop observes the driven byte, IER.ERBFI=1");
         check_reg(12, 32'h00000880, "both MTIP and MEIP read pending simultaneously");
         check_reg(13, 32'h00000099, "RXDATA read returns the byte the testbench drove (0x99)");
         check_reg(15, 32'h00000000, "MEIP clears once RXDATA is read (rx_ready consumed)");

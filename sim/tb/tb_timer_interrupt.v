@@ -32,11 +32,14 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0020-soc-integration.md (Phase D9). Directed test for the
 // interrupt redirect path itself, timer source: sim/programs/timer_interrupt.s
 // arms MTIMECMP/mie.MTIE/mstatus.MIE, then runs an 18-iteration loop
-// (addresses [36,104]) that a timer interrupt fires somewhere in the middle
+// (addresses [32,100], Phase R shifted -4 from the CLINT register-layout
+// change -- see the .s file's own header) that a timer interrupt fires somewhere in the middle
 // of. Checks: the interrupt is actually taken (handler ran, mcause carries
 // the interrupt bit + the timer cause code), mepc is the "would have
 // executed next" instruction (squashed, not the trapping one -- this test's
@@ -66,14 +69,14 @@ module tb_timer_interrupt;
         check_val(dut.m_CSR.mstatus, 32'h88,
                    "mstatus after mret: MIE(bit3)=1 restored from MPIE, MPIE(bit7)=1 set by mret");
 
-        // mepc must land inside the loop's own address range [36,104] and be
+        // mepc must land inside the loop's own address range [32,100] and be
         // word-aligned -- not a raw equality check (which exact iteration
         // gets interrupted isn't pinned down, deliberately, see the .s
         // file's header comment), but bounded and well-formed.
         total_checks = total_checks + 1;
-        if (dut.m_CSR.mepc < 32'd36 || dut.m_CSR.mepc > 32'd104 || dut.m_CSR.mepc[1:0] != 2'b00) begin
+        if (dut.m_CSR.mepc < 32'd32 || dut.m_CSR.mepc > 32'd100 || dut.m_CSR.mepc[1:0] != 2'b00) begin
             total_fails = total_fails + 1;
-            $display("  FAIL  mepc in-loop bounds check: mepc = 0x%08h, expected in [36,104], word-aligned",
+            $display("  FAIL  mepc in-loop bounds check: mepc = 0x%08h, expected in [32,100], word-aligned",
                       dut.m_CSR.mepc);
         end else begin
             $display("  pass  mepc in-loop bounds check: mepc = 0x%08h", dut.m_CSR.mepc);

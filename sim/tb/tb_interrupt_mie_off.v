@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0020-soc-integration.md (Phase D9). Directed test:
 // sim/programs/interrupt_mie_off.s enables both mie.MTIE and mie.MEIE, and

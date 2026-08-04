@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/00NN-mmu-sv32.md (Phase F5). Instruction page fault -- see
 // sim/programs/mmu_ifetch_fault_f5.s's own header: satp enabled with a

@@ -21,10 +21,9 @@
 # mirroring sim/programs/timer_interrupt.s's own handler doing exactly
 # this for the identical reason. x1/x2 here are pure setup scratch, fully
 # overwritten below -- neither is ever check_reg'd.
-lui x1, 0x10000       # x1 = MMIO_BASE (0x10000000)
-addi x1, x1, 16        # x1 = TIMER_BASE (UART_SIZE=16)
+lui x1, 0x10104        # x1 = TIMER_BASE + CLINT_OFF_MTIMECMP = 0x1010_4000 (MTIMECMP low, Phase R)
 lui x2, 0xFFFFF        # x2 = 0xFFFFF000 -- far beyond any mtime this short test reaches
-sw x2, 4(x1)           # TIMER.MTIMECMP <- huge: pending stays false for the rest of this test
+sw x2, 0(x1)           # TIMER.MTIMECMP(low) <- huge: pending stays false for the rest of this test
 
 addi x1, x0, -1      # x1 = 0xFFFFFFFF (all bits set)
 

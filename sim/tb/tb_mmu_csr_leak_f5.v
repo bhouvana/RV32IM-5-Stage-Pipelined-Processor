@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/00NN-mmu-sv32.md (Phase F5). Closes a real gap this phase's own
 // hand-trace found in F3's csr_priv_violation logic -- see

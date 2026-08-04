@@ -15,15 +15,18 @@
 // one external device, UART RX) rather than a spec-complete privileged
 // architecture.
 //
-// mie/mip only ever have two real bits each (`MIE_MTIE_BIT`/`MIE_MEIE_BIT`,
-// riscv_defs.vh) -- machine software-interrupt (MSIP) is not implemented
-// (no second hart exists to send one), and no S-mode/U-mode delegation
-// bits exist either. mip is read-only from software's perspective (its
-// two real bits, MTIP/MEIP, are hardware-driven straight from
-// Timer.v's/the PLIC-lite's own live pending signals -- see
-// `timer_pending`/`ext_pending` below); a csrrX write to its address is
-// silently dropped, the same "unimplemented CSR writes are silently
-// dropped" default every other unimplemented address already gets.
+// mie/mip have three real bits (`MIE_MSIE_BIT`/`MIE_MTIE_BIT`/
+// `MIE_MEIE_BIT`, riscv_defs.vh) -- docs/adr/0034-uart-clint-register-
+// compat-phase-r.md (Phase R) added the machine-software-interrupt bit,
+// driven by Timer.v's own new CLINT `msip` register (this core is still
+// single-hart, so nothing but a hart interrupting itself ever sets it, real
+// spec-legal behavior). No S-mode/U-mode delegation bits exist. mip is
+// read-only from software's perspective (its three real bits, MSIP/MTIP/
+// MEIP, are hardware-driven straight from Timer.v's/the PLIC-lite's own
+// live pending signals -- see `msip_pending`/`timer_pending`/`ext_pending`
+// below); a csrrX write to its address is silently dropped, the same
+// "unimplemented CSR writes are silently dropped" default every other
+// unimplemented address already gets.
 module CSR #(
     parameter XLEN = 32   // docs/adr/0015-xlen-and-regcount-parameterization.md.
                             // csr_addr stays a fixed 12 bits regardless -- the
@@ -86,34 +89,53 @@ module CSR #(
     input [4:0] fp_flags_in,
     output [2:0] frm_val,
 
-    // docs/adr/0020-soc-integration.md (Phase D7/D8). Live hardware pending
-    // state -- Timer.v's own `pending` output and the PLIC-lite's single
-    // external source (Uart.v's `rx_irq`) -- feeding mip's two real,
-    // read-only bits. Tied to 1'b0 by riscvpipeline.v until D8 wires the
-    // real peripherals in; CSR.v's own interface needs no further changes
-    // at that point.
+    // docs/adr/0020-soc-integration.md (Phase D7/D8) originally wired
+    // timer_pending/ext_pending; docs/adr/0034 (Phase R) adds msip_pending
+    // -- Timer.v's own new CLINT `msip` register -- alongside them. All
+    // three feed mip's three real, read-only bits.
+    input msip_pending,
     input timer_pending,
     input ext_pending,
 
     // docs/adr/0020-soc-integration.md (Phase D9). Consumed by
     // riscvpipeline.v's interrupt-detection condition (mstatus_mie &
-    // ((mip.MEIP & mie.MEIE) | (mip.MTIP & mie.MTIE))) -- CSR.v's own
-    // interface needed no further changes to support it, exactly as D7
-    // anticipated.
+    // ((mip.MEIP & mie.MEIE) | (mip.MSIP & mie.MSIE) | (mip.MTIP &
+    // mie.MTIE)), Phase R) -- CSR.v's own interface needed no further
+    // changes to support it, exactly as D7 anticipated.
     output mstatus_mie,  // mstatus[3], the global trap/interrupt enable
+    output mie_msie,     // mie's machine-software-interrupt enable bit (Phase R)
     output mie_mtie,     // mie's machine-timer-interrupt enable bit
     output mie_meie,     // mie's machine-external-interrupt enable bit
 
-    // docs/adr/0027-formal-verification.md (Phase L3). Formal-
-    // observability outputs only -- no live consumer in riscvpipeline.v.
-    // Mirrors mstatus_mie's own exact idiom (a single bit of `mstatus`
-    // exposed as its own named output) for the remaining bits a formal
-    // property needs to observe. Added because Yosys's `read_verilog`
-    // can't resolve a hierarchical `dut.mstatus`-style peek from outside
-    // this module (confirmed by running -- it silently becomes an
-    // implicitly-declared, driverless stand-in signal, unlike iverilog's
-    // simulator, which resolves this hierarchy path natively); an
-    // ordinary port is the portable way to expose it to both toolchains.
+    // docs/adr/0035-minimal-sbi-firmware-phase-s.md (Phase S). Real
+    // consumers, not formal-observability-only: riscvpipeline.v's own
+    // supervisor-interrupt recognition (ssi_pending/sti_pending), a genuine
+    // gap Phase S's own SBI firmware design found -- mip_sw's SSIP/STIP
+    // bits (real, software-writable storage since Phase F) had no path
+    // into interrupt_taken at all before this phase, so a software-
+    // synthesized S-mode timer interrupt (the real SBI TIME-extension
+    // mechanism, since mtimecmp is M-mode-only CLINT state) could never
+    // actually retrap. mie_ssie/mie_stie mirror mie_msie's own exact idiom;
+    // mip_ssip/mip_stip expose mip_sw's own SSIP/STIP bits the identical
+    // way timer_pending/ext_pending already expose Timer.v/Uart.v's real
+    // hardware pending state.
+    output mie_ssie,     // mie's supervisor-software-interrupt enable bit
+    output mie_stie,     // mie's supervisor-timer-interrupt enable bit
+    output mip_ssip,     // mip_sw's supervisor-software-interrupt pending bit
+    output mip_stip,     // mip_sw's supervisor-timer-interrupt pending bit
+
+    // docs/adr/0027-formal-verification.md (Phase L3) added these as
+    // formal-observability-only outputs; docs/adr/0035 (Phase S) gives
+    // mstatus_sie a real, live consumer too (riscvpipeline.v's own new
+    // supervisor-interrupt gating, mirroring mstatus_mie's own role for
+    // the machine-level condition) -- the rest stay formal-only. Mirrors
+    // mstatus_mie's own exact idiom (a single bit of `mstatus` exposed as
+    // its own named output). Added because Yosys's `read_verilog` can't
+    // resolve a hierarchical `dut.mstatus`-style peek from outside this
+    // module (confirmed by running -- it silently becomes an implicitly-
+    // declared, driverless stand-in signal, unlike iverilog's simulator,
+    // which resolves this hierarchy path natively); an ordinary port is
+    // the portable way to expose it to both toolchains.
     output mstatus_mpie,        // mstatus[7]
     output mstatus_sie,         // mstatus[1]
     output mstatus_spie,        // mstatus[5]
@@ -141,8 +163,25 @@ module CSR #(
     // ASID (bits [30:22]) has no consumer this phase (no selective TLB
     // invalidation, see the phase plan's own scoping default), so it's
     // not exposed here.
-    output satp_mode_val,
-    output [21:0] satp_ppn_val,
+    //
+    // docs/adr/0031 (Phase O): at XLEN==64 these now decode Sv39's own
+    // completely different satp layout (MODE is a 4-bit field at 63:60,
+    // not a single bit at 31) rather than Sv32's -- see the `always`
+    // block below. satp_mode_val's meaning generalizes correctly at both
+    // XLENs: "a real, non-Bare translation mode is selected."
+    //
+    // docs/adr/00NN-sv39-mmu-phase-p.md (Phase P3): satp_ppn_val widened
+    // from 22 to 44 bits -- Sv39's real spec PPN field is 44 bits (vs.
+    // Sv32's 22), and Ptw39.v's own `satp_ppn` port needs the full width
+    // (it does its own low-20-bits truncation internally, the same
+    // "decode the root pointer at full width, truncate only what the
+    // walker itself forms" principle Ptw.v/Ptw39.v's own headers document).
+    // At XLEN==32 the value is simply zero-extended into the wider port --
+    // Ptw.v's own `satp_ppn` port stays 22 bits, fed this value's low 22
+    // bits at the call site (riscvpipeline.v), so this widening is a
+    // pure superset, no behavior change at XLEN==32.
+    output reg satp_mode_val,
+    output reg [43:0] satp_ppn_val,
 
     // docs/adr/0025-hpc-performance-csrs.md (Phase J). One pulse input per
     // hardware-countable event (index 1-9 into `hpmevent`'s own selector
@@ -189,7 +228,7 @@ module CSR #(
     reg [XLEN-1:0] mstatus;  // bit3(MIE)/bit7(MPIE) real since docs/adr/0011; bit1(SIE)/bit5(SPIE)/
                                // bit8(SPP)/bits12:11(MPP) real as of this phase (F1) -- see mstatus_masked
     reg [XLEN-1:0] mie;      // MIE_MTIE_BIT/MIE_MEIE_BIT real since D7; MIE_SSIE_BIT/MIE_STIE_BIT/
-                               // MIE_SEIE_BIT real as of this phase -- see mie_masked
+                               // MIE_SEIE_BIT real since Phase F; MIE_MSIE_BIT real since Phase R -- see mie_masked
     reg [XLEN-1:0] mtvec;
     reg [XLEN-1:0] mscratch;
     reg [XLEN-1:0] mepc;
@@ -215,9 +254,9 @@ module CSR #(
     reg [XLEN-1:0] mtval;
     reg [XLEN-1:0] stvec;
     reg [XLEN-1:0] satp;
-    reg [XLEN-1:0] mideleg;  // only the two real interrupt causes (bits 7/11, matching mie/mip's
-                               // own MIE_MTIE_BIT/MIE_MEIE_BIT) are meaningful; every other bit
-                               // reads/writes as 0 since no other interrupt source exists
+    reg [XLEN-1:0] mideleg;  // only the three real interrupt causes (bits 3/7/11, matching mie/mip's
+                               // own MIE_MSIE_BIT/MIE_MTIE_BIT/MIE_MEIE_BIT, Phase R) are meaningful;
+                               // every other bit reads/writes as 0 since no other interrupt source exists
     reg [XLEN-1:0] medeleg;  // exception causes; every bit this core can actually raise
                                // (illegal instruction, breakpoint, ecall from U/S, the three
                                // page faults) is independently delegable per spec
@@ -311,18 +350,19 @@ module CSR #(
     wire [XLEN-1:0] hpm_counter_hi_rd = hpm_hi_acc[`NUM_HPM_COUNTERS];
     wire [4:0]      hpm_event_rd      = hpm_ev_acc[`NUM_HPM_COUNTERS];
 
-    // mip: bits 7(MTIP)/11(MEIP) stay exactly as before this phase --
-    // read-only, hardware-driven straight from Timer.v/the PLIC-lite,
-    // never software-writable. Phase F adds three more real bits, but
-    // unlike MTIP/MEIP these ARE software-writable per spec (a real
-    // platform's own S-level software/timer/external interrupt sources are
-    // conventionally driven by software -- e.g. M-mode's own trap handler
-    // -- not fixed hardware the way this core's one real timer/UART are).
-    // mip_sw holds exactly those three bits (SSIP@1/STIP@5/SEIP@9); every
-    // other mip bit (including the two hardware ones) is either the fixed
+    // mip: bits 3(MSIP, Phase R)/7(MTIP)/11(MEIP) are read-only, hardware-
+    // driven straight from Timer.v/the PLIC-lite, never software-writable.
+    // Phase F adds three more real bits, but unlike MSIP/MTIP/MEIP these
+    // ARE software-writable per spec (a real platform's own S-level
+    // software/timer/external interrupt sources are conventionally driven
+    // by software -- e.g. M-mode's own trap handler -- not fixed hardware
+    // the way this core's real timer/UART/CLINT-msip are). mip_sw holds
+    // exactly those three S-level bits (SSIP@1/STIP@5/SEIP@9); every other
+    // mip bit (including the three hardware ones) is either the fixed
     // hardware OR-in below or hardwired 0.
     reg [XLEN-1:0] mip_sw;
-    wire [XLEN-1:0] mip = mip_sw | (timer_pending << `MIE_MTIE_BIT) | (ext_pending << `MIE_MEIE_BIT);
+    wire [XLEN-1:0] mip = mip_sw | (msip_pending << `MIE_MSIE_BIT) |
+        (timer_pending << `MIE_MTIE_BIT) | (ext_pending << `MIE_MEIE_BIT);
 
     // sstatus/sie/sip: NOT separate storage -- masked VIEWS onto mstatus/
     // mie/mip's S-mode-visible bit subset (SIE@1/SPIE@5/SPP@8 of mstatus;
@@ -354,13 +394,40 @@ module CSR #(
     assign mstatus_spie = mstatus[`MSTATUS_SPIE_BIT];
     assign mstatus_spp = mstatus[`MSTATUS_SPP_BIT];
     assign mstatus_mpp = mstatus[`MSTATUS_MPP_LO+1:`MSTATUS_MPP_LO];
+    assign mie_msie = mie[`MIE_MSIE_BIT];
     assign mie_mtie = mie[`MIE_MTIE_BIT];
     assign mie_meie = mie[`MIE_MEIE_BIT];
+    assign mie_ssie = mie[`MIE_SSIE_BIT];
+    assign mie_stie = mie[`MIE_STIE_BIT];
+    assign mip_ssip = mip_sw[`MIE_SSIE_BIT];
+    assign mip_stip = mip_sw[`MIE_STIE_BIT];
     assign priv_mode_val = priv_mode;
     assign stvec_val = stvec;
     assign sepc_val = sepc;
-    assign satp_mode_val = satp[`SATP_MODE_BIT];
-    assign satp_ppn_val = satp[`SATP_PPN_HI:`SATP_PPN_LO];
+    // docs/adr/0031 (Phase O). XLEN-conditional satp decode: a plain
+    // procedural `if` keyed on the elaboration-time-constant XLEN, not a
+    // continuous-assign ternary -- matches DataMemoryBRAM.v's own proven
+    // "if (XLEN >= 64) ..." idiom (docs/adr/0028) for an out-of-range
+    // bit-slice that must dead-code-eliminate cleanly under
+    // `iverilog -Wall` at the XLEN this build doesn't select.
+    always @(*) begin
+        if (XLEN == 32) begin
+            satp_mode_val = satp[`SATP_MODE_BIT];
+            // Zero-extended into the wider (Phase P3) port -- Ptw.v's own
+            // satp_ppn port stays 22 bits, fed this value's low 22 bits at
+            // the call site.
+            satp_ppn_val  = {22'b0, satp[`SATP_PPN_HI:`SATP_PPN_LO]};
+        end else begin  // XLEN == 64: Sv39's own MODE/PPN layout, not Sv32's
+            satp_mode_val = (satp[`SATP64_MODE_HI:`SATP64_MODE_LO] == `SATP_MODE_SV39);
+            // docs/adr/00NN-sv39-mmu-phase-p.md (Phase P3): full 44-bit Sv39
+            // PPN, no truncation here -- satp's own PPN field is a root
+            // pointer, not an address this module forms; Ptw39.v does its
+            // own low-20-bits truncation internally (its `satp_ppn20`),
+            // matching Ptw.v's identical "decode at full width, truncate
+            // only what the walker itself forms" principle.
+            satp_ppn_val  = satp[`SATP64_PPN_HI:`SATP64_PPN_LO];
+        end
+    end
 
     // docs/adr/00NN-mmu-sv32.md (Phase F3). Delegation decision: a trap is
     // taken directly into S (rather than M) iff it's NOT sourced from M
@@ -403,6 +470,19 @@ module CSR #(
             `CSR_ADDR_MEDELEG:  csr_rdata = medeleg;
             default:            csr_rdata = {XLEN{1'b0}};  // unimplemented CSR reads as 0 rather than trapping
         endcase
+
+        // docs/adr/0031 (Phase O). mstatus.UXL/SXL (RV64 only, bits 33:32/
+        // 35:34) -- fixed WARL-to-2 ("64-bit") constants applied at the
+        // read mux, not real storage (mstatus/mstatus_masked never touch
+        // these bits, so nothing here is ever writable). Guarded exactly
+        // like DataMemoryBRAM.v's own proven `if (XLEN >= 64)` idiom
+        // (docs/adr/0028) for an otherwise out-of-range part-select --
+        // confirmed to dead-code-eliminate cleanly under `iverilog -Wall`
+        // at XLEN=32, since the branch is constant-folded away entirely.
+        if (XLEN == 64 && csr_addr == `CSR_ADDR_MSTATUS) begin
+            csr_rdata[`MSTATUS_UXL_LO+1 -: 2] = `MXL_XLEN64;
+            csr_rdata[`MSTATUS_SXL_LO+1 -: 2] = `MXL_XLEN64;
+        end
 
         // docs/adr/0025-hpc-performance-csrs.md (Phase J). The 9 generic
         // HPM counters/event-selectors are contiguous address ranges,
@@ -466,10 +546,12 @@ module CSR #(
         (new_val[`MSTATUS_SPP_BIT]  << `MSTATUS_SPP_BIT);
 
     // mie's real bits as of this phase: MTIE@7/MEIE@11 (docs/adr/0020),
-    // plus SSIE@1/STIE@5/SEIE@9 (Phase F, genuinely independent bits from
-    // the machine-level ones -- see mip_sw's own comment above for why).
-    // Used when the write targets `mie` directly.
+    // MSIE@3 (docs/adr/0034, Phase R), plus SSIE@1/STIE@5/SEIE@9 (Phase F,
+    // genuinely independent bits from the machine-level ones -- see
+    // mip_sw's own comment above for why). Used when the write targets
+    // `mie` directly.
     wire [XLEN-1:0] mie_masked = ({XLEN{1'b0}} |
+        (new_val[`MIE_MSIE_BIT] << `MIE_MSIE_BIT) |
         (new_val[`MIE_MTIE_BIT] << `MIE_MTIE_BIT) | (new_val[`MIE_MEIE_BIT] << `MIE_MEIE_BIT) |
         (new_val[`MIE_SSIE_BIT] << `MIE_SSIE_BIT) | (new_val[`MIE_STIE_BIT] << `MIE_STIE_BIT) |
         (new_val[`MIE_SEIE_BIT] << `MIE_SEIE_BIT));
@@ -491,16 +573,18 @@ module CSR #(
     // mideleg/medeleg: only the causes this core can actually raise are
     // real bits; everything else is hardwired 0 (mirrors mie/mip's own
     // "only the bits with a real source behind them" convention).
-    // mideleg allows delegating this core's own two real hardware
-    // interrupt sources (bits 7/11) directly, alongside the conventionally-
-    // S-level software/timer/external bits (1/5/9) -- a real but slightly
-    // non-standard choice for this core's minimal 2-source design: see
+    // mideleg allows delegating this core's own three real hardware
+    // interrupt sources (bits 3/7/11, Phase R added bit3/MSI alongside the
+    // original bits 7/11) directly, alongside the conventionally-S-level
+    // software/timer/external bits (1/5/9) -- a real but slightly
+    // non-standard choice for this core's minimal-source design: see
     // docs/adr/00NN-mmu-sv32.md for why (no separate S-level hardware
-    // timer/external source exists, so bits 7/11 are the only way to give
-    // S-mode direct access to this core's one real timer/UART interrupt).
+    // timer/external source exists, so bits 3/7/11 are the only way to give
+    // S-mode direct access to this core's real software/timer/UART
+    // interrupts).
     wire [XLEN-1:0] mideleg_masked = {XLEN{1'b0}} |
         (new_val[`MIE_SSIE_BIT] << `MIE_SSIE_BIT) | (new_val[`MIE_STIE_BIT] << `MIE_STIE_BIT) |
-        (new_val[`MIE_MTIE_BIT] << `MIE_MTIE_BIT) |
+        (new_val[`MIE_MSIE_BIT] << `MIE_MSIE_BIT) | (new_val[`MIE_MTIE_BIT] << `MIE_MTIE_BIT) |
         (new_val[`MIE_SEIE_BIT] << `MIE_SEIE_BIT) | (new_val[`MIE_MEIE_BIT] << `MIE_MEIE_BIT);
     wire [XLEN-1:0] medeleg_masked = {XLEN{1'b0}} |
         (new_val[2] << 2) | (new_val[3] << 3) |

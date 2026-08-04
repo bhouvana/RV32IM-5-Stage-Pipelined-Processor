@@ -173,7 +173,8 @@ def run_sim(lines, name, tag, work_dir, iverilog_bin, template, mem_size):
               .replace("__BRANCH_PREDICTOR__", "0")
               .replace("__CACHE_MODE__", "0")
               .replace("__MEM_LATENCY_I__", "0")
-              .replace("__MEM_LATENCY_D__", "0"))
+              .replace("__MEM_LATENCY_D__", "0")
+              .replace("__XLEN__", "32"))
     with open(dump_v, "w") as f:
         f.write(tpl)
 

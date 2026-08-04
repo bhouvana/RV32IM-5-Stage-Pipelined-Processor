@@ -16,8 +16,8 @@
 // ---- opcodes (inst[6:0]) ----
 `define OPCODE_R      7'b0110011  // R-type ALU
 `define OPCODE_I      7'b0010011  // I-type ALU (addi/slti/.../srai)
-`define OPCODE_LOAD   7'b0000011  // lw (see docs/ARCHITECTURE.md sec 9: word-only today)
-`define OPCODE_STORE  7'b0100011  // sw (word-only today)
+`define OPCODE_LOAD   7'b0000011  // lb/lh/lw/lbu/lhu always; ld/lwu added at XLEN=64 (Gen2 Phase M)
+`define OPCODE_STORE  7'b0100011  // sb/sh/sw always; sd added at XLEN=64 (Gen2 Phase M)
 `define OPCODE_BRANCH 7'b1100011  // beq/bne/blt/bge/ble/bgt/bltu/bgeu
 `define OPCODE_JAL    7'b1101111
 `define OPCODE_JALR   7'b1100111
@@ -27,6 +27,42 @@
 `define OPCODE_SYSTEM 7'b1110011  // CSR instructions, ecall, ebreak, mret (docs/adr/0011-csr-and-exceptions.md)
 `define OPCODE_MISC_MEM 7'b0001111  // fence (docs/adr/0023-caches.md, Phase G) -- funct3=000 only;
                                       // other MISC-MEM encodings (fence.i/Zifencei) unimplemented, illegal
+`define OPCODE_AMO    7'b0101111  // docs/adr/0038-a-extension-phase-v.md -- lr/sc/amo*, funct3=010(.W)/011(.D)
+
+// ---- RV32/64A (docs/adr/0038-a-extension-phase-v.md) ----
+// funct5 = inst[31:27] (the top 5 bits of the standard funct7 field --
+// inst[26:25] are the real spec's aq/rl ordering bits, ignored here: this
+// core is genuinely single-hart, so every AMO is trivially atomic with
+// respect to every OTHER hart -- there are none -- and this core's own
+// pipeline never splits an instruction's own memory phases across a
+// window another instruction could observe mid-sequence either, so aq/rl
+// have no real effect to model.
+`define AMO_F5_ADD  5'b00000
+`define AMO_F5_SWAP 5'b00001
+`define AMO_F5_LR   5'b00010
+`define AMO_F5_SC   5'b00011
+`define AMO_F5_XOR  5'b00100
+`define AMO_F5_OR   5'b01000
+`define AMO_F5_AND  5'b01100
+`define AMO_F5_MIN  5'b10000
+`define AMO_F5_MAX  5'b10100
+`define AMO_F5_MINU 5'b11000
+`define AMO_F5_MAXU 5'b11100
+
+// ---- RV64I (Generation 2, docs/adr/0028-rv64-migration-phase-m.md) ----
+// OP-32/OP-IMM-32 reuse OP/OP-IMM's existing funct7/funct3 encodings
+// byte-for-byte (see ALUCtrl.v) -- these two new opcodes are the only new
+// opcode space RV64I's word-width ("w"-suffixed) instruction family needs.
+// Both are XLEN-gated in Control.v: illegalOpcode at XLEN=32 (previously-
+// reserved encodings), decoded only at XLEN>=64.
+`define OPCODE_OP_32     7'b0111011  // addw/subw/sllw/srlw/sraw/mulw/divw/divuw/remw/remuw
+`define OPCODE_OP_IMM_32 7'b0011011  // addiw/slliw/srliw/sraiw (shamt always 5 bits, unlike below)
+
+// New OPCODE_LOAD/OPCODE_STORE funct3 values, real only at XLEN>=64
+// (DataMemoryBRAM.v gates their arms on a `generate if (XLEN>=64)` block).
+`define F3_LOAD_LD   3'b011  // ld: 8-byte load
+`define F3_LOAD_LWU  3'b110  // lwu: 4-byte load, zero-extended (vs. lw's sign-extended)
+`define F3_STORE_SD  3'b011  // sd: 8-byte store
 
 // ---- ALUOp (Control.v output -> ALUCtrl.v input) ----
 `define ALUOP_LOAD_STORE 2'b00  // lw/sw/jal: ALU always adds
@@ -73,6 +109,17 @@
 `define FUNCT7_ALT    7'b0100000  // sub/sra, and this core's custom ctz
 `define FUNCT7_MULDIV 7'b0000001  // RV32M
 
+// RV64I's full-width (non-"w") slli/srli/srai widen shamt from 5 bits
+// (inst[24:20]) to 6 bits (inst[25:20]) to reach 63 -- bit 25, formerly
+// the low bit of FUNCT7_ALT/FUNCT7_BASE, is now part of shamt, so the
+// srl-vs-sra discriminator shrinks to this 6-bit funct6 (inst[31:26]).
+// At XLEN=32 bit 25 is spec-0 for every legal shift encoding, so gating on
+// funct7[6:1] instead of the full 7-bit funct7 is bit-exact there (see
+// ALUCtrl.v). The OP-IMM-32 "w"-suffixed shifts (slliw/srliw/sraiw) keep
+// the original 5-bit shamt/7-bit-funct7 shape unconditionally -- see
+// OPCODE_OP_IMM_32 above.
+`define FUNCT6_ALT 6'b010000
+
 // ---- CSR / exceptions (docs/adr/0011-csr-and-exceptions.md) ----
 // M-mode only: no S-mode/U-mode, no PMP, no real interrupts (this design
 // has no interrupt lines) -- synchronous exceptions (illegal instruction,
@@ -112,14 +159,28 @@
 `define MCAUSE_BREAKPOINT          32'd3
 `define MCAUSE_ECALL_FROM_M        32'd11
 
-// mie/mip bit positions (standard RISC-V machine-mode assignments) --
-// only these two bits are real in this core; every other mie/mip bit is
-// hardwired 0 (no software interrupt: no second hart to send one: no
-// S-mode/U-mode delegation: this core is M-mode only throughout).
+// mie/mip bit positions (standard RISC-V machine-mode assignments).
+// docs/adr/0034-uart-clint-register-compat-phase-r.md (Phase R) adds the
+// third real bit, MIE_MSIE_BIT (machine software interrupt, driven by the
+// real CLINT `msip` register in Timer.v, not a CSR-writable bit) -- every
+// other mie/mip bit stays hardwired 0 (no S-mode/U-mode delegation, this
+// core is M-mode only throughout).
+`define MIE_MSIE_BIT 3   // machine software interrupt enable/pending (Phase R)
 `define MIE_MTIE_BIT 7   // machine timer interrupt enable/pending
 `define MIE_MEIE_BIT 11  // machine external interrupt enable/pending
+`define MCAUSE_INT_MACHINE_SOFTWARE 32'd3
 `define MCAUSE_INT_MACHINE_TIMER    32'd7
 `define MCAUSE_INT_MACHINE_EXTERNAL 32'd11
+
+// docs/adr/0035-minimal-sbi-firmware-phase-s.md (Phase S). Real supervisor-
+// level interrupt causes -- MIE_SSIE_BIT/MIE_STIE_BIT (riscv_defs.vh, Phase
+// F) already named the mie/mip_sw bit positions; these are the mcause/
+// scause low-bit values a software-synthesized supervisor software/timer
+// interrupt actually reports once riscvpipeline.v's own interrupt_taken
+// recognizes it (a real gap Phase S found and fixed -- mip_sw's SSIP/STIP
+// had no path into interrupt_taken before this phase).
+`define MCAUSE_INT_SUPERVISOR_SOFTWARE 32'd1
+`define MCAUSE_INT_SUPERVISOR_TIMER    32'd5
 
 // ---- RV32F (docs/adr/0019-f-extension.md, Phase C of the redesign) ----
 // Encoding constants only in this commit -- no RTL consumes any of these
@@ -215,22 +276,37 @@
 // in D5/D8) is defined relative to.
 `define MMIO_BASE 32'h1000_0000
 
-// docs/adr/0020-soc-integration.md (Phase D5). Uart.v's own 4-register
-// window (TXDATA/RXDATA/STATUS/CONTROL at word offsets 0/4/8/12, decoded
-// on s_addr[3:2] inside Uart.v itself) -- 16 bytes is exactly that window,
-// not a rounder/larger number reserved speculatively for registers that
-// don't exist yet.
-`define UART_BASE `MMIO_BASE  // the first, and today only, peripheral
-`define UART_SIZE 32'd16
+// docs/adr/0034-uart-clint-register-compat-phase-r.md (Phase R, superseding
+// the old D5-era 4-register map). Uart.v's own 8-register, ns16550a-
+// compatible window (RBR/THR, IER, IIR/FCR, LCR, MCR, LSR, MSR, SCR at word
+// offsets 0/4/8/C/10/14/18/1C, DLAB-gated per real ns16550a semantics,
+// decoded on s_addr[4:2] inside Uart.v itself) -- 32 bytes is exactly that
+// window. Base address unchanged from the original D5 choice -- a real,
+// free coincidence: 0x1000_0000 already matches QEMU-virt's own literal
+// UART address.
+`define UART_BASE `MMIO_BASE  // the first, and today only until Phase R's Timer/CLINT, peripheral
+`define UART_SIZE 32'd32
 
-// docs/adr/0020-soc-integration.md (Phase D8). Timer.v's own 2-register
-// window (MTIME/MTIMECMP at word offsets 0/4, decoded on s_addr[2] inside
-// Timer.v itself) -- 8 bytes is exactly that window. Placed immediately
-// after UART's own 16-byte window, non-overlapping by construction (the
-// same "fixed, integrator-controlled map" WbDecoder.v's own header
-// comment already documents as assumed, not defensively checked).
-`define TIMER_BASE (`UART_BASE + `UART_SIZE)
-`define TIMER_SIZE 32'd8
+// docs/adr/0034-uart-clint-register-compat-phase-r.md (Phase R, superseding
+// the old D8-era 2-register 32-bit map). Timer.v is now a real CLINT-
+// compatible peripheral: msip/mtimecmp/mtime at the exact byte offsets
+// Linux's own drivers/clocksource/timer-clint.c hardcodes (CLINT_OFF_*
+// below), mtime/mtimecmp genuinely 64-bit regardless of XLEN. Given its own
+// fresh base (not derived off UART_BASE+UART_SIZE any more, since the real
+// offsets span up to 0xBFFC) -- 0x10000-aligned so Timer.v can decode the
+// three real offsets directly off the low 16 bits of the absolute address,
+// no BASE subtraction needed inside the module (mirrors Uart.v's own
+// "decode raw address bits" idiom). Deliberately NOT QEMU-virt's own
+// literal CLINT address (0x0200_0000) -- that address is below this
+// project's own RAM region (RAM starts at 0, up to MEM_SIZE_BYTES, which
+// can reach 64MB per Phase Q) and would collide, since this core's memory
+// map shape (RAM-at-0, MMIO far above) differs from QEMU-virt's own
+// (RAM-at-0x8000_0000).
+`define TIMER_BASE (`MMIO_BASE + 32'h0010_0000)  // 0x1010_0000
+`define TIMER_SIZE 32'h0001_0000                 // 64KB, matches the real SiFive/QEMU-virt CLINT region size
+`define CLINT_OFF_MSIP      16'h0000
+`define CLINT_OFF_MTIMECMP  16'h4000  // + 4 = mtimecmph, XLEN=32 only
+`define CLINT_OFF_MTIME     16'hBFF8  // + 4 = mtimeh, XLEN=32 only
 
 // ---- Sv32 MMU / M-S-U privilege modes (Phase F of the redesign) ----
 // This core was M-mode only through Phase E (docs/adr/0011 explicitly drew
@@ -383,5 +459,50 @@
 `define VPN0_LO 12
 `define PAGE_OFFSET_HI 11
 `define PAGE_OFFSET_LO 0
+
+// Generation 3, Phase O: RV64/Sv39 privilege-CSR groundwork
+// (docs/adr/0031-sv39-privilege-csr-groundwork-phase-o.md). Declaration only
+// -- translate_enable stays gated (XLEN==32) until Phase P builds a real
+// Sv39 TLB/PTW; nothing here changes live translation behavior.
+
+// mstatus.UXL/SXL (RV64 only) -- report the effective XLEN visible to
+// U-mode/S-mode. This core has no real 32-bit U/S sub-mode, so these are
+// fixed WARL-to-2 constants applied at the CSR read mux, not real storage
+// bits (CSR.v never writes them).
+`define MSTATUS_UXL_LO 32
+`define MSTATUS_SXL_LO 34
+`define MXL_XLEN64 2'd2
+
+// satp fields for Sv39 (RV64) -- a completely different layout from Sv32's
+// (MODE is 4 bits at 63:60, not 1 bit at 31; Bare=0, Sv39=8; Sv48/Sv57 are
+// not implemented). CSR.v's satp_mode_val/satp_ppn_val decode picks between
+// this layout and the existing Sv32 one based on XLEN.
+`define SATP64_MODE_HI 63
+`define SATP64_MODE_LO 60
+`define SATP64_ASID_HI 59
+`define SATP64_ASID_LO 44
+`define SATP64_PPN_HI  43
+`define SATP64_PPN_LO  0
+`define SATP_MODE_SV39 4'h8
+
+// Sv39 VA decomposition (VPN[2]/VPN[1]/VPN[0], 9 bits each) and Sv39 PTE PPN
+// sub-fields (PPN[2]/PPN[1]/PPN[0], for megapage/gigapage reconstruction) --
+// no RTL consumes any of these yet, pre-declared for Phase P's own new
+// Tlb.v/Ptw.v (mirrors how Phase F1 pre-declared the Sv32 equivalents ahead
+// of F3/F4 actually using them). Page offset and the V/R/W/X/U/G/A/D PTE
+// flag bits are identical in both formats -- reuse PAGE_OFFSET_HI/LO and
+// PTE_*_BIT above, no new defines needed.
+`define SV39_VPN2_HI 38
+`define SV39_VPN2_LO 30
+`define SV39_VPN1_HI 29
+`define SV39_VPN1_LO 21
+`define SV39_VPN0_HI 20
+`define SV39_VPN0_LO 12
+`define SV39_PTE_PPN2_HI 53
+`define SV39_PTE_PPN2_LO 28
+`define SV39_PTE_PPN1_HI 27
+`define SV39_PTE_PPN1_LO 19
+`define SV39_PTE_PPN0_HI 18
+`define SV39_PTE_PPN0_LO 10
 
 `endif

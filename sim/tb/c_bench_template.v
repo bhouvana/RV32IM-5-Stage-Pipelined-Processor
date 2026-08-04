@@ -33,6 +33,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // Template for real compiled-C programs (docs/ROADMAP.md Phase 10 --
 // CoreMark/Dhrystone, following up on the hand-written sim/benchmarks/

@@ -10,15 +10,15 @@
 # exercises.
 # Layout: self = 92, handler = 96
 lui   x1, 0x10000  # 0: x1 = UART_BASE = MMIO_BASE
-addi  x2, x1, 16  # 4: x2 = TIMER_BASE
+lui   x2, 0x10104  # 4: x2 = TIMER_BASE + CLINT_OFF_MTIMECMP = 0x1010_4000 (MTIMECMP low, Phase R)
 addi  x5, x0, 96  # 8: x5 = handler address (96)
 csrrw x0, mtvec, x5  # 12
 addi  x6, x0, -1920  # 16: 0xFFFFF880 after sign-ext -> mie_masked keeps bits 7/11 only -> MTIE|MEIE
 csrrw x0, mie, x6  # 20: mie = MTIE|MEIE <- both enabled
 addi  x8, x0, 1  # 24
-sw    x8, 12(x1)  # 28: UART.CONTROL.rx_irq_enable <- 1
+sw    x8, 4(x1)  # 28: UART.IER.ERBFI <- 1
 addi  x7, x0, 5  # 32: MTIMECMP target -- small, mip.MTIP pending almost immediately
-sw    x7, 4(x2)  # 36: TIMER.MTIMECMP <- 5
+sw    x7, 0(x2)  # 36: TIMER.MTIMECMP(low) <- 5
 addi  x0, x0, 0  # 40: spacer -- gives the testbench's driven UART byte time to fully arrive (mip.MEIP pending) before mstatus.MIE is armed below, so both sources are genuinely simultaneously pending at that point
 addi  x0, x0, 0  # 44
 addi  x0, x0, 0  # 48

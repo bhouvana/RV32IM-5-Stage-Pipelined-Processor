@@ -97,7 +97,14 @@ else if(ALUOp == `ALUOP_ITYPE)
         ALUCtl = `ALUCTL_XOR;
         5'b11101://srl imm and sra imm
         begin
-            if(funct7 == `FUNCT7_ALT)
+            // Generation 2 (Phase M): compares only funct7[6:1], not the
+            // full 7-bit funct7 == FUNCT7_ALT this used before. RV64I's
+            // full-width slli/srli/srai widen shamt from 5 bits
+            // (inst[24:20]) to 6 (inst[25:20]) -- bit 25 (funct7's old low
+            // bit) is now part of shamt, not the discriminator. Bit-exact
+            // for every RV32-legal encoding (bit 25 is spec-0 there), see
+            // riscv_defs.vh's FUNCT6_ALT comment.
+            if(funct7[6:1] == `FUNCT6_ALT)
             ALUCtl = `ALUCTL_SRA;
             else
             ALUCtl = `ALUCTL_SRL;

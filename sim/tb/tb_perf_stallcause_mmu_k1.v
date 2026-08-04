@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0026-performance-profiler.md (Phase K1). Confirms events 15/16
 // (stall_itlb_pulse/stall_dtlb_pulse) each land on their own dedicated

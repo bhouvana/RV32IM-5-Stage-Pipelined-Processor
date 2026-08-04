@@ -106,17 +106,18 @@ def load_words(mem_path):
 
 
 def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_strategy=0, pipeline_profile=0,
-              branch_predictor=0, cache_mode=0, mem_latency_i=0, mem_latency_d=0):
+              branch_predictor=0, cache_mode=0, mem_latency_i=0, mem_latency_d=0, xlen=32):
     here = os.path.dirname(os.path.abspath(__file__))
     prog_mem = os.path.join(work_dir, f"{name}.mem")
     asm_py = os.path.join(here, "asm.py")
-    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem, "--size", str(mem_size)],
+    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem,
+                         "--size", str(mem_size), "--xlen", str(xlen)],
                         capture_output=True, text=True)
     if r.returncode != 0:
         return None, f"assembler error: {r.stderr.strip()}"
 
     words = load_words(prog_mem)
-    iss = ISS(mem_size=mem_size)
+    iss = ISS(mem_size=mem_size, xlen=xlen)
     try:
         instrs = iss.run(words, max_steps=200000)
     except Exception as e:  # noqa: BLE001
@@ -161,6 +162,7 @@ def run_bench(name, prog_s, work_dir, iverilog_bin, template, mem_size, hazard_s
               .replace("__PIPELINE_PROFILE__", str(pipeline_profile))
               .replace("__BRANCH_PREDICTOR__", str(branch_predictor))
               .replace("__CACHE_MODE__", str(cache_mode))
+              .replace("__XLEN__", str(xlen))
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
               .replace("__MEM_LATENCY_D__", str(mem_latency_d)))
     with open(dump_v, "w") as f:

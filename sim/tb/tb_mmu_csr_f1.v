@@ -34,6 +34,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 `include "Bht.v"
 `include "Btb.v"
 
@@ -67,13 +69,16 @@ module tb_mmu_csr_f1;
         check_reg(6, 32'h00000000, "sstatus readback: 0 (the clear took)");
 
         // mie: writing all-1s sets every real bit -- MTIE@7/MEIE@11
-        // (docs/adr/0020) plus SSIE@1/STIE@5/SEIE@9 (Phase F).
+        // (docs/adr/0020), MSIE@3 (docs/adr/0034, Phase R), plus
+        // SSIE@1/STIE@5/SEIE@9 (Phase F).
         check_reg(7, 32'h00000000, "csrrw x7,mie,-1: x7 = old mie (0)");
-        check_reg(8, 32'h00000AA2, "mie readback: MTIE/MEIE/SSIE/STIE/SEIE all set (0xaa2)");
+        check_reg(8, 32'h00000AAA, "mie readback: MSIE/MTIE/MEIE/SSIE/STIE/SEIE all set (0xaaa)");
 
-        // sie: same restricted-view relationship as sstatus/mstatus.
+        // sie: same restricted-view relationship as sstatus/mstatus (MSIE
+        // is machine-only, no S-level view, so it's untouched by the sie
+        // write below, same as MTIE/MEIE).
         check_reg(9, 32'h00000222, "csrrw x9,sie,0: x9 = old sie view (SSIE/STIE/SEIE, 0x222)");
-        check_reg(10, 32'h00000880, "mie readback: MTIE/MEIE untouched (0x880), SSIE/STIE/SEIE cleared");
+        check_reg(10, 32'h00000888, "mie readback: MSIE/MTIE/MEIE untouched (0x888), SSIE/STIE/SEIE cleared");
         check_reg(11, 32'h00000000, "sie readback: 0 (the clear took)");
 
         // sip/mip: SSIP/STIP/SEIP are genuinely shared, software-writable
@@ -98,7 +103,7 @@ module tb_mmu_csr_f1;
         check_reg(20, 32'hFFFFFFFF, "satp readback: unmasked, all bits survive");
 
         // mideleg/medeleg: only this core's own real cause bits survive.
-        check_reg(21, 32'h00000AA2, "mideleg readback: SSIE/STIE/MTIE/SEIE/MEIE bits only (0xaa2)");
+        check_reg(21, 32'h00000AAA, "mideleg readback: SSIE/STIE/MSIE/MTIE/SEIE/MEIE bits only (0xaaa)");
         check_reg(22, 32'h0000BB0C, "medeleg readback: illegal/breakpoint/ecall-U/S/M/page-fault bits only (0xbb0c)");
 
         report("mmu_csr_f1");

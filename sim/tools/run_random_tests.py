@@ -10,6 +10,7 @@ Must be run from the repository root.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,17 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from iss import ISS  # noqa: E402
 from random_gen import gen_program  # noqa: E402
+
+# Phase Q (docs/adr/0033-memory-capacity-scale-up-phase-q.md): a fixed 64KB
+# window every constrained-random program's real touched range provably
+# stays within regardless of mem_size (random_gen.py's own base_addr/
+# addr_space/offset caps -- confirmed by direct code read, not assumed;
+# see the ADR). Used to bound three things that would otherwise scale
+# uselessly with a large --mem-size: the .mem file asm.py writes (real
+# programs never need more than this many bytes of instruction memory),
+# the RTL-side memory dump loop, and the Python-side dump parse/compare --
+# matches design/InstructionMemory.v's own ZERO_INIT_LIMIT bound.
+SCALEUP_WINDOW_BYTES = 65536
 
 
 def load_words(mem_path):
@@ -33,21 +45,45 @@ def load_words(mem_path):
 
 def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0, pipeline_profile=0,
             mem_size=128, interrupt=None, branch_predictor=0, mmu=False, cache_mode=0,
-            mem_latency_i=0, mem_latency_d=0):
+            mem_latency_i=0, mem_latency_d=0, xlen=32):
     prog_s = os.path.join(work_dir, f"r{seed}.s")
     prog_mem = os.path.join(work_dir, f"r{seed}.mem")
-    text, interrupt_info = gen_program(seed, n_instrs, mem_size=mem_size, interrupt=interrupt, mmu=mmu)
+    # Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md): xlen
+    # threaded through gen_program too (random_gen.py's own xlen-gated *w/
+    # ld/sd/lwu generation, M15) -- default 32 is bit-exact with every prior
+    # call site.
+    text, interrupt_info = gen_program(seed, n_instrs, mem_size=mem_size, interrupt=interrupt, mmu=mmu, xlen=xlen)
     with open(prog_s, "w") as f:
         f.write(text)
 
+    # Phase Q: the .mem file only ever needs to hold the real (tiny)
+    # generated program -- asm.py's own write_mem() pads/zero-fills the
+    # file out to whatever --size says, so passing the true (possibly
+    # 64MB-scale) mem_size here would write tens of millions of lines to
+    # disk per seed. dump_window (bounded to SCALEUP_WINDOW_BYTES) is
+    # always >= any real generated program's size, and stays == mem_size
+    # (today's exact old behavior) whenever mem_size <= SCALEUP_WINDOW_BYTES.
+    dump_window = min(mem_size, SCALEUP_WINDOW_BYTES)
     asm_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asm.py")
-    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem, "--size", str(mem_size)],
+    r = subprocess.run([sys.executable, asm_py, prog_s, "-o", prog_mem,
+                         "--size", str(dump_window), "--xlen", str(xlen)],
                         capture_output=True, text=True)
     if r.returncode != 0:
         return False, f"assembler error: {r.stderr.strip()}"
 
+    # Phase Q: asm.py's own stdout ("N instructions -> ...") is the real
+    # program length, independent of how large --size padded the .mem file
+    # out to. Real bug found by running (docs/adr/0033): before this fix,
+    # max_time below was computed from len(words) -- the full *padded* file,
+    # not the real program -- which was already a latent inefficiency at the
+    # old small mem_size values but became catastrophic once dump_window
+    # (65536) became a much larger --size than any real program needs: a
+    # single seed at MEM_SIZE_BYTES=64MB ran for over a million simulated
+    # cycles (~2m40s wall-clock) instead of a few hundred.
+    m = re.search(r":\s*(\d+)\s+instructions", r.stdout)
+    real_n_instrs = int(m.group(1)) if m else n_instrs
     words = load_words(prog_mem)
-    iss = ISS(mem_size=mem_size)
+    iss = ISS(mem_size=mem_size, xlen=xlen)
     # docs/adr/0020-soc-integration.md (Phase D10). Matches the RTL's own
     # real (armed but not precisely timed) hardware interrupt with an
     # externally scheduled one on the ISS side -- see gen_program's own
@@ -63,7 +99,8 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     # Multi-cycle divisions/fdiv.s/fsqrt.s dominate runtime -- budget
     # generously: every instruction could in principle be one (fdiv.s is
     # the longest at ~51 iterations, docs/adr/0019 Phase C4), plus margin.
-    max_time = (len(words) * 70 + 200) * 10
+    # real_n_instrs (Phase Q), not len(words) -- see the note above.
+    max_time = (real_n_instrs * 70 + 200) * 10
     dump_v = os.path.join(work_dir, f"r{seed}.v")
     out_path = os.path.join(work_dir, f"r{seed}.out").replace("\\", "/")
     init_file_rel = os.path.relpath(prog_mem, start=os.getcwd()).replace("\\", "/")
@@ -80,10 +117,12 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     tpl = (tpl.replace("__INIT_FILE__", init_file_rel).replace("__MAX_TIME__", str(max_time))
               .replace("__OUT_FILE__", out_path).replace("__HAZARD_STRATEGY__", str(hazard_strategy))
               .replace("__PIPELINE_PROFILE__", str(pipeline_profile)).replace("__MEM_SIZE__", str(mem_size))
+              .replace("__DUMP_WINDOW__", str(dump_window))
               .replace("__BRANCH_PREDICTOR__", str(branch_predictor))
               .replace("__CACHE_MODE__", str(cache_mode))
               .replace("__MEM_LATENCY_I__", str(mem_latency_i))
               .replace("__MEM_LATENCY_D__", str(mem_latency_d))
+              .replace("__XLEN__", str(xlen))
               .replace("__UART_STIMULUS__", uart_stimulus))
     with open(dump_v, "w") as f:
         f.write(tpl)
@@ -99,22 +138,39 @@ def run_one(seed, n_instrs, work_dir, iverilog_bin, template, hazard_strategy=0,
     if r.returncode != 0 or not os.path.exists(out_path):
         return False, f"simulation error: {r.stdout.strip()[:500]} {r.stderr.strip()[:500]}"
 
+    # Generation 2 (Phase M14): was a hardcoded & 0xFFFFFFFF -- at xlen=64
+    # that silently truncated every dumped integer register to its low 32
+    # bits, hiding real mismatches confined to the upper half as false
+    # passes. mem/freg/fflags/frm values are all already <=32-bit-valued
+    # regardless of xlen, so widening this mask to xlen bits never corrupts
+    # them -- it only matters for (and only ever narrows) the register dump.
+    reg_mask = (1 << xlen) - 1
     with open(out_path) as f:
-        vals = [int(l.strip()) & 0xFFFFFFFF for l in f if l.strip()]
-    # Layout matches dump_regs_template.v/dump_regs_interrupt_template.v
-    # exactly: 32 int regs, mem_size mem bytes, 32 float regs, fflags, frm
-    # (docs/adr/0019-f-extension.md Phase C9).
+        vals = [int(l.strip()) & reg_mask for l in f if l.strip()]
+    # Layout matches dump_regs_template.v exactly: 32 int regs, mem_size mem
+    # bytes, 32 float regs, fflags, frm (docs/adr/0019-f-extension.md Phase
+    # C9). dump_regs_interrupt_template.v (Phase Q, docs/adr/0033) instead
+    # dumps only dump_window mem bytes -- dump_window == mem_size (today's
+    # exact old layout) whenever mem_size <= SCALEUP_WINDOW_BYTES, which is
+    # every size ever used before this phase, so mem_window below reduces
+    # to the old plain layout bit-for-bit at every pre-existing call site.
+    # (An earlier version of this also spot-checked a few high addresses
+    # beyond the window -- removed after running found those addresses are
+    # genuinely undefined/X in the RTL beyond DataMemoryBRAM.v's own bounded
+    # zero-init, making that comparison unsound; see docs/adr/0033.)
+    uses_dump_window = os.path.basename(template) == "dump_regs_interrupt_template.v"
+    mem_window = dump_window if uses_dump_window else mem_size
     rtl_regs = vals[:32]
-    rtl_mem = vals[32:32 + mem_size]
-    rtl_fregs = vals[32 + mem_size:32 + mem_size + 32]
-    rtl_fflags = vals[32 + mem_size + 32]
-    rtl_frm = vals[32 + mem_size + 33]
+    rtl_mem = vals[32:32 + mem_window]
+    rtl_fregs = vals[32 + mem_window:32 + mem_window + 32]
+    rtl_fflags = vals[32 + mem_window + 32]
+    rtl_frm = vals[32 + mem_window + 33]
 
     mismatches = []
     for i in range(32):
         if rtl_regs[i] != iss.regs[i]:
             mismatches.append(f"x{i}: RTL={rtl_regs[i]:#x} ISS={iss.regs[i]:#x}")
-    for i in range(mem_size):
+    for i in range(mem_window):
         if rtl_mem[i] != iss.mem[i]:
             mismatches.append(f"mem[{i}]: RTL={rtl_mem[i]:#x} ISS={iss.mem[i]:#x}")
     for i in range(32):
@@ -157,23 +213,32 @@ def main():
     # docs/adr/0020-soc-integration.md (Phase D10). Opt-in, not default-on --
     # every existing invocation (no --interrupt) behaves exactly as before,
     # against the original dump_regs_template.v at mem_size=128.
-    ap.add_argument("--interrupt", choices=["timer", "uart", "both"], default=None,
-                     help="opt-in interrupt-injection mode (docs/adr/0020 Phase D10/D11): "
-                          "arm and fire the given source once during each generated program "
-                          "(\"both\" arms and pends both simultaneously, exercising MEI-over-MTI priority)")
+    ap.add_argument("--interrupt", choices=["timer", "uart", "msi", "both"], default=None,
+                     help="opt-in interrupt-injection mode (docs/adr/0020 Phase D10/D11, "
+                          "\"msi\" added docs/adr/0034 Phase R): arm and fire the given source once "
+                          "during each generated program "
+                          "(\"both\" arms and pends timer+uart simultaneously, exercising MEI-over-MTI priority)")
     ap.add_argument("--mem-size", type=int, default=None,
                      help="override InstructionMemory/DataMemory size in bytes; "
                           "defaults to 128 normally, 256 when --interrupt is set "
                           "(room for the extra prefix/handler instructions), "
-                          "8192 when --mmu is set (room for the page table's own two pages)")
+                          "8192 when --mmu is set at XLEN=32 (Sv32, two table pages), "
+                          "16384 when --mmu is set at XLEN=64 (Sv39, three table pages, "
+                          "rounded up to a power of 2 -- see gen_program's own mem_mask note)")
     # docs/adr/00NN-mmu-sv32.md (Phase F7). Opt-in, not default-on -- every
     # existing invocation (no --mmu) behaves exactly as before. Mutually
     # exclusive with --interrupt in this phase (see gen_program's own
-    # docstring for why).
+    # docstring for why). docs/adr/00NN-sv39-mmu-phase-p.md (Phase P5):
+    # now dispatches to Sv32 (XLEN=32) or Sv39 (XLEN=64) translation --
+    # no longer XLEN-restricted (Sv39 didn't exist yet in Phase F7).
     ap.add_argument("--mmu", action="store_true",
-                     help="opt-in Sv32 translation mode (docs/adr/00NN-mmu-sv32.md Phase F7): "
-                          "run the whole generated program as translated U-mode code, through a "
+                     help="opt-in translation mode: Sv32 at XLEN=32 (docs/adr/00NN-mmu-sv32.md "
+                          "Phase F7) or Sv39 at XLEN=64 (docs/adr/00NN-sv39-mmu-phase-p.md Phase P5) "
+                          "-- run the whole generated program as translated U-mode code, through a "
                           "generator-guaranteed-valid identity page table")
+    ap.add_argument("--xlen", type=int, default=32, choices=[32, 64],
+                     help="riscvpipeline.v's XLEN (Generation 2, docs/adr/0028-rv64-migration-"
+                          "phase-m.md): 32=default/bit-exact, 64=RV64 (Sv39 MMU support since Phase P3)")
     args = ap.parse_args()
 
     if args.interrupt and args.mmu:
@@ -183,7 +248,16 @@ def main():
     if args.mem_size is not None:
         mem_size = args.mem_size
     elif args.mmu:
-        mem_size = 8192
+        # docs/adr/00NN-sv39-mmu-phase-p.md (Phase P5): Sv39 needs a third
+        # table level (level-2/level-1/level-0, one page each) vs. Sv32's
+        # two. 16384 (4x4KB), not 12288 (3x4KB) -- a real bug found by
+        # running: iss.py's own store_mem_byte/load_mem_byte mask addresses
+        # with `mem_size - 1` (its own header comment documents "mem_size
+        # is always a power of 2"), which silently corrupts addressing for
+        # any non-power-of-2 size (12288 & 0x2FFF == 0 for a 0x1000 address,
+        # not 0x1000 -- bit 12 isn't set in that mask). 16384 keeps the
+        # existing power-of-2 convention with one spare page of headroom.
+        mem_size = 16384 if args.xlen == 64 else 8192
     elif args.interrupt:
         mem_size = 256
     else:
@@ -196,8 +270,16 @@ def main():
     # both places); its own interrupt-specific pieces (uart_rx wiring,
     # drive_rx_byte) are simply unused/harmless when --mmu is set without
     # --interrupt (uart_stimulus stays the empty string, same as a plain
-    # --interrupt-less run through this same template would see).
-    template_name = "dump_regs_interrupt_template.v" if (args.interrupt or args.mmu) else "dump_regs_template.v"
+    # --interrupt-less run through this same template would see). Phase Q
+    # (docs/adr/0033): also route any explicit non-default --mem-size
+    # through this same parameterized template -- the plain template
+    # hardcodes 128 both at the PIPELINED instantiation and the dump loop,
+    # so it silently ignored --mem-size entirely before this (a real,
+    # pre-existing gap, found by design while scoping this phase's own
+    # large-memory sweep, not by running).
+    template_name = ("dump_regs_interrupt_template.v"
+                      if (args.interrupt or args.mmu or (args.mem_size is not None and args.mem_size != 128))
+                      else "dump_regs_template.v")
     template = os.path.join(here, "..", "tb", template_name)
 
     passed = 0
@@ -210,7 +292,8 @@ def main():
                               mem_size=mem_size, interrupt=args.interrupt,
                               branch_predictor=args.branch_predictor, mmu=args.mmu,
                               cache_mode=args.cache_mode,
-                              mem_latency_i=args.mem_latency_i, mem_latency_d=args.mem_latency_d)
+                              mem_latency_i=args.mem_latency_i, mem_latency_d=args.mem_latency_d,
+                              xlen=args.xlen)
             if ok:
                 passed += 1
                 print(f"pass  seed={seed}")

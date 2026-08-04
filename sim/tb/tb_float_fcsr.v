@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0019-f-extension.md (Phase C8): fcsr (frm + fflags) fully live.
 // Covers: RM_DYN resolution actually reading CSR.v's live frm (same

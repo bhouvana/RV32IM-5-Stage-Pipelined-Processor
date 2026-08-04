@@ -145,32 +145,55 @@ research-grade in-order core.
 
 ---
 
-## Generation 2 — RV64 Migration (v2.0)
+## Generation 2 — RV64 Migration (v2.0) — ✅ CLOSED as of 2026-08-03
 
 *(source material: "Phase F — RV64 Migration")*
 
 **Objective:** upgrade the architecture to a modern 64-bit implementation.
 
-- **XLEN migration** — widen every datapath to 64 bits; update pipeline
-  registers, the forwarding network, hazards. (Note: `XLEN` is already a
-  named parameter as of `docs/adr/0015`, but is not truly variable at
-  other values today — RV32I's own 32-bit instruction word and 5-bit
-  register-field encoding are baked in independent of the parameter. This
-  generation is where that parameter's promise finally gets exercised for
-  real, not just named.)
-- **Register file** — 64-bit integer registers, updated writeback logic.
-- **ALU** — 64-bit arithmetic, shifts, comparisons.
-- **Divider** — 64-bit iterative divider.
-- **Memory** — 64-bit loads/stores, alignment support, misaligned-access
-  handling.
-- **Toolchain** — 64-bit assembler, ISS, debugger, updated visualizer,
-  updated benchmarks (all of `sim/tools/asm.py`/`iss.py`/`debugger.py`/
-  `gen_trace.py`/`bench_runner.py` need real RV64 awareness, not just a
-  wider `XLEN`).
-- **Verification** — directed tests, random tests, differential testing,
-  RISC-V compliance testing.
+- **XLEN migration** — ✅ Done (`docs/adr/0028-rv64-migration-phase-m.md`,
+  Phase M). Widen every datapath to 64 bits; update pipeline registers, the
+  forwarding network, hazards. (`XLEN` was already a named parameter as of
+  `docs/adr/0015`, but wasn't truly variable at other values — RV32I's own
+  32-bit instruction word and 5-bit register-field encoding are baked in
+  independent of the parameter. Phase M is where that parameter's promise
+  actually got exercised: `XLEN=64` is now a real, fully-verified
+  configuration.)
+- **Register file** — ✅ Done, 64-bit integer registers, updated writeback logic.
+- **ALU** — ✅ Done, 64-bit arithmetic/shifts/comparisons plus the new
+  `*w`-suffixed 32-bit-result family (`addw`/`subw`/`sllw`/`srlw`/`sraw`/
+  `mulw`/`divw`/`divuw`/`remw`/`remuw`/`addiw`/`slliw`/`srliw`/`sraiw`).
+- **Divider** — ✅ Done. `Divider.v` was already fully XLEN-parameterized;
+  the `*w` divide family wraps it unmodified rather than needing changes.
+- **Memory** — ✅ Done. `ld`/`sd`/`lwu` real (Generation 1's own alignment
+  behavior — this core has never enforced access alignment at any width,
+  a real, pre-existing, non-faulting byte-addressable design choice —
+  carries over unchanged, not a new gap).
+- **Toolchain** — ✅ Done, real RV64 awareness (not just a wider `XLEN`)
+  throughout `sim/tools/asm.py`/`iss.py`/`disasm.py`/`debugger.py`/
+  `gen_trace.py`/`random_gen.py`/`run_random_tests.py`/`bench_runner.py`.
+- **Verification** — directed tests ✅, random tests ✅, differential
+  testing ✅ (`sim/tools/iss.py` cross-checked continuously against the
+  RTL). **RISC-V compliance testing (riscv-arch-test) — deliberately NOT
+  done, real documented backlog, not silently dropped.**
+  `docs/adr/0029-generation-2-closure.md` has the full story: blocked on
+  two independent findings, not a scope cut for convenience — (1) neither
+  Spike nor Sail (both generations of the official framework require one
+  as a live reference model) publishes a Windows-native binary, and this
+  environment has no from-source build path for either; (2) more
+  fundamentally, this core's own branch-instruction encoding
+  (`docs/ARCHITECTURE.md` sec 5's documented `blt`/`bge`/custom-`ble`/`bgt`
+  funct3 deviation from the real RV32I spec) means a real, spec-compliant
+  test binary would be silently misdecoded regardless of tooling — a real
+  compliance run needs that fixed first, as its own prerequisite phase.
+  **Update: the encoding half is now fixed** (Phase N,
+  `docs/adr/0030-branch-encoding-fix.md` — `blt`/`bge` moved to real spec
+  funct3 positions). The Windows-native reference-model tooling half of
+  this blocker is unchanged and still open.
 
-**Release:** RV64IMAF Processor v2.0.
+**Release: RV64IMAF Processor v2.0.** Confirmed with the user
+(`AskUserQuestion`) to close Generation 2 on this basis rather than block
+release on either the toolchain bootstrap or the encoding-fix prerequisite.
 
 ---
 
@@ -186,6 +209,41 @@ the lessons carry over.)*
 `blt`/`bge` now sit at real RISC-V spec funct3 positions, so a stock
 `riscv64-gcc`-compiled kernel's branches decode correctly. Generation 3
 itself (privilege/MMU/TLB/page-tables/Linux-boot below) can now start.
+
+**Phases O-V all closed.** Feasibility research (this environment has no
+Verilator/FPGA execution *initially* — Phase T later found and bootstrapped
+a real Verilator install, see below — only `iverilog` software simulation
+at first, and no confirmed Windows-native `riscv64-linux-gnu` glibc
+toolchain) reshaped this generation into a longer phase sequence, confirmed
+with the user: **Phase O** (privilege/CSR groundwork for RV64/Sv39, DONE —
+`docs/adr/0031`) → **Phase P** (a from-scratch Sv39 MMU/TLB/PTW, DONE —
+`docs/adr/0032`: `Tlb39.v`/`Ptw39.v` wired live, 100/100 Sv39-MMU random
+sweep) → **Phase Q** (memory-capacity scale-up, DONE — `docs/adr/0033`:
+`MEM_SIZE_BYTES` gained a real, fully-verified 64MB operating point) →
+**Phase R** (`Uart.v`/`Timer.v` register-layout redesign for ns16550a/CLINT
+Linux-driver compatibility, DONE — `docs/adr/0034`: real 8-register
+ns16550a UART map, real CLINT `msip`/`mtimecmp`/`mtime`) → **Phase S** (a
+hand-rolled minimal SBI firmware + DTB, DONE — `docs/adr/0035`: real M-mode
+SBI firmware verified end-to-end against a self-written S-mode test
+payload) → **Phase T** (a real Verilator harness bootstrapped from an
+existing OSS CAD Suite install, ~1.4M cycles/sec; SBI extended to real
+v0.2+; a real riscv64 kernel `Image`+initramfs sourced and verified
+genuine — DONE, `docs/adr/0036`: found the kernel's own first instruction
+is a real compressed `c.j` this core couldn't decode at all, a hard,
+scope-defining blocker) → **Phase U** (a from-scratch RVC/"C"-extension
+decoder, `design/CompressedExpander.v` — DONE, `docs/adr/0037`: also found
+and fixed a real, project-wide `InstructionMemory.v` byte-order bug RVC
+exposed) → **Phase V** (a from-scratch 'A'/atomic-extension implementation,
+a new 2-phase MEM-stage interlock — DONE, `docs/adr/0038`). **Real result**:
+the real kernel now executes correctly through its own compressed-
+instruction-heavy entry sequence and a real `amoadd.w` hart-check, hundreds
+of millions of cycles with zero crashes — the deepest, most correct real-
+Linux-code execution this core has ever achieved. It currently parks in a
+real polling loop waiting on `sp`/`tp` values this project's own minimal
+single-hart SBI/DTB environment never publishes — a real environment gap
+(not an RTL bug), needing Linux kernel source archaeology to close, and the
+honest stopping point for Generation 3 as currently scoped. See
+`docs/adr/0036`-`0038` for the full story.
 
 **Objective:** build a Linux-capable processor.
 

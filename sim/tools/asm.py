@@ -70,6 +70,12 @@ OP_CUSTOM = 0b0101010
 OP_SYSTEM = 0b1110011
 OP_MISC_MEM = 0b0001111  # fence (docs/adr/0023-caches.md, Phase G1)
 
+# Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md). RV64I's
+# "w"-suffixed word family reuses OP/OP-IMM's own funct7/funct3 encodings
+# byte-for-byte, just under these two new opcodes.
+OP_32 = 0b0111011
+OP_IMM_32 = 0b0011011
+
 CSR_ADDR = {  # standard RISC-V machine-mode addresses (docs/adr/0011-csr-and-exceptions.md,
               # docs/adr/0020-soc-integration.md Phase D7 for mie/mip)
     "mstatus": 0x300, "mie": 0x304, "mtvec": 0x305, "mscratch": 0x340, "mepc": 0x341,
@@ -104,8 +110,24 @@ BRANCH = {  # mnemonic: funct3 -- beq/bne/blt/bge/ble/bgt/bltu/bgeu. blt/bge at 
     "beq": 0b000, "bne": 0b001, "blt": 0b100, "bge": 0b101,
     "ble": 0b010, "bgt": 0b011, "bltu": 0b110, "bgeu": 0b111,
 }
-LOAD = {"lb": 0b000, "lh": 0b001, "lw": 0b010, "lbu": 0b100, "lhu": 0b101}
-STORE = {"sb": 0b000, "sh": 0b001, "sw": 0b010}
+LOAD = {"lb": 0b000, "lh": 0b001, "lw": 0b010, "lbu": 0b100, "lhu": 0b101,
+        "ld": 0b011, "lwu": 0b110}  # ld/lwu: Generation 2, real only at XLEN>=64
+STORE = {"sb": 0b000, "sh": 0b001, "sw": 0b010, "sd": 0b011}  # sd: Generation 2
+
+# Generation 2 (Phase M). addw/subw/sllw/srlw/sraw/mulw/divw/divuw/remw/remuw
+# -- mnemonic: (full funct7, funct3), same shape as R_TYPE above, emitted
+# against OP_32 instead of OP_R (see r_type_w).
+R_TYPE_W = {
+    "addw": (FUNCT7_BASE, 0b000), "subw": (FUNCT7_ALT, 0b000), "sllw": (FUNCT7_BASE, 0b001),
+    "srlw": (FUNCT7_BASE, 0b101), "sraw": (FUNCT7_ALT, 0b101),
+    "mulw": (FUNCT7_MULDIV, 0b000),
+    "divw": (FUNCT7_MULDIV, 0b100), "divuw": (FUNCT7_MULDIV, 0b101),
+    "remw": (FUNCT7_MULDIV, 0b110), "remuw": (FUNCT7_MULDIV, 0b111),
+}
+# addiw/slliw/srliw/sraiw -- shamt is always exactly 5 bits regardless of
+# XLEN (spec-mandated, unlike the plain slli/srli/srai below, which widen to
+# 6 bits at XLEN=64 -- see i_type()'s own xlen parameter).
+I_TYPE_W = {"addiw": 0b000, "slliw": 0b001, "srliw": 0b101, "sraiw": 0b101}
 
 # RV32F (docs/adr/0019-f-extension.md, Phase C9). Encodings mirror
 # design/riscv_defs.vh exactly -- that file is the single source of truth
@@ -151,16 +173,47 @@ def r_type(mn, rd, rs1, rs2):
     return (f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_R
 
 
-def i_type(mn, rd, rs1, immv):
+def i_type(mn, rd, rs1, immv, xlen=32):
     f3 = I_TYPE[mn]
     if mn in ("slli", "srli", "srai"):
-        shamt = imm(immv, 5, signed=False)
-        f7 = FUNCT7_ALT if mn == "srai" else FUNCT7_BASE
-        # imm12 covers inst[31:20] == funct7(7 bits) ++ shamt(5 bits).
-        imm12 = (f7 << 5) | shamt
+        # Generation 2 (Phase M): at xlen>=64, shamt widens from 5 bits to 6
+        # (inst[25:20]) to reach 63, and the discriminator shrinks from a
+        # 7-bit funct7 to a 6-bit funct6 (inst[31:26]) -- bit-exact with the
+        # original 5-bit/7-bit split at xlen=32 (the default). See
+        # design/riscv_defs.vh's FUNCT6_ALT comment / design/ALUCtrl.v's
+        # matching fix for the RTL side of this same split.
+        if xlen >= 64:
+            shamt = imm(immv, 6, signed=False)
+            f6 = 0b010000 if mn == "srai" else 0b000000
+            imm12 = (f6 << 6) | shamt
+        else:
+            shamt = imm(immv, 5, signed=False)
+            f7 = FUNCT7_ALT if mn == "srai" else FUNCT7_BASE
+            # imm12 covers inst[31:20] == funct7(7 bits) ++ shamt(5 bits).
+            imm12 = (f7 << 5) | shamt
     else:
         imm12 = imm(immv, 12, signed=True)
     return (u(imm12, 12) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_I
+
+
+def r_type_w(mn, rd, rs1, rs2):
+    # Generation 2 (Phase M). addw/subw/sllw/srlw/sraw/mulw/divw/divuw/remw/
+    # remuw -- same field layout as r_type(), OP_32 instead of OP_R.
+    f7, f3 = R_TYPE_W[mn]
+    return (f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_32
+
+
+def i_type_w(mn, rd, rs1, immv):
+    # Generation 2 (Phase M). addiw/slliw/srliw/sraiw -- shamt always 5 bits
+    # (see I_TYPE_W's own comment), OP_IMM_32 instead of OP_I.
+    f3 = I_TYPE_W[mn]
+    if mn in ("slliw", "srliw", "sraiw"):
+        shamt = imm(immv, 5, signed=False)
+        f7 = FUNCT7_ALT if mn == "sraiw" else FUNCT7_BASE
+        imm12 = (f7 << 5) | shamt
+    else:
+        imm12 = imm(immv, 12, signed=True)
+    return (u(imm12, 12) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | OP_IMM_32
 
 
 def load(mn, rd, offs, rs1):
@@ -321,7 +374,7 @@ def fence():
     return (pred_succ_fm << 20) | OP_MISC_MEM
 
 
-def assemble(lines):
+def assemble(lines, xlen=32):
     # pass 1: strip comments/whitespace, record label addresses
     stmts = []
     addr = 0
@@ -358,7 +411,13 @@ def assemble(lines):
             words.append(ctz(rd, rs1))
         elif mn in I_TYPE:
             rd, rs1 = reg(args[0]), reg(args[1])
-            words.append(i_type(mn, rd, rs1, args[2]))
+            words.append(i_type(mn, rd, rs1, args[2], xlen=xlen))
+        elif mn in R_TYPE_W:
+            rd, rs1, rs2 = reg(args[0]), reg(args[1]), reg(args[2])
+            words.append(r_type_w(mn, rd, rs1, rs2))
+        elif mn in I_TYPE_W:
+            rd, rs1 = reg(args[0]), reg(args[1])
+            words.append(i_type_w(mn, rd, rs1, args[2]))
         elif mn in LOAD:
             rd = reg(args[0])
             m = re.match(r"(-?\w+)\((x\d+)\)", args[1])
@@ -457,15 +516,23 @@ def assemble(lines):
 
 
 def write_mem(words, path, size_bytes=128):
+    # docs/adr/0037-rvc-compressed-instructions-phase-u.md: plain little-
+    # endian byte order (word's own low byte at the low array offset) --
+    # matches design/InstructionMemory.v's own real read order as of that
+    # phase (`{insts[addr+3],...,insts[addr]}`, LSB-first), which replaced
+    # the old byte-reversed convention this function used to match. See
+    # that module's own header comment for why RVC forced this (no fixed
+    # per-4-byte-aligned swap can stay correct once a compressed
+    # instruction shifts later instructions off the 4-byte grid).
     data = bytearray(size_bytes)
     for i, w in enumerate(words):
         off = i * 4
         if off + 4 > size_bytes:
             raise ValueError(f"program exceeds {size_bytes}-byte instruction memory")
-        data[off + 0] = (w >> 24) & 0xFF
-        data[off + 1] = (w >> 16) & 0xFF
-        data[off + 2] = (w >> 8) & 0xFF
-        data[off + 3] = w & 0xFF
+        data[off + 0] = w & 0xFF
+        data[off + 1] = (w >> 8) & 0xFF
+        data[off + 2] = (w >> 16) & 0xFF
+        data[off + 3] = (w >> 24) & 0xFF
     with open(path, "w") as f:
         for b in data:
             f.write(f"{b:08b}\n")
@@ -476,12 +543,14 @@ def main():
     ap.add_argument("source")
     ap.add_argument("-o", "--output", required=True)
     ap.add_argument("--size", type=int, default=128)
+    ap.add_argument("--xlen", type=int, default=32,
+                     help="Generation 2: 64 widens slli/srli/srai's shamt to 6 bits (docs/adr/0028)")
     args = ap.parse_args()
 
     with open(args.source) as f:
         lines = f.readlines()
     try:
-        words = assemble(lines)
+        words = assemble(lines, xlen=args.xlen)
     except ValueError as e:
         print(f"asm error: {e}", file=sys.stderr)
         sys.exit(1)

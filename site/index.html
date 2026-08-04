@@ -1,4 +1,4 @@
-<title>RV32IM(F) · 5-Stage Pipelined RISC-V Core</title>
+<title>RV64IMAFD+C · 5-Stage Pipelined RISC-V Core</title>
 <style>
   :root {
     --bg-deep: #080b10;
@@ -354,15 +354,18 @@
 
 <div class="hero">
   <div class="shell hero-inner">
-    <p class="eyebrow">RV32IM(F) · Verilog · Icarus-verified</p>
-    <h1>A 5-stage pipelined<br>RISC-V core, <em>proven</em><br>signal by signal.</h1>
+    <p class="eyebrow">RV64IMAFD+C · Verilog · Icarus + Verilator-verified</p>
+    <h1>A 5-stage pipelined<br>RISC-V core that <em>boots</em><br>real Linux kernel code.</h1>
     <p class="lede">
       In-order Fetch&nbsp;→ Decode&nbsp;→ Execute&nbsp;→ Memory&nbsp;→ Writeback, with hardware
-      forwarding, hazard detection, a real multi-cycle divider, full single-precision floating point,
-      machine-mode CSRs/exceptions, real asynchronous interrupts, and an on-chip Wishbone-style bus
-      with UART and timer peripherals — checked against an independent instruction-set simulator, not
-      just directed tests. Every number on this page, including the trace viewer at the bottom, is read
-      directly off <code>design/riscvpipeline.v</code> in simulation. Nothing here is illustrated.
+      forwarding, hazard detection, a real multi-cycle divider, full single- and double-precision
+      floating point, a from-scratch RVC (compressed instruction) decoder, the 'A' (atomic) extension,
+      M/S/U privilege modes with Sv32 and Sv39 MMUs, real asynchronous interrupts, a hand-rolled SBI
+      firmware, and an on-chip Wishbone-style bus with a Linux-driver-compatible ns16550a UART and CLINT
+      — checked against an independent instruction-set simulator, not just directed tests, and against a
+      real, unmodified Linux kernel image running on a Verilator-backed model. Every number on this page,
+      including the trace viewer at the bottom, is read directly off <code>design/riscvpipeline.v</code>
+      in simulation. Nothing here is illustrated.
     </p>
     <div class="hero-actions">
       <a class="btn primary" href="#viewer">Watch it execute →</a>
@@ -413,10 +416,10 @@
   </div>
 
   <div class="readout">
-    <div class="stat"><div class="v">47<span class="unit">/47</span></div><div class="l">directed tests passing</div></div>
-    <div class="stat"><div class="v">655<span class="unit">/655</span></div><div class="l">assertion checks passing</div></div>
+    <div class="stat"><div class="v">90<span class="unit">/90</span></div><div class="l">directed tests passing</div></div>
     <div class="stat"><div class="v">1000<span class="unit">+</span></div><div class="l">random programs vs. reference ISS</div></div>
-    <div class="stat"><div class="v">20</div><div class="l">ADRs — every real bug documented</div></div>
+    <div class="stat"><div class="v">200<span class="unit">M+</span></div><div class="l">real Linux kernel cycles, zero crashes</div></div>
+    <div class="stat"><div class="v">38</div><div class="l">ADRs — every real bug documented</div></div>
     <div class="stat"><div class="v">0</div><div class="l">iverilog -Wall warnings</div></div>
   </div>
 </div>
@@ -468,14 +471,15 @@
   </section>
 
   <section class="block tight" id="rv32f">
-    <h2>Full RV32F, not a reduced subset</h2>
+    <h2>Full RV64F/D, not a reduced subset</h2>
     <p class="intro">
-      <code>fadd.s</code>/<code>fsub.s</code>/<code>fmul.s</code>/<code>fdiv.s</code>/<code>fsqrt.s</code>,
-      the <code>fmadd.s</code>/<code>fmsub.s</code>/<code>fnmsub.s</code>/<code>fnmadd.s</code> fused
-      multiply-add family (rounded once, not twice), sign-injection, min/max, comparisons, conversions,
-      and a live <code>fflags</code>/<code>frm</code> — with full static and dynamic rounding-mode
-      support. A separate 32-register float file gets its own full forwarding network from day one, not
-      a stall-only placeholder.
+      <code>fadd</code>/<code>fsub</code>/<code>fmul</code>/<code>fdiv</code>/<code>fsqrt</code> in both
+      single (<code>.s</code>) and double (<code>.d</code>) precision, the <code>fmadd</code>/
+      <code>fmsub</code>/<code>fnmsub</code>/<code>fnmadd</code> fused multiply-add family (rounded once,
+      not twice), sign-injection, min/max, comparisons, conversions, and a live
+      <code>fflags</code>/<code>frm</code> — with full static and dynamic rounding-mode support. A
+      separate float file gets its own full forwarding network from day one, not a stall-only
+      placeholder.
     </p>
     <div class="vgrid">
       <div class="vcard"><div class="k">FRegister.v</div><div class="d">32×32 float register file, no x0-equivalent — every register is ordinary and forwardable.</div></div>
@@ -486,18 +490,36 @@
   </section>
 
   <section class="block tight" id="soc">
-    <h2>A real bus, real peripherals, real interrupts</h2>
+    <h2>A real bus, Linux-compatible peripherals, real interrupts</h2>
     <p class="intro">
-      Data memory used to be the only addressable device, reached with no bus in front of it at all.
-      It now sits behind a classic Wishbone-style handshake, alongside a cycle-accurate UART (real
-      bit-shifted 8N1 serial framing, not a behavioral shortcut) and a CLINT-style timer — both capable
-      of raising a real, correctly-prioritized hardware interrupt.
+      Data memory sits behind a classic Wishbone-style handshake, alongside a real 8-register
+      ns16550a-compatible UART and a real RISC-V CLINT — both redesigned specifically so a real,
+      unmodified Linux kernel needs no driver patch to talk to either.
     </p>
     <div class="vgrid">
       <div class="vcard"><div class="k">WbDecoder.v / RamWishboneAdapter.v</div><div class="d">A parameterized address decoder/mux, plus a thin bus wrapper around the existing memory that changes not one line of the already-verified module.</div></div>
-      <div class="vcard"><div class="k">Uart.v</div><div class="d">Real start/8-data/stop-bit serial framing shifted one bit at a time, with RX midpoint sampling — standard receiver practice.</div></div>
-      <div class="vcard"><div class="k">Timer.v</div><div class="d">A free-running RISC-V CLINT-style <code>mtime</code>/<code>mtimecmp</code> machine-timer peripheral.</div></div>
-      <div class="vcard"><div class="k">Interrupt redirect</div><div class="d"><code>mie</code>/<code>mip</code>, spec-mandated external-over-timer priority, and an interrupt-detection point genuinely independent of whatever instruction is executing — unlike every synchronous exception this core already had.</div></div>
+      <div class="vcard"><div class="k">Uart.v</div><div class="d">A real 8-register ns16550a map (RBR/THR, IER, IIR/FCR, LCR, MCR, LSR, MSR, SCR, DLAB-gated) — a DT <code>compatible="ns16550a"</code> string is enough for Linux's own driver.</div></div>
+      <div class="vcard"><div class="k">Timer.v</div><div class="d">A real RISC-V CLINT: <code>msip</code>/<code>mtimecmp</code>/<code>mtime</code> at the exact byte offsets Linux's own <code>timer-clint.c</code> hardcodes.</div></div>
+      <div class="vcard"><div class="k">Interrupt redirect</div><div class="d">Real spec priority MEI &gt; MSI &gt; MTI &gt; SSI &gt; STI, including a software-synthesized supervisor interrupt path for a real kernel scheduler tick.</div></div>
+    </div>
+  </section>
+
+  <section class="block tight" id="linux">
+    <h2>RVC, atomics, MMU, SBI — and a real Linux boot attempt</h2>
+    <p class="intro">
+      A from-scratch RVC (compressed instruction) decoder and 'A' (atomic) extension implementation, a
+      full M/S/U privilege architecture with independent Sv32 and Sv39 MMUs, and a hand-rolled M-mode SBI
+      firmware — built because a real, unmodified riscv64 Linux kernel <code>Image</code> needed every
+      one of them. Verilator-backed for real throughput (~1.4M cycles/sec), the kernel now executes
+      correctly through its own compressed-instruction-heavy entry sequence and a real
+      <code>amoadd.w</code> hart-check, 200 million+ cycles with zero crashes — the deepest real-kernel
+      execution this core has ever achieved.
+    </p>
+    <div class="vgrid">
+      <div class="vcard"><div class="k">CompressedExpander.v</div><div class="d">Real RVC decode, the full standard quadrant table — expands every compressed instruction to its bit-exact standard 32-bit encoding before any other stage sees it.</div></div>
+      <div class="vcard"><div class="k">2-phase AMO interlock</div><div class="d"><code>lr</code>/<code>sc</code>/<code>amo*</code>, a real read-modify-write MEM-stage sequence, independent of the existing load/store interlock.</div></div>
+      <div class="vcard"><div class="k">Tlb.v/Ptw.v + Tlb39.v/Ptw39.v</div><div class="d">Two genuinely separate MMU implementations — Sv32 for RV32, a from-scratch 3-level Sv39 walker for RV64.</div></div>
+      <div class="vcard"><div class="k">sim/firmware/</div><div class="d">A hand-rolled M-mode SBI firmware (legacy v0.1 <em>and</em> real v0.2+) plus a hand-rolled device-tree-blob emitter — no <code>dtc</code> dependency.</div></div>
     </div>
     <p class="intro" style="margin-top:18px">
       Verifying an unpredictably-timed asynchronous event against a sequential reference simulator,

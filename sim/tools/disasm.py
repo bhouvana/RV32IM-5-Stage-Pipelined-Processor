@@ -29,6 +29,10 @@ OPCODE_AUIPC = 0b0010111
 OPCODE_CUSTOM = 0b0101010
 OPCODE_SYSTEM = 0b1110011
 
+# Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md).
+OPCODE_OP_32 = 0b0111011
+OPCODE_OP_IMM_32 = 0b0011011
+
 # docs/adr/0019-f-extension.md (Phase C9).
 OPCODE_FP = 0b1010011
 OPCODE_LOAD_FP = 0b0000111
@@ -71,8 +75,15 @@ def csr_name(addr):
     return CSR_NAMES.get(addr, f"0x{addr:03x}")
 
 
-def disasm(word):
-    """word: raw 32-bit instruction as an int. Returns a mnemonic string."""
+def disasm(word, xlen=32):
+    """word: raw 32-bit instruction as an int. Returns a mnemonic string.
+
+    xlen (Generation 2, docs/adr/0028-rv64-migration-phase-m.md): only
+    affects the plain (non-"w") slli/srli/srai shamt width -- 5 bits at 32
+    (default, bit-exact with every prior call site), 6 at 64. The "w"-
+    suffixed family's own shamt is always exactly 5 bits regardless, so it
+    doesn't consult this parameter at all.
+    """
     if word == 0x00000013:
         return "nop"
     if word == 0:
@@ -103,19 +114,49 @@ def disasm(word):
 
     if op == OPCODE_I:
         if f3 in (1, 5):
-            shamt = (word >> 20) & 0x1F
-            mn = {1: "slli", 5: ("srai" if f7 == FUNCT7_ALT else "srli")}[f3]
+            # Generation 2: 6-bit shamt (inst[25:20]) + 6-bit funct6
+            # (inst[31:26]) at xlen>=64, matching design/ImmGen.v/
+            # design/ALUCtrl.v's own split -- 5-bit shamt/7-bit funct7 at
+            # the default xlen=32 (bit-exact with every prior call site).
+            if xlen >= 64:
+                shamt = (word >> 20) & 0x3F
+                f6 = (word >> 26) & 0x3F
+                mn = {1: "slli", 5: ("srai" if f6 == 0b010000 else "srli")}[f3]
+            else:
+                shamt = (word >> 20) & 0x1F
+                mn = {1: "slli", 5: ("srai" if f7 == FUNCT7_ALT else "srli")}[f3]
             return f"{mn} x{rd},x{rs1},{shamt}"
         names = {0: "addi", 2: "slti", 3: "sltiu", 4: "xori", 6: "ori", 7: "andi"}
         return f"{names.get(f3, 'i-type?')} x{rd},x{rs1},{imm_i}"
 
+    if op == OPCODE_OP_32:
+        # Generation 2. Reuses OP's own funct7/funct3 encodings byte-for-byte.
+        if f7 == FUNCT7_MULDIV:
+            names = {0: "mulw", 4: "divw", 5: "divuw", 6: "remw", 7: "remuw"}
+            return f"{names.get(f3, 'op32muldiv?')} x{rd},x{rs1},x{rs2}"
+        names = {(FUNCT7_BASE, 0): "addw", (FUNCT7_ALT, 0): "subw", (FUNCT7_BASE, 1): "sllw",
+                  (FUNCT7_BASE, 5): "srlw", (FUNCT7_ALT, 5): "sraw"}
+        mn = names.get((f7, f3), f"op32?(f7={f7:#04x},f3={f3})")
+        return f"{mn} x{rd},x{rs1},x{rs2}"
+
+    if op == OPCODE_OP_IMM_32:
+        # Generation 2. shamt always exactly 5 bits, unlike OPCODE_I's
+        # xlen-dependent split above (this opcode only ever means a 32-bit
+        # result, regardless of xlen).
+        if f3 in (1, 5):
+            shamt = (word >> 20) & 0x1F
+            mn = {1: "slliw", 5: ("sraiw" if f7 == FUNCT7_ALT else "srliw")}[f3]
+            return f"{mn} x{rd},x{rs1},{shamt}"
+        names = {0: "addiw"}
+        return f"{names.get(f3, 'opimm32?')} x{rd},x{rs1},{imm_i}"
+
     if op == OPCODE_LOAD:
-        names = {0: "lb", 1: "lh", 2: "lw", 4: "lbu", 5: "lhu"}
+        names = {0: "lb", 1: "lh", 2: "lw", 3: "ld", 4: "lbu", 5: "lhu", 6: "lwu"}
         return f"{names.get(f3, 'load?')} x{rd},{imm_i}(x{rs1})"
 
     if op == OPCODE_STORE:
         imm_s = sext(((word >> 25) << 5) | ((word >> 7) & 0x1F), 12)
-        names = {0: "sb", 1: "sh", 2: "sw"}
+        names = {0: "sb", 1: "sh", 2: "sw", 3: "sd"}
         return f"{names.get(f3, 'store?')} x{rs2},{imm_s}(x{rs1})"
 
     if op == OPCODE_BRANCH:

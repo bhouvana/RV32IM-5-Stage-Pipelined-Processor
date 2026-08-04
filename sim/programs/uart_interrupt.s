@@ -6,7 +6,7 @@
 # or after the loop's already spinning in `self`; both are valid, and the
 # testbench's mepc check accepts the whole [loop_start, self] range rather
 # than a single exact value, mirroring timer_interrupt.s's own reasoning.
-# Unlike the timer source, RXDATA's own read naturally clears rx_ready (an
+# Unlike the timer source, RBR's own read naturally clears LSR.DR (an
 # edge-ish per-byte event, not a level compare against a re-armable
 # register), so the handler doesn't need a timer_interrupt.s-style
 # reprogram-to-a-huge-value step to avoid an immediate re-trigger.
@@ -17,7 +17,7 @@ csrrw x0, mtvec, x5  # 8
 addi  x6, x0, -2048  # 12: 0xFFFFF800 after sign-ext -- CSR.v's mie_masked only reads bits 7/11, so only bit11 (MEIE) survives regardless of the sign-extended upper bits (same harmless-masking gotcha as andi, mip_live.s)
 csrrw x0, mie, x6  # 16: mie.MEIE <- 1
 addi  x8, x0, 1  # 20
-sw    x8, 12(x1)  # 24: UART.CONTROL.rx_irq_enable <- 1
+sw    x8, 4(x1)  # 24: UART.IER.ERBFI <- 1
 csrrsi x0, mstatus, 8  # 28: mstatus.MIE <- 1 (armed last)
 addi  x10, x10, 1  # 32
 addi  x10, x10, 1  # 36
@@ -39,5 +39,5 @@ self:
 jal   x0, self  # 96: spin once the loop completes (or once interrupted after it)
 handler:
 addi  x11, x0, 888  # 100: proves the UART interrupt handler ran
-lw    x13, 4(x1)  # 104: RXDATA -- reading it clears rx_ready, defusing the (edge, not level) source
+lw    x13, 0(x1)  # 104: RBR -- reading it clears LSR.DR, defusing the (edge, not level) source
 mret  # 108

@@ -1,5 +1,7 @@
 `default_nettype none
 
+`include "riscv_defs.vh"
+
 // Synchronous-read data memory (docs/ROADMAP.md Phase 7, docs/adr/0012-fpga-
 // readiness.md). Wired into PIPELINED as of docs/adr/0013-mem-stage-retiming.md,
 // which added the MEM-stage interlock (riscvpipeline.v's `mem_stall`) needed
@@ -35,7 +37,12 @@ module DataMemoryBRAM #(
     // pattern, just applied on this module's synchronous reset instead of
     // an `initial` block, since that's where this module's own zero-init
     // already lives.
-    parameter DATA_INIT_FILE = ""
+    parameter DATA_INIT_FILE = "",
+    // docs/adr/0036: mirrors InstructionMemory.v's identical override --
+    // 0 (default) keeps Phase Q's 64KB cap bit-exact for every existing
+    // test; a real kernel's initramfs+DTB placed well past that offset
+    // needs an explicit nonzero override instead.
+    parameter ZERO_INIT_LIMIT_OVERRIDE = 0
 )(
     input clk,
     input rst,
@@ -48,13 +55,21 @@ module DataMemoryBRAM #(
 );
 
     reg [7:0] data_memory [0:SIZE_BYTES-1];
+    // Phase Q (docs/adr/0033): see InstructionMemory.v's identical
+    // ZERO_INIT_LIMIT for the full rationale and the measured ~2m47s
+    // wall-clock cost this bound avoids at SIZE_BYTES=64MB.
+    localparam ZERO_INIT_LIMIT_DEFAULT = (SIZE_BYTES < 65536) ? SIZE_BYTES : 65536;
+    localparam ZERO_INIT_LIMIT = (ZERO_INIT_LIMIT_OVERRIDE == 0) ? ZERO_INIT_LIMIT_DEFAULT : ZERO_INIT_LIMIT_OVERRIDE;
     integer rst_i;
 
     // Latched every cycle alongside the raw word read, so the extension
     // logic below always matches the access that produced raw_word_r --
     // using this cycle's (not last cycle's) funct3/memRead would extend the
-    // *next* access's width against *this* access's data.
-    reg [31:0] raw_word_r;
+    // *next* access's width against *this* access's data. Widened to
+    // [XLEN-1:0] for Generation 2 (Phase M, docs/adr/0028-rv64-migration-
+    // phase-m.md) -- the low 32 bits hold lb/lh/lw/lbu/lhu/lwu's data at any
+    // XLEN; the upper bits (real only at XLEN>=64) hold ld's extra 4 bytes.
+    reg [XLEN-1:0] raw_word_r;
     reg [2:0] funct3_r;
     reg mem_read_r;
 
@@ -74,12 +89,16 @@ module DataMemoryBRAM #(
                 // default behavior for which end of a descending-range array
                 // $readmemb fills first (Icarus warns about exactly this
                 // ambiguity otherwise) -- same reasoning InstructionMemory.v's
-                // own $readmemb call already documents.
-                $readmemb(DATA_INIT_FILE, data_memory, 0, SIZE_BYTES-1);
+                // own $readmemb call already documents. Range bounded to
+                // ZERO_INIT_LIMIT-1, not SIZE_BYTES-1, for the identical
+                // reason InstructionMemory.v's own call is (docs/adr/0033) --
+                // not yet exercised by any real DATA_INIT_FILE user, applied
+                // proactively for consistency.
+                $readmemb(DATA_INIT_FILE, data_memory, 0, ZERO_INIT_LIMIT-1);
             else
-                for (rst_i = 0; rst_i < SIZE_BYTES; rst_i = rst_i + 1)
+                for (rst_i = 0; rst_i < ZERO_INIT_LIMIT; rst_i = rst_i + 1)
                     data_memory[rst_i] <= 8'b0;
-            raw_word_r <= 32'b0;
+            raw_word_r <= {XLEN{1'b0}};
             funct3_r   <= 3'b0;
             mem_read_r <= 1'b0;
         end else begin
@@ -93,13 +112,31 @@ module DataMemoryBRAM #(
                         data_memory[address + 1] <= writeData[15:8];
                         data_memory[address]     <= writeData[7:0];
                     end
-                    default: begin // sw
+                    default: begin // sw (funct3=010), and sd's (funct3=011)
+                                   // low 4 bytes -- writeData[31:24:0] is
+                                   // always in-range at any XLEN>=32, so this
+                                   // arm needs no XLEN gate. sd's high 4
+                                   // bytes are the XLEN-gated block below.
                         data_memory[address + 3] <= writeData[31:24];
                         data_memory[address + 2] <= writeData[23:16];
                         data_memory[address + 1] <= writeData[15:8];
                         data_memory[address]     <= writeData[7:0];
                     end
                 endcase
+
+                // sd's high 4 bytes. XLEN is an elaboration-time constant --
+                // this `if` (not `generate if`) dead-code-eliminates cleanly
+                // at XLEN=32 (confirmed directly: iverilog -Wall neither
+                // warns nor errors on the otherwise-out-of-range
+                // writeData[63:32] slice here, since the branch is constant-
+                // folded away entirely, never elaborated against writeData's
+                // real 32-bit width).
+                if (XLEN >= 64 && funct3 == `F3_STORE_SD) begin
+                    data_memory[address + 7] <= writeData[63:56];
+                    data_memory[address + 6] <= writeData[55:48];
+                    data_memory[address + 5] <= writeData[47:40];
+                    data_memory[address + 4] <= writeData[39:32];
+                end
             end
 
             // Always read the full word at `address` -- real BRAM has no
@@ -110,8 +147,12 @@ module DataMemoryBRAM #(
             // read-during-write mode returns old data, or X, depending on
             // vendor primitive -- software/callers on real hardware must not
             // rely on same-cycle read-after-write either).
-            raw_word_r <= {data_memory[address + 3], data_memory[address + 2],
-                           data_memory[address + 1], data_memory[address]};
+            raw_word_r[31:0] <= {data_memory[address + 3], data_memory[address + 2],
+                                  data_memory[address + 1], data_memory[address]};
+            if (XLEN >= 64) begin
+                raw_word_r[63:32] <= {data_memory[address + 7], data_memory[address + 6],
+                                       data_memory[address + 5], data_memory[address + 4]};
+            end
             funct3_r   <= funct3;
             mem_read_r <= memRead;
         end
@@ -124,10 +165,12 @@ module DataMemoryBRAM #(
                 3'b100: readData = {24'b0,                raw_word_r[7:0]};    // lbu
                 3'b001: readData = {{16{raw_word_r[15]}}, raw_word_r[15:0]};   // lh
                 3'b101: readData = {16'b0,                raw_word_r[15:0]};   // lhu
-                default: readData = raw_word_r;                                // lw
+                3'b110: readData = {{(XLEN-32){1'b0}},               raw_word_r[31:0]};  // lwu
+                3'b011: readData = raw_word_r;                                            // ld (real only at XLEN>=64)
+                default: readData = {{(XLEN-32){raw_word_r[31]}},    raw_word_r[31:0]};   // lw -- sign-extends at XLEN=64 (was zero-extending, a real bug: RV64I's own lwu exists specifically because lw sign-extends)
             endcase
         end else begin
-            readData = 32'b0;
+            readData = {XLEN{1'b0}};
         end
     end
 

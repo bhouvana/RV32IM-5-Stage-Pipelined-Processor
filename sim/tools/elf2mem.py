@@ -39,21 +39,24 @@ dereferences the format string), but fatal to Dhrystone's
 via a debug testbench showing the DUT permanently redirecting within a
 small, fixed address range.
 
-Byte order needs care, and the two memories are NOT symmetric here -- a
-real, genuine gotcha, found by actually running a compiled smoke test and
-getting garbage back, not assumed. A real ELF's instruction/data bytes are
-always little-endian (RISC-V's actual spec: byte at the lowest address is
-the *least* significant byte of a multi-byte value). But design/asm.py --
-this core's own hand-written-assembly path, entirely independent of a real
-toolchain -- packs its OWN instruction words *big-endian*
-(`(w>>24)&0xFF` first), matching design/InstructionMemory.v's own
-`{insts[addr], insts[addr+1], ...}` MSB-first concatenation; that pairing
-is self-consistent but is NOT standard RISC-V byte order. So: IMEM bytes
-extracted from a real ELF need each 4-byte instruction word's byte order
-*reversed* to match what InstructionMemory.v expects. DMEM does NOT --
-design/DataMemoryBRAM.v's own `{mem[addr+3], mem[addr+2], ...}` load/store
-logic already matches real RISC-V little-endian directly, so a real ELF's
-.data bytes need no reordering at all.
+Byte order (docs/adr/0037-rvc-compressed-instructions-phase-u.md): IMEM and
+DMEM are symmetric now. Both design/InstructionMemory.v and
+design/DataMemoryBRAM.v read `{mem[addr+3], mem[addr+2], mem[addr+1],
+mem[addr]}` (LSB-first) -- real ELF bytes (RISC-V spec: byte at the lowest
+address is the *least* significant byte) work directly for both, no
+reordering needed anywhere. This was NOT always true: through Phase T,
+InstructionMemory.v read MSB-first instead, requiring a real per-4-byte-
+word swap here (and a matching big-endian pack in design/asm.py's own
+write_mem) -- RVC's own compressed (2-byte) instructions broke that,
+since a fixed per-4-byte-aligned-word swap can't stay correct once a
+compressed instruction shifts every later instruction off the 4-byte grid
+(no static byte array satisfies "every possible unaligned 4-byte read
+reconstructs the right value" simultaneously -- a real, worked proof, not
+just a hunch). InstructionMemory.v's read order was changed to match
+DataMemoryBRAM.v's own already-correct convention instead of inventing a
+second one; swap_instruction_words below is kept only for any external
+caller that might still reference it, but is no longer called by this
+module's own pipeline.
 
 Usage:
     python elf2mem.py program.elf --imem-out imem.mem --dmem-out dmem.mem \\
@@ -96,6 +99,27 @@ def extract_binary(objcopy, elf_path, sections, size):
     return data + b"\x00" * (size - len(data))
 
 
+def get_section_vma(objdump, elf_path, section):
+    """Reads a section's own real VMA directly from the ELF's section
+    headers (docs/adr/0035-minimal-sbi-firmware-phase-s.md) -- used to
+    place IMEM sections independently, the same "extract by real VMA, not
+    by naive concatenation" idiom get_symbol/extract_binary already use for
+    .rodata/.data. Needed once a linker script has more than one
+    non-contiguous code region (e.g. link_sbi.ld's own fixed-VMA
+    .text.boot + .text.payload split) -- the original .text.init+.text
+    default stays a single contiguous extraction (both sections start
+    exactly where the old link.ld already placed them), so this is additive,
+    not a behavior change for that existing caller."""
+    r = subprocess.run([objdump, "-h", elf_path], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"objdump -h failed: {r.stderr.strip()}")
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[1] == section:
+            return int(parts[3], 16)
+    return None  # section doesn't exist in this ELF (e.g. no .text.init at all)
+
+
 def get_symbol(nm, elf_path, name):
     """Reads one symbol's address out of the ELF via `nm` -- used to place
     .rodata/.data at their real linker-computed VMA offsets (see this
@@ -136,10 +160,34 @@ def main():
     ap.add_argument("--imem-size", type=int, required=True)
     ap.add_argument("--dmem-size", type=int, required=True)
     ap.add_argument("--objcopy", default="riscv-none-elf-objcopy")
+    # docs/adr/0035-minimal-sbi-firmware-phase-s.md: generalized from a
+    # single hardcoded [".text.init", ".text"] concatenation (correct only
+    # when those two sections are contiguous, which sim/benchmarks/c/
+    # link.ld's own layout always makes true) to independent-by-VMA
+    # placement -- needed for link_sbi.ld's own non-contiguous
+    # .text.boot + .text.payload split. Comma-separated, same default as
+    # before (this flag is additive; every existing build_c_bench.py
+    # invocation that doesn't pass it behaves bit-identically).
+    ap.add_argument("--imem-sections", default=".text.init,.text",
+                     help="comma-separated section names, each placed at its own real VMA "
+                          "(default matches sim/benchmarks/c/link.ld's contiguous .text.init+.text)")
     args = ap.parse_args()
 
-    imem = extract_binary(args.objcopy, args.elf, [".text.init", ".text"], args.imem_size)
-    imem = swap_instruction_words(imem)
+    nm = args.objcopy.replace("objcopy", "nm")
+    objdump = args.objcopy.replace("objcopy", "objdump")
+    imem = bytearray(args.imem_size)
+    for section in args.imem_sections.split(","):
+        raw = extract_raw(args.objcopy, args.elf, section)
+        if not raw:
+            continue
+        vma = get_section_vma(objdump, args.elf, section)
+        if vma is None:
+            raise ValueError(f"section {section!r} has content but no VMA found in objdump -h output")
+        if vma + len(raw) > args.imem_size:
+            raise ValueError(f"{section} at VMA {vma:#x} + {len(raw)} bytes "
+                              f"exceeds the {args.imem_size}-byte region -- grow --imem-size")
+        imem[vma:vma + len(raw)] = raw
+    imem = bytes(imem)
 
     # .rodata is data (read via load instructions, never instruction-fetched)
     # and lives in DMEM, not IMEM -- see link.ld's header comment for the
@@ -149,7 +197,6 @@ def main():
     # (from link.ld's _rodata_start/_data_start symbols) rather than
     # extracted together by LMA -- see link.ld's header comment for the
     # two ways that went wrong first.
-    nm = args.objcopy.replace("objcopy", "nm")
     rodata_raw = extract_raw(args.objcopy, args.elf, ".rodata")
     data_raw = extract_raw(args.objcopy, args.elf, ".data")
     rodata_off = get_symbol(nm, args.elf, "_rodata_start") if rodata_raw else 0

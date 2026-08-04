@@ -6,8 +6,8 @@
 # it stays at its own reset value of 0 throughout. The loop must run to
 # completion untouched and the handler must never execute.
 # Layout: loop = [28, 104], self = 108, handler = 112
-lui   x2, 0x10000  # 0: x2 = MMIO_BASE
-addi  x2, x2, 16  # 4: x2 = TIMER_BASE (unused here -- MTIMECMP's reset value of 0 already makes mip.MTIP pending immediately, tb_timer_unit.v's own documented reset behavior)
+lui   x2, 0x10000  # 0: x2 = MMIO_BASE (unused here -- MTIMECMP's reset value of 0 already makes mip.MTIP pending immediately, tb_timer_unit.v's own documented reset behavior; left as a dead 2-instruction computation rather than retargeted at Phase R's new CLINT address, since the value is never read)
+addi  x2, x2, 16  # 4: (still unused)
 addi  x5, x0, 112  # 8: x5 = handler address (112) -- armed but must never be reached
 csrrw x0, mtvec, x5  # 12
 addi  x6, x0, -1920  # 16: 0xFFFFF880 after sign-ext -- CSR.v's mie_masked only reads bits 7/11, both set here (MTIE|MEIE), same harmless-masking reasoning as mip_live.s's andi checks

@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0019-f-extension.md (Phase C6): first end-to-end exercise of the
 // live float datapath -- fmv.w.x/fmv.x.w (bit-pattern moves), fadd.s/fmul.s

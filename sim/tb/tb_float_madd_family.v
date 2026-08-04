@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0019-f-extension.md (Phase C9): exercises all four R4-type
 // MADD-family ops (fmadd.s/fmsub.s/fnmsub.s/fnmadd.s), not just fmadd.s --

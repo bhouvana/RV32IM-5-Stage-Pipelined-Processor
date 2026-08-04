@@ -45,11 +45,23 @@ module reg1 #(
     // garbage instruction's rs1/rs2 could coincidentally trigger an
     // unrelated load-use hazard, and the fault flag must survive that.
     input ifetch_fault,
+    // docs/adr/0037-rvc-compressed-instructions-phase-u.md. Whether THIS
+    // fetch was a 2-byte compressed instruction (inst[1:0] != 2'b11) --
+    // `inst` itself has already been expanded to its standard 32-bit
+    // equivalent by the time it reaches this port (riscvpipeline.v's own
+    // CompressedExpander sits upstream, at the fetch tap), so this flag's
+    // only remaining job downstream is telling the decode-stage link-
+    // address adder (pc_plus4, jal/jalr/branch-fallthrough) whether the
+    // real next sequential PC is +2 or +4 -- same decode-context-group
+    // reasoning ifetch_fault above already documents (must survive a
+    // load-use flush unmolested).
+    input is_compressed,
     output reg [XLEN-1:0] inst_regfd,
     output reg [XLEN-1:0] pc_o_regfd,
     output reg predict_taken_regfd,
     output reg [XLEN-1:0] predict_target_regfd,
-    output reg ifetch_fault_regfd
+    output reg ifetch_fault_regfd,
+    output reg is_compressed_regfd
 );
 
 always@(posedge clk)
@@ -70,6 +82,7 @@ begin
     predict_taken_regfd <= 0;
     predict_target_regfd <= 0;
     ifetch_fault_regfd <= 0;
+    is_compressed_regfd <= 0;
     end
     else
         begin
@@ -81,6 +94,7 @@ begin
                 predict_taken_regfd <= 0;
                 predict_target_regfd <= 0;
                 ifetch_fault_regfd <= 0;
+                is_compressed_regfd <= 0;
             end
             else if(stall)
             begin
@@ -89,6 +103,7 @@ begin
                 predict_taken_regfd <= predict_taken_regfd;
                 predict_target_regfd <= predict_target_regfd;
                 ifetch_fault_regfd <= ifetch_fault_regfd;
+                is_compressed_regfd <= is_compressed_regfd;
             end
             else
             begin
@@ -97,6 +112,7 @@ begin
                 predict_taken_regfd <= predict_taken;
                 predict_target_regfd <= predict_target;
                 ifetch_fault_regfd <= ifetch_fault;
+                is_compressed_regfd <= is_compressed;
             end
     end
 end

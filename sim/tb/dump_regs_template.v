@@ -34,6 +34,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 `include "Bht.v"
 `include "Btb.v"
 `include "ICache.v"
@@ -49,7 +51,8 @@
 // BRANCH_PREDICTOR parameter), and __CACHE_MODE__ (docs/adr/0023-caches.md;
 // 0 or 1, see riscvpipeline.v's CACHE_MODE parameter), and __MEM_LATENCY_I__/
 // __MEM_LATENCY_D__ (docs/adr/0024-variable-latency-memory.md; extra
-// wait-state cycles, 0 by default) are substituted per
+// wait-state cycles, 0 by default), and __XLEN__ (Generation 2, docs/adr/
+// 0028-rv64-migration-phase-m.md; 32 or 64) are substituted per
 // run. Dumps final
 // architectural state as one decimal value per line, for comparison against
 // sim/tools/iss.py's own final state on the same program -- the ISS itself
@@ -68,7 +71,8 @@ module dump_regs;
 
     PIPELINED #(.INIT_FILE("__INIT_FILE__"), .HAZARD_STRATEGY(__HAZARD_STRATEGY__),
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__),
-                .CACHE_MODE(__CACHE_MODE__), .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__))
+                .CACHE_MODE(__CACHE_MODE__), .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
+                .XLEN(__XLEN__))
                 dut(.clk(clk), .start(start), .uart_rx(1'b1));
 
     always #5 clk = ~clk;

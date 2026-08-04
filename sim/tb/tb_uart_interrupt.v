@@ -32,10 +32,12 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/0020-soc-integration.md (Phase D9). Directed test for the
 // interrupt redirect path, UART RX source: sim/programs/uart_interrupt.s
-// enables mie.MEIE/CONTROL.rx_irq_enable/mstatus.MIE, then runs a loop
+// enables mie.MEIE/IER.ERBFI/mstatus.MIE, then runs a loop
 // while this testbench (playing the external-transmitter role, same as
 // tb_uart_unit.v/tb_mip_live.v) drives a real byte into rx. Checks: the
 // interrupt is taken (handler ran, mcause carries the interrupt bit + the

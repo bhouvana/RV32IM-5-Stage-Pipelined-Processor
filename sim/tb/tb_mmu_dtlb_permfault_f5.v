@@ -32,6 +32,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 
 // docs/adr/00NN-mmu-sv32.md (Phase F7). D-side permission violation -- see
 // sim/programs/mmu_dtlb_permfault_f5.s's own header: a guaranteed store to

@@ -34,6 +34,8 @@
 `include "Timer.v"
 `include "Tlb.v"
 `include "Ptw.v"
+`include "Tlb39.v"
+`include "Ptw39.v"
 `include "Bht.v"
 `include "Btb.v"
 `include "ICache.v"
@@ -70,7 +72,7 @@ module dump_regs_interrupt;
                 .PIPELINE_PROFILE(__PIPELINE_PROFILE__), .MEM_SIZE_BYTES(__MEM_SIZE__),
                 .BRANCH_PREDICTOR(__BRANCH_PREDICTOR__), .CACHE_MODE(__CACHE_MODE__),
                 .MEM_LATENCY_I(__MEM_LATENCY_I__), .MEM_LATENCY_D(__MEM_LATENCY_D__),
-                .UART_CLKS_PER_BIT(4))
+                .UART_CLKS_PER_BIT(4), .XLEN(__XLEN__))
         dut(.clk(clk), .start(start), .uart_rx(uart_rx), .uart_tx(uart_tx));
 
     always #5 clk = ~clk;
@@ -101,7 +103,23 @@ module dump_regs_interrupt;
         fd = $fopen("__OUT_FILE__", "w");
         for (i = 0; i < 32; i = i + 1)
             $fdisplay(fd, "%0d", dut.m_Register.regs[i]);
-        for (i = 0; i < __MEM_SIZE__; i = i + 1)
+        // Phase Q (docs/adr/0033-memory-capacity-scale-up-phase-q.md): dump
+        // only the __DUMP_WINDOW__-byte window (== __MEM_SIZE__ at every
+        // pre-existing call site, since dump_window = min(mem_size,
+        // SCALEUP_WINDOW_BYTES) in run_random_tests.py), instead of the
+        // full __MEM_SIZE__ -- a constrained-random program's real touched
+        // range is provably confined to a small low window regardless of
+        // MEM_SIZE_BYTES (random_gen.py's own base_addr/addr_space/offset
+        // caps), so dumping the full array at MB scale would be tens of
+        // millions of lines for no correctness benefit. An earlier version
+        // of this fix also spot-checked a few high addresses beyond the
+        // window for defense-in-depth -- removed after running found those
+        // addresses are genuinely undefined (X) in the RTL beyond
+        // DataMemoryBRAM.v's own bounded zero-init, so comparing them
+        // against the ISS's always-defined-zero model isn't a sound check
+        // at all, just a guaranteed parse failure regardless of any real
+        // bug (docs/adr/0033's own "Real bugs/findings" section).
+        for (i = 0; i < __DUMP_WINDOW__; i = i + 1)
             $fdisplay(fd, "%0d", dut.m_DataMemory.m_ram.data_memory[i]);
         for (i = 0; i < 32; i = i + 1)
             $fdisplay(fd, "%0d", dut.m_FRegister.regs[i]);

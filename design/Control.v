@@ -7,7 +7,15 @@
 // conditions on. One `case` arm per opcode; an opcode with no arm here
 // falls to `default`, asserting illegalOpcode -- a real trap
 // (docs/adr/0011), not a silent no-op.
-module Control (
+module Control #(
+    parameter XLEN = 32   // Generation 2 (Phase M, docs/adr/0028-rv64-
+                            // migration-phase-m.md): gates OPCODE_OP_32/
+                            // OPCODE_OP_IMM_32 -- without this, an RV32
+                            // build (XLEN=32) would silently start
+                            // executing these previously-reserved opcodes
+                            // as ordinary add/sub/shift instead of trapping
+                            // illegal-instruction, a real behavior change.
+)(
     input [6:0] opcode,
     //
     input [6:0] funt7,   // full funct7 field (inst[31:25]) -- was 1 bit (inst[30]
@@ -46,6 +54,13 @@ module Control (
     // correctly, riscvpipeline.v doesn't consume it until G6 (real
     // cache-flush semantics).
     output reg isFence,
+    // docs/adr/0038-a-extension-phase-v.md. lr/sc/amo* (opcode 0101111) --
+    // riscvpipeline.v's own new 2-phase MEM-stage interlock owns the real
+    // memRead/memWrite bus behavior for these (see its own comment); this
+    // just flags "this is one of them" so that logic knows to take over
+    // instead of the ordinary single-phase load/store path. regWrite is
+    // still asserted normally here (every lr/sc/amo* writes rd).
+    output reg isAmo,
     output reg illegalOpcode, // opcode itself unrecognized -- see riscvpipeline.v for the
                                // other exception source (ALUCtl==ILLEGAL, a recognized
                                // opcode with an unrecognized funct7/funct3)
@@ -79,6 +94,7 @@ always@(*)begin
     isSret    = 0;
     isSfenceVma = 0;
     isFence   = 0;
+    isAmo     = 0;
     illegalOpcode = 0;
     fRegWrite = 0;
 
@@ -108,6 +124,19 @@ case(opcode)
 
     end
 
+    `OPCODE_AMO:  // docs/adr/0038-a-extension-phase-v.md: lr/sc/amo* --
+                   // address = rs1 (ALUSrc=1, ImmGen.v returns imm=0 for
+                   // this opcode, same "ALU always adds" ALUOP_LOAD_STORE
+                   // shape load/store already use). memRead/memWrite
+                   // deliberately NOT asserted here -- riscvpipeline.v's
+                   // own isAmo_regem-gated interlock drives the real bus
+                   // signals across this instruction's two real phases.
+    begin
+        ALUSrc = 1;
+        regWrite = 1;
+        isAmo = 1;
+    end
+
     `OPCODE_I://immediate inst
     begin
         ALUOp =`ALUOP_ITYPE;
@@ -121,6 +150,33 @@ case(opcode)
         ALUOp =`ALUOP_RTYPE;
         regWrite =1;
 
+    end
+
+    // Generation 2 (Phase M). OP-32/OP-IMM-32 reuse OP/OP-IMM's own
+    // funct7/funct3 encodings byte-for-byte (see ALUCtrl.v) -- riscvpipeline.v
+    // tells ALU.v to truncate-and-sign-extend via a separately-decoded
+    // `wordOp` signal, not a new ALUOp/ALUCtl code. XLEN-gated: at XLEN=32
+    // these are previously-reserved, unallocated opcodes and must keep
+    // trapping illegal-instruction, not silently start executing.
+    `OPCODE_OP_32:
+    begin
+        if (XLEN >= 64) begin
+            ALUOp = `ALUOP_RTYPE;
+            regWrite = 1;
+        end else begin
+            illegalOpcode = 1;
+        end
+    end
+
+    `OPCODE_OP_IMM_32:
+    begin
+        if (XLEN >= 64) begin
+            ALUOp = `ALUOP_ITYPE;
+            ALUSrc = 1;
+            regWrite = 1;
+        end else begin
+            illegalOpcode = 1;
+        end
     end
 
     `OPCODE_BRANCH:

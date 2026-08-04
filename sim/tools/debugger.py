@@ -43,7 +43,7 @@ def load_words(mem_path):
     return words
 
 
-def assemble_if_needed(path, mem_size):
+def assemble_if_needed(path, mem_size, xlen=32):
     if path.endswith(".mem"):
         return load_words(path)
     here = os.path.dirname(os.path.abspath(__file__))
@@ -51,7 +51,8 @@ def assemble_if_needed(path, mem_size):
     fd, tmp_mem = tempfile.mkstemp(suffix=".mem")
     os.close(fd)
     try:
-        r = subprocess.run([sys.executable, asm_py, path, "-o", tmp_mem, "--size", str(mem_size)],
+        r = subprocess.run([sys.executable, asm_py, path, "-o", tmp_mem,
+                             "--size", str(mem_size), "--xlen", str(xlen)],
                             capture_output=True, text=True)
         if r.returncode != 0:
             print(r.stderr, file=sys.stderr)
@@ -62,16 +63,18 @@ def assemble_if_needed(path, mem_size):
 
 
 class Debugger:
-    def __init__(self, words, mem_size):
+    def __init__(self, words, mem_size, xlen=32):
         self.words = words
         self.mem_size = mem_size
+        self.xlen = xlen  # Generation 2 (Phase M12, docs/adr/0028-rv64-migration-phase-m.md)
+        self.reg_hex_digits = xlen // 4
         self.breakpoints = set()
         self.history = []  # (pc, word) pairs actually executed, most recent last
         self.iss = None
         self.reset()
 
     def reset(self):
-        self.iss = ISS(mem_size=self.mem_size)
+        self.iss = ISS(mem_size=self.mem_size, xlen=self.xlen)
         self.history = []
 
     def word_at(self, pc):
@@ -121,8 +124,9 @@ class Debugger:
         return f"stopped: exceeded {max_steps} steps"
 
     def print_regs(self):
+        w = self.reg_hex_digits
         for i in range(0, 32, 4):
-            row = "  ".join(f"x{i+j:<2}={self.iss.regs[i+j]:#010x}" for j in range(4))
+            row = "  ".join(f"x{i+j:<2}=0x{self.iss.regs[i+j]:0{w}x}" for j in range(4))
             print(row)
 
     def print_csrs(self):
@@ -136,7 +140,7 @@ class Debugger:
             word = self.word_at(addr)
             marker = "-> " if i == 0 else "   "
             bp = "*" if addr in self.breakpoints else " "
-            print(f"{marker}{bp}{addr:5d}: {word:08x}  {disasm(word)}")
+            print(f"{marker}{bp}{addr:5d}: {word:08x}  {disasm(word, xlen=self.xlen)}")
 
 
 HELP = """\
@@ -208,7 +212,7 @@ def repl(dbg):
                 print("usage: reg <n>")
                 continue
             n = int(args[0])
-            print(f"x{n} = {dbg.iss.regs[n]:#010x} ({dbg.iss.regs[n]})")
+            print(f"x{n} = 0x{dbg.iss.regs[n]:0{dbg.reg_hex_digits}x} ({dbg.iss.regs[n]})")
         elif cmd == "mem":
             if not args:
                 print("usage: mem <addr> [len]")
@@ -231,7 +235,7 @@ def repl(dbg):
         elif cmd == "history":
             n = int(args[0]) if args else 10
             for pc, word in dbg.history[-n:]:
-                print(f"   {pc:5d}: {word:08x}  {disasm(word)}")
+                print(f"   {pc:5d}: {word:08x}  {disasm(word, xlen=dbg.xlen)}")
         else:
             print(f"unknown command {cmd!r} -- type `help`")
 
@@ -240,10 +244,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("program", help=".s (assembled on the fly) or pre-assembled .mem file")
     ap.add_argument("--mem-size", type=int, default=128)
+    ap.add_argument("--xlen", type=int, default=32,
+                     help="Generation 2 (docs/adr/0028-rv64-migration-phase-m.md): 32 or 64")
     args = ap.parse_args()
 
-    words = assemble_if_needed(args.program, args.mem_size)
-    dbg = Debugger(words, args.mem_size)
+    words = assemble_if_needed(args.program, args.mem_size, args.xlen)
+    dbg = Debugger(words, args.mem_size, args.xlen)
     repl(dbg)
 
 

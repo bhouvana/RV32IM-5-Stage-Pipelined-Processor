@@ -28,6 +28,14 @@ module reg3 #(
     input jump_regde,
     input [XLEN-1:0] pc_plus4_regde,   // rd = PC+4 link value for jal, computed in EX
     input [2:0] funct3_regde,      // load/store access width+signedness, for DataMemory
+    // docs/adr/0038-a-extension-phase-v.md. isAmo needs to survive into MEM
+    // (riscvpipeline.v's own 2-phase AMO interlock lives at this stage,
+    // driven off the same `_regem`-suffixed signals memRead_regem/
+    // memWrite_regem already are); funct7_regem[6:2] is the real funct5 op
+    // selector (add/swap/xor/and/or/min/max/minu/maxu) the combine logic
+    // needs across both of an AMO's own cycles, not just its first.
+    input isAmo_regde,
+    input [6:0] funct7_regde,
     input hold,   // MEM-stage interlock (docs/adr/0013-mem-stage-retiming.md):
                   // freeze every field exactly as-is while a load sitting in
                   // *this* register's own output hasn't come back from
@@ -46,7 +54,9 @@ module reg3 #(
     output reg [$clog2(NUM_REGS)-1:0] write_to_Reg_regem,
     output reg jump_regem,
     output reg [XLEN-1:0] pc_plus4_regem,
-    output reg [2:0] funct3_regem
+    output reg [2:0] funct3_regem,
+    output reg isAmo_regem,
+    output reg [6:0] funct7_regem
 );
 
 always@(posedge clk)
@@ -65,6 +75,8 @@ if(~rst)
     jump_regem <=0;
     pc_plus4_regem <=0;
     funct3_regem <=0;
+    isAmo_regem <=0;
+    funct7_regem <=0;
     end
 else if(hold)
     begin
@@ -84,6 +96,8 @@ else
     jump_regem <=jump_regde;
     pc_plus4_regem <=pc_plus4_regde;
     funct3_regem <=funct3_regde;
+    isAmo_regem <=isAmo_regde;
+    funct7_regem <=funct7_regde;
     end
 end
 endmodule

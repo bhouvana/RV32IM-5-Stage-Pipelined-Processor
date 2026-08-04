@@ -24,6 +24,11 @@ module PIPELINED #(
                                        // Empty (default): every existing test's
                                        // assumption, data memory just resets to
                                        // zero as it always has.
+    // docs/adr/0036-linux-boot-attempt-phase-t.md -- threaded to both
+    // InstructionMemory.v and DataMemoryBRAM.v's identical ZERO_INIT_LIMIT
+    // cap. 0 (default): Phase Q's own 64KB cap, bit-exact for every
+    // existing test.
+    parameter ZERO_INIT_LIMIT_OVERRIDE = 0,
     // docs/adr/0015-xlen-and-regcount-parameterization.md -- named, not truly
     // variable at other values: this core is RV32I+M only, and RV32I's own
     // instruction encoding hardwires a 32-bit instruction word and 5-bit
@@ -150,7 +155,36 @@ module PIPELINED #(
     // Yosys's read_verilog can't resolve a hierarchical peek the way
     // iverilog's simulator can (confirmed by running in Phase L1/L3).
     output debug_regwrite_commit,  // regWrite_regwb
-    output debug_valid_commit      // valid_regwb
+    output debug_valid_commit,     // valid_regwb
+
+    // docs/adr/0036-linux-boot-attempt-phase-t.md: same "unconnected
+    // changes nothing" tap shape as debug_x10 above -- the Verilator boot
+    // harness has no other way to observe whether real forward progress is
+    // happening (fetch-stage PC) or which privilege mode is live, short of
+    // a full waveform dump.
+    output [XLEN-1:0] debug_pc,        // pc_o, fetch-stage PC
+    output [1:0] debug_priv_mode,      // priv_mode_w
+    output [XLEN-1:0] debug_mcause,    // m_CSR.mcause, same hierarchical-tap idiom debug_x10 uses on m_Register
+    // docs/adr/0037: temporary RVC-debug taps -- same "unconnected changes
+    // nothing" shape as debug_x10.
+    output debug_jump_regde,
+    output [XLEN-1:0] debug_imm_sum,
+    output [XLEN-1:0] debug_inst_regfd,
+    output [XLEN-1:0] debug_inst_raw,
+    output debug_is_compressed,
+    output [XLEN-1:0] debug_inst_final,
+    output debug_illegal_regde,
+    output [XLEN-1:0] debug_inst_regde,
+    output [XLEN-1:0] debug_pc_o_regde,
+    output [7:0] debug_trap_src,
+    output debug_exception_taken,
+    output [XLEN-1:0] debug_trap_cause_raw,
+    output [XLEN-1:0] debug_x1,
+    output debug_amo_active,
+    output debug_amo_write_phase,
+    output debug_amo_write_done,
+    output debug_amo_stall,
+    output [XLEN-1:0] debug_amo_captured_read
 );
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
@@ -218,6 +252,7 @@ wire isMret;
 wire isSret;         // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F3)
 wire isSfenceVma;    // docs/adr/00NN-mmu-sv32.md (Phase F2) -- no live consumer yet (F5)
 wire isFence;        // docs/adr/0023-caches.md (Phase G1) -- no live consumer yet (G6)
+wire isAmo;          // docs/adr/0038-a-extension-phase-v.md
 wire illegalOpcode;
 wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on a trap/mret
 
@@ -279,7 +314,7 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
     generate
     if (CACHE_MODE == CACHE_NONE) begin : gen_icache_none
         assign icache_hit = 1'b1;
-        InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN)) m_InstMem(
+        InstructionMemory #(.INIT_FILE(INIT_FILE), .SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .ZERO_INIT_LIMIT_OVERRIDE(ZERO_INIT_LIMIT_OVERRIDE)) m_InstMem(
             .readAddr(imem_phys_addr),
             .inst(inst)
         );
@@ -422,9 +457,27 @@ wire [XLEN-1:0] redirect_target;  // imm_sum (branch/jal/jalr), or mtvec/mepc on
         .pc_o(pc_o)
     );
 
+    // docs/adr/0037-rvc-compressed-instructions-phase-u.md. `inst` (the raw
+    // fetch) is a real standard 32-bit instruction only when its own low
+    // two bits are 11 -- otherwise the low half-word alone is a real,
+    // complete 16-bit compressed instruction (the high half-word, whatever
+    // it holds, belongs to a DIFFERENT, not-yet-fetched instruction and is
+    // irrelevant here). InstructionMemory.v's own byte-array read already
+    // tolerates any byte-aligned readAddr for free (not just 4-byte-
+    // aligned), so a 2-byte-aligned compressed-instruction PC needs no new
+    // memory-side plumbing -- only this expansion tap and the PC-increment/
+    // link-address fixes below.
+    wire is_compressed = (inst[1:0] != 2'b11);
+    wire [31:0] inst_compressed_exp;
+    CompressedExpander m_CompressedExpander(
+        .c(inst[15:0]),
+        .exp(inst_compressed_exp)
+    );
+    wire [XLEN-1:0] inst_final = is_compressed ? {{(XLEN-32){1'b0}}, inst_compressed_exp} : inst;
+
     Adder #(.XLEN(XLEN)) m_Adder_1(
         .a(pc_o),
-        .b(4),
+        .b(is_compressed ? {{(XLEN-3){1'b0}}, 3'd2} : {{(XLEN-3){1'b0}}, 3'd4}),
         .sum(pc_new)
     );
 
@@ -433,12 +486,13 @@ wire [XLEN-1:0] pc_o_regfd;
 wire predict_taken_regfd;               // docs/adr/0021-branch-prediction.md
 wire [XLEN-1:0] predict_target_regfd;
 wire ifetch_fault_regfd;                // docs/adr/00NN-mmu-sv32.md (Phase F5)
+wire is_compressed_regfd;               // docs/adr/0037-rvc-compressed-instructions-phase-u.md
 
 reg1 #(.XLEN(XLEN)) m_reg1(
     .clk(clk),
     .rst(start),
     .stall(pc_stall),
-    .inst(inst),
+    .inst(inst_final),
     // Must be the PC that was actually used to fetch `inst` this cycle
     // (imem_read_addr), not PC.v's live pc_o -- under PROFILE_5STAGE these
     // are the same wire, but under PROFILE_6STAGE_SPLIT_FETCH pc_o has
@@ -486,11 +540,13 @@ reg1 #(.XLEN(XLEN)) m_reg1(
     // referenced here as a forward reference, the same pattern this file
     // already relies on for pc_stall/priv_mode_w/etc.
     .ifetch_fault(ifetch_fault_if),
+    .is_compressed(is_compressed),
     .inst_regfd(inst_regfd),
     .pc_o_regfd(pc_o_regfd),
     .predict_taken_regfd(predict_taken_regfd),
     .predict_target_regfd(predict_target_regfd),
-    .ifetch_fault_regfd(ifetch_fault_regfd)
+    .ifetch_fault_regfd(ifetch_fault_regfd),
+    .is_compressed_regfd(is_compressed_regfd)
 );
 
 // IF1/IF2 relay register (docs/adr/0018-variable-pipeline-depth.md). Only
@@ -610,7 +666,7 @@ wire [6:0] funct7_control;
  // ==========================================================================
  // ID -- Instruction Decode
  // ==========================================================================
-    Control m_Control(
+    Control #(.XLEN(XLEN)) m_Control(
         .opcode(inst_regfd[6:0]),
         .funt7(inst_regfd[31:25]),
         .funt3(inst_regfd[14:12]),
@@ -635,6 +691,7 @@ wire [6:0] funct7_control;
         .isSret(isSret),
         .isSfenceVma(isSfenceVma),
         .isFence(isFence),
+        .isAmo(isAmo),
         .illegalOpcode(illegalOpcode),
         .fRegWrite(fRegWrite)
     );
@@ -774,6 +831,7 @@ wire [6:0] funct7_control;
     wire predict_taken_regde;               // docs/adr/0021-branch-prediction.md
     wire [XLEN-1:0] predict_target_regde;
     wire ifetch_fault_regde;                // docs/adr/00NN-mmu-sv32.md (Phase F5)
+    wire is_compressed_regde;               // docs/adr/0037-rvc-compressed-instructions-phase-u.md
     wire [1:0] forwardA;
     wire [1:0] forwardB;
     wire [1:0] fforwardA;
@@ -843,6 +901,8 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     // docs/adr/00NN-mmu-sv32.md (Phase F5). reg1's own ifetch_fault_regfd,
     // carried one more stage to EX.
     .ifetch_fault(ifetch_fault_regfd),
+    // docs/adr/0037-rvc-compressed-instructions-phase-u.md.
+    .is_compressed(is_compressed_regfd),
     .jump(jump),
     .jalr(jalr),
     .lui(lui),
@@ -854,6 +914,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .isSret(isSret),
     .isSfenceVma(isSfenceVma),
     .isFence(isFence),
+    .isAmo(isAmo),
     .illegalOpcode(illegalOpcode),
 
     .valid_regde(valid_regde),
@@ -882,6 +943,7 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .predict_taken_regde(predict_taken_regde),
     .predict_target_regde(predict_target_regde),
     .ifetch_fault_regde(ifetch_fault_regde),
+    .is_compressed_regde(is_compressed_regde),
     .jump_regde(jump_regde),
     .jalr_regde(jalr_regde),
     .lui_regde(lui_regde),
@@ -893,11 +955,13 @@ reg2 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg2(
     .isSret_regde(isSret_regde),
     .isSfenceVma_regde(isSfenceVma_regde),
     .isFence_regde(isFence_regde),
+    .isAmo_regde(isAmo_regde),
     .illegalOpcode_regde(illegalOpcode_regde)
 );
 
 wire [6:0] funct7_regde;
 wire [2:0] funct3_regde;
+wire isAmo_regde;  // docs/adr/0038-a-extension-phase-v.md
 wire [XLEN-1:0] readData1_final;
 wire [XLEN-1:0] readData2_final;
 wire branch_taken;
@@ -943,7 +1007,7 @@ endgenerate
 // ==========================================================================
 // EX -- Execute
 // ==========================================================================
-    ShiftLeftOne m_ShiftLeftOne(
+    ShiftLeftOne #(.Width(XLEN)) m_ShiftLeftOne(
     .i(imm_regde),
     .o(imm_s)
     );
@@ -962,12 +1026,17 @@ endgenerate
     );
     assign imm_sum = {imm_sum_raw[XLEN-1:1], 1'b0};  // clear bit0 (only jalr needs this; branch/jal sums are already even)
 
-    // Link value for jal (rd = PC+4). Reuses the generic Adder the same way
-    // Adder_1 (fetch, PC+4) and Adder_2 (branch/jump target) already do.
+    // Link value for jal/jalr (rd = PC+2 or PC+4) and the branch predictor's
+    // fallthrough-PC comparison -- docs/adr/0037: a compressed instruction's
+    // real "next sequential PC" is only 2 bytes past its own address, not 4
+    // (e.g. c.jalr's own real link value is PC+2, not PC+4 -- getting this
+    // wrong would corrupt the return address of every compressed call).
+    // Reuses the generic Adder the same way Adder_1 (fetch, PC+len) and
+    // Adder_2 (branch/jump target) already do.
     wire [XLEN-1:0] pc_plus4_regde;
     Adder #(.XLEN(XLEN)) m_Adder_3(
     .a(pc_o_regde),
-    .b(32'd4),
+    .b(is_compressed_regde ? {{(XLEN-3){1'b0}}, 3'd2} : {{(XLEN-3){1'b0}}, 3'd4}),
     .sum(pc_plus4_regde)
     );
 
@@ -1086,6 +1155,7 @@ endgenerate
     .ALUCtl(ALUCtl),
     .A(aluA),
     .B(imm_reg_val),
+    .wordOp(wordOp_regde),
     .ALUOut(ALUOut),
     .zero(zero),
     .branch_zero(branch_zero)
@@ -1100,17 +1170,41 @@ endgenerate
     // staying asserted for the rest of the (many-cycle) computation.
     wire isDivRem = (ALUCtl == `ALUCTL_DIV) || (ALUCtl == `ALUCTL_DIVU) ||
                     (ALUCtl == `ALUCTL_REM) || (ALUCtl == `ALUCTL_REMU);
+    // divw/divuw/remw/remuw share these SAME ALUCtl codes as their plain
+    // div/divu/rem/remu counterparts (OP-32 reuses OP's funct7/funct3
+    // byte-for-byte, see wordOp_regde's own comment above) -- isDivRem/
+    // isDivSigned/div_stall correctly cover both without any change here.
     wire isDivSigned = (ALUCtl == `ALUCTL_DIV) || (ALUCtl == `ALUCTL_REM);
     wire div_busy, div_done;
     wire [XLEN-1:0] div_quotient, div_remainder;
+
+    // Generation 2 (Phase M): divw/divuw/remw/remuw reuse Divider.v
+    // completely unmodified -- truncate the low 32 bits of each operand and
+    // extend back to XLEN (sign-extend if isDivSigned, matching div/rem's
+    // own signedness; zero-extend otherwise, matching divu/remu's) before
+    // this same divider runs on them at full XLEN width. Mathematically
+    // equivalent to a true 32-bit division, including the INT32_MIN/-1
+    // overflow edge case (verified by hand: two's-complement truncation of
+    // the true 64-bit quotient 2^31 reproduces exactly the spec-mandated
+    // overflow result, dividend itself, without needing a separate special
+    // case here). `# ponytail: costs a full XLEN-cycle (64-cycle) divide
+    // for what's architecturally a 32-bit divide; a genuine 32-cycle fast
+    // path for *w divides is a separable future optimization, not
+    // attempted here.`
+    wire [XLEN-1:0] div_dividend_in = wordOp_regde ?
+        (isDivSigned ? {{(XLEN-32){aluA[31]}}, aluA[31:0]} : {{(XLEN-32){1'b0}}, aluA[31:0]}) :
+        aluA;
+    wire [XLEN-1:0] div_divisor_in = wordOp_regde ?
+        (isDivSigned ? {{(XLEN-32){imm_reg_val[31]}}, imm_reg_val[31:0]} : {{(XLEN-32){1'b0}}, imm_reg_val[31:0]}) :
+        imm_reg_val;
 
     Divider #(.XLEN(XLEN)) m_Divider(
     .clk(clk),
     .rst(start),
     .start(isDivRem),
     .isSigned(isDivSigned),
-    .dividend(aluA),
-    .divisor(imm_reg_val),
+    .dividend(div_dividend_in),
+    .divisor(div_divisor_in),
     .busy(div_busy),
     .done(div_done),
     .quotient(div_quotient),
@@ -1131,6 +1225,18 @@ endgenerate
     // cycle apart, rather than threaded as a dedicated Control.v output.
     // ==========================================================================
     wire [6:0] opcode_regde = inst_regde[6:0];
+
+    // Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md).
+    // Recomputed from inst_regde, same pattern as isOpFp_regde/etc. below --
+    // no new reg2/reg3 field needed. OPCODE_OP_32/OPCODE_OP_IMM_32 reuse
+    // OP/OP-IMM's own funct7/funct3 encodings byte-for-byte (ALUCtrl.v), so
+    // ALUCtl alone can't distinguish e.g. divw from div -- wordOp_regde is
+    // what actually does, telling ALU.v (m_ALU below) and the Divider
+    // operand wrapper to truncate-and-sign-extend.
+    wire isOp32_regde    = (opcode_regde == `OPCODE_OP_32);
+    wire isOpImm32_regde = (opcode_regde == `OPCODE_OP_IMM_32);
+    wire wordOp_regde    = isOp32_regde || isOpImm32_regde;
+
     wire isOpFp_regde = (opcode_regde == `OPCODE_FP);
     wire isLoadFp_regde = (opcode_regde == `OPCODE_LOAD_FP);
     wire isStoreFp_regde = (opcode_regde == `OPCODE_STORE_FP);
@@ -1180,12 +1286,22 @@ endgenerate
 
     wire [31:0] falu_result;
     wire [4:0] falu_flags;
+    // Generation 2 (Phase M): FALU.v/FMADDUnit.v/FDivider.v/FSqrt.v are
+    // deliberately fixed FLEN=32 (RV64F still keeps single-precision float
+    // registers 32 bits wide, unlike the integer file -- this core
+    // implements F only, never D). freadData*_final/fpu_operand_a are
+    // XLEN-wide pipeline-register carrier wires (their real content is
+    // always in the low 32 bits, upper bits provably 0 -- FRegister.v never
+    // writes anything else into them); explicit [31:0] here makes that
+    // truncation visible instead of relying on implicit Verilog port-width
+    // auto-pruning, which is correct but -Wall-noisy once anything actually
+    // instantiates PIPELINED at XLEN=64.
     FALU m_FALU(
         .funct5(funct5_regde),
         .funct3(fpu_rm),
         .rs2_sel(readReg2_regde),   // inst[24:20] doubles as a real rs2 index or an op-selector, same bits either way
-        .a(fpu_operand_a),
-        .b(freadData2_final),
+        .a(fpu_operand_a[31:0]),
+        .b(freadData2_final[31:0]),
         .result(falu_result),
         .flags(falu_flags)
     );
@@ -1195,9 +1311,9 @@ endgenerate
     FMADDUnit m_FMADDUnit(
         .op(fma_op_regde),
         .rm(fpu_rm),
-        .a(freadData1_final),
-        .b(freadData2_final),
-        .c(freadData3_final),
+        .a(freadData1_final[31:0]),
+        .b(freadData2_final[31:0]),
+        .c(freadData3_final[31:0]),
         .result(fmadd_result),
         .flags(fmadd_flags)
     );
@@ -1217,8 +1333,8 @@ endgenerate
         .rst(start),
         .start(isFpDiv_regde),
         .rm(fpu_rm),
-        .a(fpu_operand_a),
-        .b(freadData2_final),
+        .a(fpu_operand_a[31:0]),
+        .b(freadData2_final[31:0]),
         .busy(fdiv_busy),
         .done(fdiv_done),
         .result(fdiv_result),
@@ -1232,7 +1348,7 @@ endgenerate
         .rst(start),
         .start(isFpSqrt_regde),
         .rm(fpu_rm),
-        .a(fpu_operand_a),
+        .a(fpu_operand_a[31:0]),
         .busy(fsqrt_busy),
         .done(fsqrt_done),
         .result(fsqrt_result),
@@ -1366,13 +1482,80 @@ endgenerate
         else mem_stall_done_r <= mem_access_ready;
     end
 
+    // docs/adr/0038-a-extension-phase-v.md. lr/sc/amo* need a genuine
+    // read-THEN-write sequence -- not just mem_stall's own single extra
+    // wait cycle -- so this is a real, separate 2-phase interlock, not an
+    // extension of mem_stall's own single-access machinery (isAmo_regem is
+    // never also memRead_regem/memWrite_regem -- Control.v deliberately
+    // leaves those 0 for OPCODE_AMO -- so mem_trigger/mem_stall above never
+    // fire for an AMO at all, by construction, zero interaction risk with
+    // every existing load/store/fence path).
+    //
+    // CACHE_NONE only (matching this phase's own real target -- the kernel
+    // boot attempt never runs under CACHE_WRITEBACK_SETASSOC): phase 0
+    // issues a read (mirrors an ordinary load's own address/memRead), phase
+    // 1 (entered once phase 0's lsu_ack fires and the read value is
+    // captured) issues a write of the funct5-combined result. Both phases
+    // reuse the exact same address (ALUOut_regem = rs1+0, Control.v's own
+    // ALUSrc=1/ImmGen.v's imm=0 for OPCODE_AMO) and funct3 (funct3_regem,
+    // already the AMO instruction's own real .W/.D width tag -- no new
+    // wiring needed, wb_m_funct3 already reads it unconditionally).
+    reg amo_write_phase_r;
+    reg amo_write_done_r;
+    reg [XLEN-1:0] amo_captured_read_r;
+    wire amo_active = isAmo_regem;
+    // LR.W/D is real spec read-only -- it must never issue a write phase at
+    // all (a plain load with a trivial-on-single-hart reservation, see
+    // riscv_defs.vh's own AMO_F5_LR comment), so it's the one funct5 that
+    // finishes after just phase 0.
+    wire amo_is_lr = (funct7_regem[6:2] == `AMO_F5_LR);
+    wire amo_stall = amo_active && !amo_write_done_r;
+    always @(posedge clk) begin
+        if (~start || !amo_active) begin
+            amo_write_phase_r <= 1'b0;
+            amo_write_done_r  <= 1'b0;
+        end else if (!amo_write_phase_r) begin
+            if (lsu_ack) begin
+                amo_captured_read_r <= readData;
+                if (amo_is_lr) amo_write_done_r <= 1'b1;
+                else amo_write_phase_r <= 1'b1;
+            end
+        end else if (lsu_ack) begin
+            amo_write_done_r <= 1'b1;
+        end
+    end
+    // docs/adr/0038: funct5 = funct7_regem[6:2] (the real spec field --
+    // inst[26:25], funct7_regem's own low 2 bits, are the aq/rl ordering
+    // bits this genuinely single-hart core has no real use for, see
+    // riscv_defs.vh's own AMO_F5_* comment). SC.W/D and every unrecognized
+    // funct5 fall through to the same "just store rs2" arm -- correct for
+    // SC specifically (this core's own single-hart SC always succeeds, see
+    // the ADR), and a safe/inert default for anything else (Control.v's
+    // own illegalOpcode never gates on funct5, so a genuinely malformed
+    // funct5 here still executes as SOME real memory write rather than X --
+    // acceptable: real hardware behavior for a reserved encoding is
+    // implementation-defined UNSPECIFIED anyway, not a spec violation).
+    wire [4:0] amo_funct5 = funct7_regem[6:2];
+    wire signed [XLEN-1:0] amo_old_s = amo_captured_read_r;
+    wire signed [XLEN-1:0] amo_rs2_s = readData2_regem;
+    wire [XLEN-1:0] amo_combined =
+        (amo_funct5 == `AMO_F5_ADD)  ? (amo_captured_read_r + readData2_regem) :
+        (amo_funct5 == `AMO_F5_XOR)  ? (amo_captured_read_r ^ readData2_regem) :
+        (amo_funct5 == `AMO_F5_AND)  ? (amo_captured_read_r & readData2_regem) :
+        (amo_funct5 == `AMO_F5_OR)   ? (amo_captured_read_r | readData2_regem) :
+        (amo_funct5 == `AMO_F5_MIN)  ? ((amo_old_s < amo_rs2_s) ? amo_captured_read_r : readData2_regem) :
+        (amo_funct5 == `AMO_F5_MAX)  ? ((amo_old_s > amo_rs2_s) ? amo_captured_read_r : readData2_regem) :
+        (amo_funct5 == `AMO_F5_MINU) ? ((amo_captured_read_r < readData2_regem) ? amo_captured_read_r : readData2_regem) :
+        (amo_funct5 == `AMO_F5_MAXU) ? ((amo_captured_read_r > readData2_regem) ? amo_captured_read_r : readData2_regem) :
+        readData2_regem;  // AMOSWAP, LR (never reaches phase 1 in practice -- see below), SC, default
+
     // docs/adr/00NN-mmu-sv32.md (Phase F5): itlb_miss/dtlb_miss are defined
     // in the MMU translation block below (forward-referenced here).
     // docs/adr/0023-caches.md (Phase G3): icache_miss joins them, same
     // forward-reference pattern, always 0 under CACHE_NONE.
     // docs/adr/0024-variable-latency-memory.md (Phase I3): imem_wait joins
     // them, always 0 under CACHE_WRITEBACK_SETASSOC and at MEM_LATENCY_I=0.
-    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard | itlb_miss | dtlb_miss | icache_miss | imem_wait;
+    assign pc_stall = stall | div_stall | mem_stall | fp_stall | float_load_use_hazard | itlb_miss | dtlb_miss | icache_miss | imem_wait | amo_stall;
 
     // reg2's own hold condition, factored out for reuse below (CSR.v's write
     // gating needs to know exactly the same thing reg2 does: "is this
@@ -1390,9 +1573,16 @@ endgenerate
     // does NOT join here -- it's a front-end-only interlock (nothing in
     // EX/MEM is its cause), same category as Hazard.v's own stall, see
     // reg2's flush input below instead.
-    wire reg2_hold = div_stall | mem_stall | fp_stall | dtlb_miss;
+    wire reg2_hold = div_stall | mem_stall | fp_stall | dtlb_miss | amo_stall;
 
-    wire [XLEN-1:0] div_result = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
+    wire [XLEN-1:0] div_result_raw = (ALUCtl == `ALUCTL_DIV || ALUCtl == `ALUCTL_DIVU) ? div_quotient : div_remainder;
+    // divw/divuw/remw/remuw: per spec, the 32-bit result is ALWAYS
+    // sign-extended regardless of the operation's own signedness (the same
+    // "word instructions always sign-extend their result" rule ALU.v's
+    // wordOp arms already follow for addw/sllw/etc.) -- not conditioned on
+    // isDivSigned.
+    wire [XLEN-1:0] div_result = wordOp_regde ?
+        {{(XLEN-32){div_result_raw[31]}}, div_result_raw[31:0]} : div_result_raw;
 
     // CSR / synchronous exceptions (docs/adr/0011-csr-and-exceptions.md).
     // M-mode only -- illegal instruction, ecall, ebreak, and the
@@ -1516,16 +1706,35 @@ endgenerate
     assign bp_update_taken = desired_taken;
     assign bp_update_target = desired_target;
 
-    // docs/adr/0020-soc-integration.md (Phase D9). Interrupt detection --
-    // independent of whatever instruction (if any) currently sits in EX,
-    // unlike the synchronous exceptions above. mip's two real bits are
-    // exactly Uart.v's rx_irq / Timer.v's pending (uart_rx_irq/
-    // timer_pending_w, wired below at the bus instantiation, D5/D8); mie's
-    // enable bits and mstatus.MIE are CSR.v's own live outputs (D7).
-    // Spec-mandated priority when both are pending and enabled: machine-
-    // external over machine-timer.
-    wire mei_pending = mie_meie & uart_rx_irq;
+    // docs/adr/0020-soc-integration.md (Phase D9) built machine-external/
+    // machine-timer interrupt detection, independent of whatever
+    // instruction (if any) currently sits in EX, unlike the synchronous
+    // exceptions above. docs/adr/0034 (Phase R) adds a third source,
+    // machine-software (mip.MSIP, driven by Timer.v's own new CLINT `msip`
+    // register). mip's three real bits are exactly Uart.v's irq / Timer.v's
+    // msip_pending/pending (uart_irq/msip_pending_w/timer_pending_w, wired
+    // below at the bus instantiation); mie's enable bits and mstatus.MIE
+    // are CSR.v's own live outputs. Spec-mandated priority when more than
+    // one is pending and enabled: machine-external > machine-software >
+    // machine-timer.
+    wire mei_pending = mie_meie & uart_irq;
+    wire msi_pending = mie_msie & msip_pending_w;
     wire mti_pending = mie_mtie & timer_pending_w;
+
+    // docs/adr/0035-minimal-sbi-firmware-phase-s.md (Phase S). A real gap
+    // this phase's own SBI-firmware design found: mip_sw's SSIP/STIP bits
+    // (real, software-writable storage since Phase F -- e.g. an M-mode
+    // trap handler synthesizing a "virtual" supervisor timer interrupt,
+    // since mtimecmp is M-mode-only CLINT state S-mode cannot touch
+    // directly) had NO path into interrupt_taken at all -- setting them
+    // was pure bookkeeping, no interrupt would ever actually retrap.
+    // Deliberately NOT gated by mstatus_mie (M's own global enable) --
+    // real spec precedence: a supervisor-targeted interrupt is gated by
+    // sstatus.SIE (S's own enable) and only valid while executing AT S
+    // (mstatus_mie has no bearing on whether an S-level interrupt is
+    // recognized at all, only on M-level ones).
+    wire ssi_pending = mstatus_sie & mie_ssie & mip_ssip & (priv_mode_w == `PRIV_S);
+    wire sti_pending = mstatus_sie & mie_stie & mip_stip & (priv_mode_w == `PRIV_S);
 
     // Does EX's current occupant already want to redirect PC for its own
     // reasons this cycle (a taken branch, jal/jalr, a synchronous
@@ -1559,8 +1768,23 @@ endgenerate
     // reg1.v's own priority ordering before implementing this (the same
     // "found by careful tracing, not assumed" standard docs/adr/0009/0013
     // set), not by hitting the bug at runtime.
-    wire interrupt_taken = mstatus_mie & (mei_pending | mti_pending) & !pc_stall & !other_redirect_taken;
-    wire [XLEN-1:0] interrupt_cause = mei_pending ? `MCAUSE_INT_MACHINE_EXTERNAL : `MCAUSE_INT_MACHINE_TIMER;
+    // ssi_pending/sti_pending join the OR list, deliberately outside the
+    // mstatus_mie gate (see their own declarations above for why) --
+    // interrupt_taken itself stays a single, unified redirect-request wire
+    // regardless of which of the now-five sources actually fired.
+    wire interrupt_taken = ((mstatus_mie & (mei_pending | msi_pending | mti_pending)) | ssi_pending | sti_pending)
+                            & !pc_stall & !other_redirect_taken;
+    // Priority when more than one source is simultaneously pending+enabled:
+    // real spec ordering, machine before supervisor, external > software >
+    // timer within each level (MEI > MSI > MTI > SSI > STI). sti_pending
+    // is the final `else` since interrupt_taken already guarantees at
+    // least one of the five is true whenever this mux is actually live.
+    wire [XLEN-1:0] interrupt_cause =
+        mei_pending ? `MCAUSE_INT_MACHINE_EXTERNAL :
+        msi_pending ? `MCAUSE_INT_MACHINE_SOFTWARE :
+        mti_pending ? `MCAUSE_INT_MACHINE_TIMER :
+        ssi_pending ? `MCAUSE_INT_SUPERVISOR_SOFTWARE :
+                      `MCAUSE_INT_SUPERVISOR_TIMER;
 
     // Tracks "is reg1's current output (pc_o_regfd/inst_regfd) a real
     // fetched instruction, or a squash-produced bubble" -- mirrors reg1.v's
@@ -1668,16 +1892,25 @@ endgenerate
     .fp_flags_we(fp_flags_we),
     .fp_flags_in(fp_flags),
     .frm_val(frm_live),
-    // docs/adr/0020-soc-integration.md (Phase D8, D9). timer_pending/
-    // ext_pending wired to the real Timer.v/Uart.v (PLIC-lite) live
-    // signals declared below -- CSR.v's own interface needed no changes
-    // for this, exactly as D7 anticipated. mstatus_mie/mie_mtie/mie_meie
-    // now feed interrupt_taken's own condition above (D9).
+    // docs/adr/0020-soc-integration.md (Phase D8, D9) wired timer_pending/
+    // ext_pending to the real Timer.v/Uart.v (PLIC-lite) live signals
+    // declared below; docs/adr/0034 (Phase R) adds msip_pending
+    // (Timer.v's new CLINT `msip` register). mstatus_mie/mie_msie/
+    // mie_mtie/mie_meie feed interrupt_taken's own condition above.
+    .msip_pending(msip_pending_w),
     .timer_pending(timer_pending_w),
-    .ext_pending(uart_rx_irq),
+    .ext_pending(uart_irq),
     .mstatus_mie(mstatus_mie),
+    .mie_msie(mie_msie),
     .mie_mtie(mie_mtie),
     .mie_meie(mie_meie),
+    // docs/adr/0035-minimal-sbi-firmware-phase-s.md (Phase S). Real
+    // consumers for ssi_pending/sti_pending's own gating above.
+    .mstatus_sie(mstatus_sie),
+    .mie_ssie(mie_ssie),
+    .mie_stie(mie_stie),
+    .mip_ssip(mip_ssip),
+    .mip_stip(mip_stip),
     .mtvec_val(mtvec_val),
     .mepc_val(mepc_val),
     // docs/adr/00NN-mmu-sv32.md (Phase F3).
@@ -1742,12 +1975,15 @@ endgenerate
     .stall_icache_pulse(icache_miss),
     .stall_imem_wait_pulse(imem_wait)
     );
-    wire mstatus_mie, mie_mtie, mie_meie;
+    wire mstatus_mie, mie_msie, mie_mtie, mie_meie;
+    wire mstatus_sie, mie_ssie, mie_stie, mip_ssip, mip_stip;
     wire [1:0] priv_mode_w;
     wire [XLEN-1:0] stvec_val, sepc_val;
     wire trap_target_is_s;
     wire satp_mode_w;
-    wire [21:0] satp_ppn_w;
+    // docs/adr/00NN-sv39-mmu-phase-p.md (Phase P3): widened 22->44 bits to
+    // carry Sv39's real PPN width (CSR.v's own satp_ppn_val widening).
+    wire [43:0] satp_ppn_w;
 
     // What EX "produces" this cycle: an F-extension result (docs/adr/0019)
     // on any OP-FP/FMA op -- checked first since isOpFp_regde/isFma_regde
@@ -1878,6 +2114,8 @@ wire [REG_ADDR_WIDTH-1:0] write_to_Reg_regem;
 wire jump_regem;
 wire [XLEN-1:0] pc_plus4_regem;
 wire [2:0] funct3_regem;
+wire isAmo_regem;         // docs/adr/0038-a-extension-phase-v.md
+wire [6:0] funct7_regem;  // docs/adr/0038-a-extension-phase-v.md
 //
     // While a div/rem is still computing (div_stall), reg2/EX keeps
     // presenting the *same* div/rem instruction cycle after cycle (that's
@@ -1925,6 +2163,10 @@ wire [2:0] funct3_regem;
     wire memWrite_to_reg3      = reg3_bubble ? 1'b0 : memWrite_regde;
     wire jump_to_reg3          = reg3_bubble ? 1'b0 : jump_regde;
     wire [REG_ADDR_WIDTH-1:0] destReg_to_reg3 = reg3_bubble ? {REG_ADDR_WIDTH{1'b0}}  : write_to_Reg_regde;
+    // docs/adr/0038-a-extension-phase-v.md: a squashed/bubbled lr/sc/amo*
+    // must never reach the real 2-phase interlock below -- same reasoning
+    // as every other control field bubbled here.
+    wire isAmo_to_reg3        = reg3_bubble ? 1'b0 : isAmo_regde;
 
 reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
     .clk(clk),
@@ -1950,10 +2192,14 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
     .jump_regde(jump_to_reg3),
     .pc_plus4_regde(pc_plus4_regde),
     .funct3_regde(funct3_regde),
-    .hold(mem_stall),   // MEM-stage interlock (docs/adr/0013): freeze reg3 while
+    .isAmo_regde(isAmo_to_reg3),
+    .funct7_regde(funct7_regde),
+    .hold(mem_stall | amo_stall),   // MEM-stage interlock (docs/adr/0013): freeze reg3 while
                         // the load it's currently holding hasn't come back from
                         // DataMemoryBRAM yet -- reg2 must not be allowed to push
-                        // the next instruction in on top of it.
+                        // the next instruction in on top of it. docs/adr/0038:
+                        // amo_stall joins it for the identical reason, across
+                        // an lr/sc/amo*'s own real 2-phase occupancy.
 
     .valid_regem(valid_regem),
     .memtoReg_regem(memtoReg_regem),
@@ -1966,7 +2212,9 @@ reg3 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg3(
     .write_to_Reg_regem(write_to_Reg_regem),
     .jump_regem(jump_regem),
     .pc_plus4_regem(pc_plus4_regem),
-    .funct3_regem(funct3_regem)
+    .funct3_regem(funct3_regem),
+    .isAmo_regem(isAmo_regem),
+    .funct7_regem(funct7_regem)
 );
 
 // Compiled in only with -DASSERT_ON (see sim/run_tests.sh). reg3 latches
@@ -2032,9 +2280,16 @@ end
     // slave that cares about byte lanes (today's sole slave, RamWishbone-
     // Adapter, doesn't -- see its own header comment for why it takes
     // `funct3` as a side-band tag instead).
-    wire lsu_cyc = memRead_regem | memWrite_regem;
+    // docs/adr/0038-a-extension-phase-v.md: an active lr/sc/amo* drives this
+    // shared bus request through its own 2-phase eff_memRead/eff_memWrite
+    // instead of the raw memRead_regem/memWrite_regem (which Control.v
+    // deliberately leaves 0 for OPCODE_AMO) -- amo_active/amo_write_phase_r/
+    // amo_write_done_r are defined above, alongside mem_stall.
+    wire eff_memRead  = amo_active ? (!amo_write_phase_r && !amo_write_done_r) : memRead_regem;
+    wire eff_memWrite = amo_active ? (amo_write_phase_r && !amo_write_done_r)  : memWrite_regem;
+    wire lsu_cyc = eff_memRead | eff_memWrite;
     wire lsu_stb = lsu_cyc;
-    wire lsu_we  = memWrite_regem;
+    wire lsu_we  = eff_memWrite;
     wire [3:0] lsu_sel = (funct3_regem[1:0] == 2'b00) ? (4'b0001 << ALUOut_regem[1:0]) :  // byte
                           (funct3_regem[1:0] == 2'b01) ? (4'b0011 << ALUOut_regem[1:0]) :  // halfword
                                                           4'b1111;                          // word
@@ -2059,10 +2314,26 @@ end
     // exception_taken, ex_result) forward-references these wires, the
     // same pattern this file already relies on for pc_stall/priv_mode_w.
     // ==========================================================================
-    wire translate_enable = satp_mode_w && (priv_mode_w != `PRIV_M);
+    // docs/adr/00NN-sv39-mmu-phase-p.md (Phase P3): the MMU now covers both
+    // supported XLENs -- Sv32 (Tlb.v/Ptw.v, 2-level/32-bit-PTE) at XLEN=32,
+    // Sv39 (Tlb39.v/Ptw39.v, 3-level/64-bit-PTE, Phase P1-P2) at XLEN=64,
+    // selected below via `generate` (elaboration-time, XLEN is a module
+    // parameter -- exactly one of the two ever exists in a given build,
+    // mirroring CACHE_MODE's own "unselected branch costs nothing"
+    // convention). Every downstream consumer of itlb_hit/itlb_ppn/ls_hit/
+    // ls_ppn/ptw_busy/ptw_done/... below is written purely in terms of
+    // these plain wire names and needs ZERO changes for either XLEN -- the
+    // miss/fault/permission logic, the dtlb_vaddr_r/dtlb_store_data_r
+    // latches, ptw_abandoned_r, and the shared-bus mux are all already
+    // XLEN-agnostic by construction (docs/ROADMAP.md's own research pass
+    // confirmed this before any RTL changed).
+    wire translate_enable = ((XLEN == 32) || (XLEN == 64)) && satp_mode_w && (priv_mode_w != `PRIV_M);
     wire priv_is_u = (priv_mode_w == `PRIV_U);
 
-    // -- Tlb.v: unified, tagged, two independent combinational read ports.
+    // -- Tlb.v/Tlb39.v: unified, tagged, two independent combinational read
+    // ports (identical port shape in both modules by design -- Tlb39.v was
+    // built as a deliberate structural mirror of Tlb.v, only the VPN tag
+    // width differs internally).
     wire itlb_hit, ls_hit;
     wire [XLEN-1:0] itlb_ppn, ls_ppn;
     wire itlb_perm_r, itlb_perm_w, itlb_perm_x, itlb_perm_u;
@@ -2071,24 +2342,51 @@ end
     wire [XLEN-1:0] ptw_fill_vaddr, ptw_fill_ppn;
     wire ptw_fill_perm_r, ptw_fill_perm_w, ptw_fill_perm_x, ptw_fill_perm_u;
 
-    Tlb #(.XLEN(XLEN)) m_Tlb(
-        .clk(clk), .rst(start),
-        .fetch_vaddr(imem_read_addr),
-        .fetch_hit(itlb_hit), .fetch_ppn(itlb_ppn),
-        .fetch_perm_r(itlb_perm_r), .fetch_perm_w(itlb_perm_w),
-        .fetch_perm_x(itlb_perm_x), .fetch_perm_u(itlb_perm_u),
-        // docs/adr/00NN-mmu-sv32.md (Phase F5): dtlb_vaddr (forward-
-        // referenced, defined below near dtlb_needed), not raw ALUOut --
-        // see its own comment for the forwarding-drift bug this avoids.
-        .ls_vaddr(dtlb_vaddr),
-        .ls_hit(ls_hit), .ls_ppn(ls_ppn),
-        .ls_perm_r(ls_perm_r), .ls_perm_w(ls_perm_w),
-        .ls_perm_x(ls_perm_x), .ls_perm_u(ls_perm_u),
-        .fill_valid(ptw_fill_valid), .fill_vaddr(ptw_fill_vaddr), .fill_ppn(ptw_fill_ppn),
-        .fill_perm_r(ptw_fill_perm_r), .fill_perm_w(ptw_fill_perm_w),
-        .fill_perm_x(ptw_fill_perm_x), .fill_perm_u(ptw_fill_perm_u),
-        .flush_all(sfence_real && !reg2_hold)
-    );
+    // Named generate branches (gen_mmu_tlb_sv32/gen_mmu_tlb_sv39) -- Icarus
+    // inserts a hierarchical scope for a generate-if body regardless of an
+    // explicit label (an unnamed one just gets an implicit genblk# name),
+    // so existing `dut.m_Ptw.*`-style debug-tap hierarchical references in
+    // testbenches (e.g. tb_mmu_translate_f5.v) need the scope name added
+    // to their path -- an explicit, stable name is easier to reference
+    // correctly than relying on an implicit genblk# numbering.
+    generate
+    if (XLEN == 32) begin : gen_mmu_tlb_sv32
+        Tlb #(.XLEN(XLEN)) m_Tlb(
+            .clk(clk), .rst(start),
+            .fetch_vaddr(imem_read_addr),
+            .fetch_hit(itlb_hit), .fetch_ppn(itlb_ppn),
+            .fetch_perm_r(itlb_perm_r), .fetch_perm_w(itlb_perm_w),
+            .fetch_perm_x(itlb_perm_x), .fetch_perm_u(itlb_perm_u),
+            // docs/adr/00NN-mmu-sv32.md (Phase F5): dtlb_vaddr (forward-
+            // referenced, defined below near dtlb_needed), not raw ALUOut --
+            // see its own comment for the forwarding-drift bug this avoids.
+            .ls_vaddr(dtlb_vaddr),
+            .ls_hit(ls_hit), .ls_ppn(ls_ppn),
+            .ls_perm_r(ls_perm_r), .ls_perm_w(ls_perm_w),
+            .ls_perm_x(ls_perm_x), .ls_perm_u(ls_perm_u),
+            .fill_valid(ptw_fill_valid), .fill_vaddr(ptw_fill_vaddr), .fill_ppn(ptw_fill_ppn),
+            .fill_perm_r(ptw_fill_perm_r), .fill_perm_w(ptw_fill_perm_w),
+            .fill_perm_x(ptw_fill_perm_x), .fill_perm_u(ptw_fill_perm_u),
+            .flush_all(sfence_real && !reg2_hold)
+        );
+    end else begin : gen_mmu_tlb_sv39
+        Tlb39 #(.XLEN(XLEN)) m_Tlb(
+            .clk(clk), .rst(start),
+            .fetch_vaddr(imem_read_addr),
+            .fetch_hit(itlb_hit), .fetch_ppn(itlb_ppn),
+            .fetch_perm_r(itlb_perm_r), .fetch_perm_w(itlb_perm_w),
+            .fetch_perm_x(itlb_perm_x), .fetch_perm_u(itlb_perm_u),
+            .ls_vaddr(dtlb_vaddr),
+            .ls_hit(ls_hit), .ls_ppn(ls_ppn),
+            .ls_perm_r(ls_perm_r), .ls_perm_w(ls_perm_w),
+            .ls_perm_x(ls_perm_x), .ls_perm_u(ls_perm_u),
+            .fill_valid(ptw_fill_valid), .fill_vaddr(ptw_fill_vaddr), .fill_ppn(ptw_fill_ppn),
+            .fill_perm_r(ptw_fill_perm_r), .fill_perm_w(ptw_fill_perm_w),
+            .fill_perm_x(ptw_fill_perm_x), .fill_perm_u(ptw_fill_perm_u),
+            .flush_all(sfence_real && !reg2_hold)
+        );
+    end
+    endgenerate
 
     // -- I-side (fetch): front-end-only interlock, same category as
     // Hazard.v's own load-use stall (freeze PC/reg1, bubble reg2) -- see
@@ -2388,18 +2686,47 @@ end
     wire [XLEN-1:0] ptw_m_addr, ptw_m_data_o;
     wire [3:0] ptw_m_sel;
 
-    Ptw #(.XLEN(XLEN)) m_Ptw(
-        .clk(clk), .rst(start),
-        .start(ptw_start), .vaddr(ptw_vaddr), .satp_ppn(satp_ppn_w),
-        .is_fetch(ptw_is_fetch), .is_store(ptw_is_store), .priv_is_u(priv_is_u),
-        .busy(ptw_busy), .done(ptw_done), .fault(ptw_fault),
-        .result_ppn(ptw_result_ppn),
-        .result_perm_r(ptw_result_perm_r), .result_perm_w(ptw_result_perm_w),
-        .result_perm_x(ptw_result_perm_x), .result_perm_u(ptw_result_perm_u),
-        .m_cyc(ptw_m_cyc), .m_stb(ptw_m_stb), .m_we(ptw_m_we),
-        .m_addr(ptw_m_addr), .m_data_o(ptw_m_data_o), .m_sel(ptw_m_sel),
-        .m_data_i(readData), .m_ack(lsu_ack)
-    );
+    // docs/adr/00NN-sv39-mmu-phase-p.md (Phase P3): same XLEN-selected,
+    // named generate as the Tlb/Tlb39 pair above (gen_mmu_ptw_sv32/
+    // gen_mmu_ptw_sv39 -- see that pair's own comment on Icarus always
+    // inserting a scope for a generate-if body; existing `dut.m_Ptw.*`-
+    // style hierarchical debug taps, e.g. tb_mmu_translate_f5.v, now need
+    // the branch's scope name prefixed). The instance keeps the name
+    // `m_Ptw` in both branches so only the scope prefix differs, not the
+    // leaf name. satp_ppn is the one port whose width genuinely differs
+    // (Ptw.v: 22 bits, Ptw39.v: 44) -- satp_ppn_w itself is now 44 bits
+    // wide (CSR.v's own widened satp_ppn_val), sliced down to Ptw.v's real
+    // 22-bit port at XLEN=32. Every other port name/width is identical
+    // between the two modules by design.
+    generate
+    if (XLEN == 32) begin : gen_mmu_ptw_sv32
+        Ptw #(.XLEN(XLEN)) m_Ptw(
+            .clk(clk), .rst(start),
+            .start(ptw_start), .vaddr(ptw_vaddr), .satp_ppn(satp_ppn_w[21:0]),
+            .is_fetch(ptw_is_fetch), .is_store(ptw_is_store), .priv_is_u(priv_is_u),
+            .busy(ptw_busy), .done(ptw_done), .fault(ptw_fault),
+            .result_ppn(ptw_result_ppn),
+            .result_perm_r(ptw_result_perm_r), .result_perm_w(ptw_result_perm_w),
+            .result_perm_x(ptw_result_perm_x), .result_perm_u(ptw_result_perm_u),
+            .m_cyc(ptw_m_cyc), .m_stb(ptw_m_stb), .m_we(ptw_m_we),
+            .m_addr(ptw_m_addr), .m_data_o(ptw_m_data_o), .m_sel(ptw_m_sel),
+            .m_data_i(readData), .m_ack(lsu_ack)
+        );
+    end else begin : gen_mmu_ptw_sv39
+        Ptw39 #(.XLEN(XLEN)) m_Ptw(
+            .clk(clk), .rst(start),
+            .start(ptw_start), .vaddr(ptw_vaddr), .satp_ppn(satp_ppn_w),
+            .is_fetch(ptw_is_fetch), .is_store(ptw_is_store), .priv_is_u(priv_is_u),
+            .busy(ptw_busy), .done(ptw_done), .fault(ptw_fault),
+            .result_ppn(ptw_result_ppn),
+            .result_perm_r(ptw_result_perm_r), .result_perm_w(ptw_result_perm_w),
+            .result_perm_x(ptw_result_perm_x), .result_perm_u(ptw_result_perm_u),
+            .m_cyc(ptw_m_cyc), .m_stb(ptw_m_stb), .m_we(ptw_m_we),
+            .m_addr(ptw_m_addr), .m_data_o(ptw_m_data_o), .m_sel(ptw_m_sel),
+            .m_data_i(readData), .m_ack(lsu_ack)
+        );
+    end
+    endgenerate
 
     // Which side a walk currently in progress (or just concluded) was for
     // -- needed because Ptw.v itself doesn't report this (mirrors
@@ -2555,7 +2882,12 @@ end
         assign wb_m_stb  = ptw_busy ? ptw_m_stb  : lsu_stb;
         assign wb_m_we   = ptw_busy ? ptw_m_we   : lsu_we;
         assign wb_m_addr   = ptw_busy ? ptw_m_addr   : ALUOut_regem;
-        assign wb_m_data_o = ptw_busy ? ptw_m_data_o : readData2_regem;
+        // docs/adr/0038: an AMO's own write phase stores amo_combined (the
+        // funct5-combined result), not the raw rs2 -- ordinary stores
+        // (isAmo_regem=0) are bit-exact unaffected, and AMO's own read
+        // phase never asserts eff_memWrite in the first place (lsu_we=0
+        // gates s_we, so this value is simply unused/don't-care then).
+        assign wb_m_data_o = ptw_busy ? ptw_m_data_o : (amo_active ? amo_combined : readData2_regem);
         assign wb_m_sel = ptw_busy ? ptw_m_sel : lsu_sel;
         // A real bug found by running: RamWishboneAdapter.v's `funct3` port
         // is a side-band tag (docs/adr/0020 D2 -- not part of the standard
@@ -2567,11 +2899,15 @@ end
         // (unrelated, possibly stale-reset-value) funct3 happened to be --
         // observed directly: a real PTE word (0x401) came back as 0x1, its
         // own low byte, sign-extension irrelevant since bit7 was already 0.
-        // Every PTE read is always a plain 4-byte-aligned full word
-        // (funct3=3'b010, lw's own encoding, the only width Ptw.v ever
-        // needs), muxed the same way every other master-side signal
-        // already is.
-        assign wb_m_funct3 = ptw_busy ? 3'b010 : funct3_regem;
+        // Every PTE read is always a plain full-word-of-the-PTE-size read
+        // -- Sv32's Ptw.v reads a 4-byte PTE (funct3=3'b010, lw's own
+        // encoding); Sv39's Ptw39.v reads an 8-byte PTE (funct3=3'b011,
+        // `F3_LOAD_LD`, ld's own encoding -- docs/adr/00NN-sv39-mmu-phase-p.md
+        // Phase P3, the analogous fix for the wider PTE this walker reads).
+        // XLEN is an elaboration-time constant, so this constant-folds
+        // cleanly at either XLEN, same idiom DataMemoryBRAM.v's own
+        // `if (XLEN >= 64)` already uses.
+        assign wb_m_funct3 = ptw_busy ? ((XLEN == 64) ? `F3_LOAD_LD : 3'b010) : funct3_regem;
     end else begin : gen_bus_mux_cached
         // docs/adr/0023-caches.md (Phase G6). DCache.v's own fill/writeback
         // traffic takes priority (it's the newest, most granular requester
@@ -2588,7 +2924,8 @@ end
         assign wb_m_addr   = dcache_m_cyc ? dcache_m_addr   : (ptw_busy ? ptw_m_addr   : {XLEN{1'b0}});
         assign wb_m_data_o = dcache_m_cyc ? dcache_m_data_o : (ptw_busy ? ptw_m_data_o : {XLEN{1'b0}});
         assign wb_m_sel = dcache_m_cyc ? dcache_m_sel : (ptw_busy ? ptw_m_sel : 4'b0000);
-        assign wb_m_funct3 = dcache_m_cyc ? dcache_m_funct3 : (ptw_busy ? 3'b010 : 3'b000);
+        assign wb_m_funct3 = dcache_m_cyc ? dcache_m_funct3 :
+            (ptw_busy ? ((XLEN == 64) ? `F3_LOAD_LD : 3'b010) : 3'b000);
     end
     endgenerate
 
@@ -2602,9 +2939,29 @@ end
     wire [3:0] wb_s_sel;
     wire [3*XLEN-1:0] wb_s_data_i;
 
+    // Generation 2 (Phase M, docs/adr/0028-rv64-migration-phase-m.md): a
+    // real bug found by running, not anticipated in the plan -- WbDecoder's
+    // BASE/SIZE parameters are flattened NUM_SLAVES*XLEN-wide arrays
+    // (WbDecoder.v's own [g*XLEN +: XLEN] per-slot slicing), but every
+    // field below (`TIMER_BASE`/`UART_BASE`/`TIMER_SIZE`/`UART_SIZE`,
+    // riscv_defs.vh) is a plain 32-bit-sized literal and MEM_SIZE_BYTES/
+    // 32'd0 are likewise 32 bits -- fine (and bit-exact) at XLEN=32, where
+    // 32 bits *is* one whole slot, but at XLEN=64 the concatenation is only
+    // half the width WbDecoder expects per slot, corrupting the address
+    // map entirely (every load/store hung forever, mem_stall stuck, no
+    // slave ever ack'd -- found via a debug trace after a plain sw/lw
+    // sequence never completed at XLEN=64, the same "run first, don't
+    // trust the read" discipline this project has needed before). Each
+    // field is explicitly zero-extended to a full XLEN-wide slot here;
+    // reduces to exactly the original concatenation at XLEN=32 (the
+    // padding replication count is 0 there).
     WbDecoder #(.XLEN(XLEN), .NUM_SLAVES(3),
-                .BASE({`TIMER_BASE, `UART_BASE, 32'd0}),
-                .SIZE({`TIMER_SIZE, `UART_SIZE, MEM_SIZE_BYTES})) m_WbDecoder(
+                .BASE({ {(XLEN-32){1'b0}}, `TIMER_BASE,
+                        {(XLEN-32){1'b0}}, `UART_BASE,
+                        {XLEN{1'b0}} }),
+                .SIZE({ {(XLEN-32){1'b0}}, `TIMER_SIZE,
+                        {(XLEN-32){1'b0}}, `UART_SIZE,
+                        {(XLEN-32){1'b0}}, MEM_SIZE_BYTES[31:0] })) m_WbDecoder(
         // docs/adr/00NN-mmu-sv32.md (Phase F5): wb_m_* mux Ptw.v's own bus
         // traffic onto this shared master port while a walk is in
         // progress -- see the MMU translation block above.
@@ -2670,7 +3027,7 @@ end
     // latency.
     wire [XLEN-1:0] ram_data_raw;
     wire            ram_ack_raw;
-    RamWishboneAdapter #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE)) m_DataMemory(
+    RamWishboneAdapter #(.SIZE_BYTES(MEM_SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE), .ZERO_INIT_LIMIT_OVERRIDE(ZERO_INIT_LIMIT_OVERRIDE)) m_DataMemory(
         .clk(clk), .rst(start),
         .s_cyc(wb_s_cyc[0]), .s_stb(wb_s_stb[0]), .s_we(wb_s_we),
         .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
@@ -2725,22 +3082,33 @@ end
     end
     endgenerate
 
-    wire uart_rx_irq;  // docs/adr/0020 Phase D8: the PLIC-lite's sole external source -> mip.MEIP
+    wire uart_irq;  // docs/adr/0034 Phase R: the PLIC-lite's sole external source -> mip.MEIP
+    // Generation 2 (Phase M): Uart.v is deliberately fixed 32-bit (a tiny
+    // MMIO peripheral has no reason to scale with XLEN) -- an intermediate
+    // 32-bit wire plus an explicit zero-extending `assign` replaces what
+    // used to be a direct (implicitly padded/pruned, and at XLEN=64
+    // -Wall-noisy) port connection straight into the XLEN-wide
+    // wb_s_addr/wb_s_data_o/wb_s_data_i bus wires. MMIO_BASE and every
+    // UART register offset fit easily within 32 bits at any XLEN, so the
+    // address truncation is exact, not lossy.
+    wire [31:0] uart_s_data_i;
     Uart #(.CLKS_PER_BIT(UART_CLKS_PER_BIT)) m_Uart(
         .clk(clk), .rst(start),
         .s_cyc(wb_s_cyc[1]), .s_stb(wb_s_stb[1]), .s_we(wb_s_we),
-        .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
-        .s_data_i(wb_s_data_i[1*XLEN +: XLEN]), .s_ack(wb_s_ack[1]),
-        .tx(uart_tx), .rx(uart_rx), .rx_irq(uart_rx_irq)
+        .s_addr(wb_s_addr[31:0]), .s_data_o(wb_s_data_o[31:0]), .s_sel(wb_s_sel),
+        .s_data_i(uart_s_data_i), .s_ack(wb_s_ack[1]),
+        .tx(uart_tx), .rx(uart_rx), .irq(uart_irq)
     );
+    assign wb_s_data_i[1*XLEN +: XLEN] = {{(XLEN-32){1'b0}}, uart_s_data_i};
 
-    wire timer_pending_w;  // docs/adr/0020 Phase D8: -> mip.MTIP
+    wire timer_pending_w;   // docs/adr/0020 Phase D8: -> mip.MTIP
+    wire msip_pending_w;    // docs/adr/0034 Phase R: -> mip.MSIP
     Timer #(.XLEN(XLEN)) m_Timer(
         .clk(clk), .rst(start),
         .s_cyc(wb_s_cyc[2]), .s_stb(wb_s_stb[2]), .s_we(wb_s_we),
         .s_addr(wb_s_addr), .s_data_o(wb_s_data_o), .s_sel(wb_s_sel),
         .s_data_i(wb_s_data_i[2*XLEN +: XLEN]), .s_ack(wb_s_ack[2]),
-        .pending(timer_pending_w)
+        .pending(timer_pending_w), .msip_pending(msip_pending_w)
     );
 //
 wire memtoReg_regwb;
@@ -2774,7 +3142,8 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .write_to_Reg_regem(write_to_Reg_regem),
     .jump_regem(jump_regem),
     .pc_plus4_regem(pc_plus4_regem),
-    .hold(mem_stall),   // MEM-stage interlock (docs/adr/0013): freeze reg4 while
+    .isAmo_regem(isAmo_regem),
+    .hold(mem_stall | amo_stall),   // MEM-stage interlock (docs/adr/0013): freeze reg4 while
                         // the load reg3 is holding hasn't come back from
                         // DataMemoryBRAM yet. A hold, not a bubble -- reg4 may
                         // currently hold an unrelated, already-complete
@@ -2783,7 +3152,8 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
                         // the stall), which must stay visible rather than
                         // being evicted a cycle early. See the ADR: an
                         // earlier bubble-based attempt broke exactly this
-                        // case, caught by random cross-checking.
+                        // case, caught by random cross-checking. docs/adr/0038:
+                        // amo_stall joins it, same reasoning as reg3's own.
     .memtoReg_regwb(memtoReg_regwb),
     .regWrite_regwb(regWrite_regwb),
     .fRegWrite_regwb(fRegWrite_regwb),
@@ -2792,8 +3162,10 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     .ALUOut_regwb(ALUOut_regwb),
     .write_to_Reg_regwb(write_to_Reg_regwb),
     .jump_regwb(jump_regwb),
-    .pc_plus4_regwb(pc_plus4_regwb)
+    .pc_plus4_regwb(pc_plus4_regwb),
+    .isAmo_regwb(isAmo_regwb)
 );
+wire isAmo_regwb;  // docs/adr/0038-a-extension-phase-v.md
 
 // ==========================================================================
 // WB -- Writeback
@@ -2807,16 +3179,55 @@ reg4 #(.XLEN(XLEN), .NUM_REGS(NUM_REGS)) m_reg4(
     );
 
     // jal's result (PC+4) overrides the normal ALU/memory writeback value.
+    wire [XLEN-1:0] writeData_regwb_mem_alu_jump;
     Mux2to1 #(.size(XLEN)) m_Mux_WriteData_Jump(
     .sel(jump_regwb),
     .s0(writeData_regwb_mem_alu),
     .s1(pc_plus4_regwb),
-    .out(writeData_regwb)
+    .out(writeData_regwb_mem_alu_jump)
     );
+
+    // docs/adr/0038-a-extension-phase-v.md: lr/sc/amo*'s own rd value is
+    // the PRE-modification value the 2-phase MEM-stage interlock captured
+    // during its own read phase (amo_captured_read_r), not readData_regwb
+    // (that register's own ordinary load-capture timing doesn't line up
+    // with an AMO's real 2-cycle-later retirement) or ALUOut_regwb (the
+    // ALU only ever computed this instruction's own address, rs1+0).
+    // Mutually exclusive with jump_regwb (isAmo/jump are never both set --
+    // Control.v's own OPCODE_AMO/OPCODE_JAL arms are disjoint), so ordering
+    // against the jal override above doesn't matter.
+    assign writeData_regwb = isAmo_regwb ? amo_captured_read_r : writeData_regwb_mem_alu_jump;
 
     assign debug_x10 = m_Register.regs[10];
     assign debug_regwrite_commit = regWrite_regwb;
     assign debug_valid_commit = valid_regwb;
+    assign debug_pc = pc_o;
+    assign debug_priv_mode = priv_mode_w;
+    assign debug_mcause = m_CSR.mcause;
+    assign debug_jump_regde = jump_regde;
+    assign debug_imm_sum = imm_sum;
+    assign debug_inst_regfd = inst_regfd;
+    assign debug_inst_raw = inst;
+    assign debug_is_compressed = is_compressed;
+    assign debug_inst_final = inst_final;
+    assign debug_illegal_regde = illegalOpcode_regde;
+    assign debug_inst_regde = inst_regde;
+    assign debug_pc_o_regde = pc_o_regde;
+    // docs/adr/0038: temporary debug -- one-hot-ish encoding of trap_cause's
+    // own real source list, to distinguish which of the six real illegal-
+    // instruction-cause conditions actually fired without adding six
+    // separate taps.
+    assign debug_trap_src = {2'b0, sfence_priv_violation, sret_priv_violation,
+                              mret_priv_violation, csr_priv_violation,
+                              (ALUCtl == `ALUCTL_ILLEGAL), dtlb_page_fault};
+    assign debug_exception_taken = exception_taken;
+    assign debug_trap_cause_raw = trap_cause;
+    assign debug_x1 = m_Register.regs[1];
+    assign debug_amo_active = amo_active;
+    assign debug_amo_write_phase = amo_write_phase_r;
+    assign debug_amo_write_done = amo_write_done_r;
+    assign debug_amo_stall = amo_stall;
+    assign debug_amo_captured_read = amo_captured_read_r;
 
 endmodule
 

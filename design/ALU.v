@@ -12,18 +12,36 @@ module ALU #(
 )(
     input [4:0] ALUCtl,
     input [XLEN-1:0] A,B,
+    input wordOp,  // Generation 2 (Phase M, docs/adr/0028-rv64-migration-
+                    // phase-m.md): RV64I's "w"-suffixed family (addw/subw/
+                    // sllw/srlw/sraw/mulw, and addiw/slliw/srliw/sraiw via
+                    // the same ADD/SLL/SRL/SRA arms) -- compute on the low
+                    // 32 bits of A/B, sign-extend the 32-bit result to XLEN.
+                    // Ignored by every other ALUCtl value (branches, SLT,
+                    // XOR, OR, AND, MULH*, DIV/REM family, CTZ). At XLEN=32
+                    // this input is always tied 0 (Control.v XLEN-gates the
+                    // opcodes that would ever assert it), so it changes
+                    // nothing there even though the logic below has no
+                    // explicit XLEN guard -- truncate-to-32-then-sign-
+                    // extend-to-32 is already a no-op at XLEN=32.
     output reg [XLEN-1:0] ALUOut,
     output reg zero,
     output reg branch_zero
 );
 
 // Register-register shift amounts (sll/srl/sra) use only the low
-// $clog2(XLEN) bits of B, per spec -- see the SLL case below.
+// $clog2(XLEN) bits of B, per spec -- see the SLL case below. The "w"-suffixed
+// family's shift amount is always exactly 5 bits regardless of XLEN (spec-
+// mandated, since it only ever shifts a 32-bit value) -- see wordOp above.
 localparam SHAMT_WIDTH = $clog2(XLEN);
 
 integer i;
 integer count;
 integer done;
+
+// Generation 2 (Phase M) wordOp scratch: the 32-bit result before its
+// sign-extension to XLEN, shared by the ADD/SUB/SLL/SRL/SRA/MUL arms below.
+reg [31:0] w32;
 
 // RV32M scratch (docs/adr/0006-rv32m.md). Widened to 2*XLEN bits *before*
 // multiplying (not after) so the product is computed at full precision
@@ -38,9 +56,17 @@ begin
     branch_zero =0;
 case(ALUCtl)
     `ALUCTL_ADD:
-    ALUOut = A + B;//simply adding
+    if (wordOp) begin
+        w32 = A[31:0] + B[31:0];
+        ALUOut = {{(XLEN-32){w32[31]}}, w32};  // addiw/addw
+    end else
+        ALUOut = A + B;//simply adding
     `ALUCTL_SUB:
-    ALUOut = A - B;//just subtracting
+    if (wordOp) begin
+        w32 = A[31:0] - B[31:0];
+        ALUOut = {{(XLEN-32){w32[31]}}, w32};  // subw
+    end else
+        ALUOut = A - B;//just subtracting
     `ALUCTL_SLL:
     // Per spec, register-register shifts only use the low $clog2(XLEN) bits
     // of rs2 as the shift amount -- rs2 holds a full XLEN-bit value, and B
@@ -55,6 +81,12 @@ case(ALUCtl)
     // random testing (docs/ROADMAP.md V-4) hitting `srl x5,x25,x25`, not by
     // any directed test -- every hand-written shift test happened to use a
     // shift-amount register already holding a small value.
+    if (wordOp) begin
+        // slliw/sllw: shift amount always exactly 5 bits (B[4:0]), not
+        // SHAMT_WIDTH-1:0 -- this arm only ever shifts a 32-bit value.
+        w32 = A[31:0] << B[4:0];
+        ALUOut = {{(XLEN-32){w32[31]}}, w32};
+    end else
     ALUOut = (A << B[SHAMT_WIDTH-1:0]);//logical shift left
     `ALUCTL_SLT:
     // A/B are plain (unsigned) ports -- $signed() is required here, the same
@@ -67,11 +99,19 @@ case(ALUCtl)
     `ALUCTL_XOR:
     ALUOut = A ^ B;//xor
     `ALUCTL_SRL:
+    if (wordOp) begin  // srliw/srlw -- shift amount always B[4:0], see SLL's wordOp comment
+        w32 = A[31:0] >> B[4:0];
+        ALUOut = {{(XLEN-32){w32[31]}}, w32};
+    end else
     ALUOut = (A >> B[SHAMT_WIDTH-1:0]);//shift right logical -- see SLL's comment on the shift-amount width
     `ALUCTL_SRA:
     // See docs/adr/0004-signed-arithmetic-casts.md -- >>> only sign-extends
     // when the operand's *type* is signed, which A/B are not by default.
     // See SLL's comment above on the shift-amount width.
+    if (wordOp) begin  // sraiw/sraw -- shift amount always B[4:0]
+        w32 = $signed(A[31:0]) >>> B[4:0];
+        ALUOut = {{(XLEN-32){w32[31]}}, w32};
+    end else
     ALUOut = ($signed(A) >>> B[SHAMT_WIDTH-1:0]);//shift right arithmetic
     `ALUCTL_OR:
     ALUOut = ( A | B ) ;//OR
@@ -143,6 +183,10 @@ case(ALUCtl)
     // `ALUCTL_DIV`/`ALUCTL_DIVU`/`ALUCTL_REM`/`ALUCTL_REMU` case here. See
     // docs/adr/0009-multicycle-divider.md.
     `ALUCTL_MUL:
+        if (wordOp) begin  // mulw: low 32 bits of the 32x32 product, sign-extended
+            w32 = A[31:0] * B[31:0];
+            ALUOut = {{(XLEN-32){w32[31]}}, w32};
+        end else
         ALUOut = A * B;  // low 32 bits of the true product -- correct
                           // regardless of signedness, so no cast needed
     `ALUCTL_MULH:

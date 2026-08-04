@@ -29,7 +29,8 @@
 module RamWishboneAdapter #(
     parameter SIZE_BYTES = 128,
     parameter XLEN = 32,
-    parameter DATA_INIT_FILE = ""
+    parameter DATA_INIT_FILE = "",
+    parameter ZERO_INIT_LIMIT_OVERRIDE = 0  // docs/adr/0036 -- threaded straight through to DataMemoryBRAM.v
 )(
     input clk,
     input rst,
@@ -48,7 +49,7 @@ module RamWishboneAdapter #(
 wire mem_write = s_cyc && s_stb && s_we;
 wire mem_read  = s_cyc && s_stb && !s_we;
 
-DataMemoryBRAM #(.SIZE_BYTES(SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE)) m_ram(
+DataMemoryBRAM #(.SIZE_BYTES(SIZE_BYTES), .XLEN(XLEN), .DATA_INIT_FILE(DATA_INIT_FILE), .ZERO_INIT_LIMIT_OVERRIDE(ZERO_INIT_LIMIT_OVERRIDE)) m_ram(
     .clk(clk), .rst(rst),
     .memWrite(mem_write), .memRead(mem_read),
     .address(s_addr), .writeData(s_data_o), .funct3(funct3),

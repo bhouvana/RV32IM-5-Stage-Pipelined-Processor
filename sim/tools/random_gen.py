@@ -88,6 +88,59 @@ FLOAT_SEED_BITS = [
 ]
 
 
+R_TYPE_W = ["addw", "subw", "sllw", "srlw", "sraw", "mulw", "divw", "divuw", "remw", "remuw"]
+I_TYPE_W = ["addiw", "slliw", "srliw", "sraiw"]
+
+
+def const64_to_reg_instrs(rd, rd_scratch, bits64):
+    """Generation 2 (Phase M15, docs/adr/0028-rv64-migration-phase-m.md).
+    Builds an arbitrary 64-bit constant into `rd`, using `rd_scratch` as a
+    second, clobbered register. Splits into hi32/lo32, builds each half via
+    the existing 32-bit const_to_reg_instrs (which sign-extends its result
+    to 64 bits -- an artifact, not a bug: `slli rd,rd,32` washes that out
+    for the hi half, since shifting left by 32 discards the original upper
+    32 bits entirely and zero-fills the new low 32; for the lo half, a
+    slli-then-srli-by-32 pair zero-extends it the same way before the two
+    halves are OR'd together (their bit ranges never overlap, so OR and ADD
+    are equivalent here -- OR makes that non-overlap explicit)."""
+    hi32 = (bits64 >> 32) & 0xFFFFFFFF
+    lo32 = bits64 & 0xFFFFFFFF
+    lines = const_to_reg_instrs(rd, hi32)
+    lines.append(f"slli x{rd}, x{rd}, 32")
+    lines.extend(const_to_reg_instrs(rd_scratch, lo32))
+    lines.append(f"slli x{rd_scratch}, x{rd_scratch}, 32")
+    lines.append(f"srli x{rd_scratch}, x{rd_scratch}, 32")
+    lines.append(f"or x{rd}, x{rd}, x{rd_scratch}")
+    return lines
+
+
+def _self_check_const64(bits64):
+    # Replays the exact arithmetic const64_to_reg_instrs's own instruction
+    # sequence performs (not a re-derivation from hi32/lo32 directly, which
+    # would just restate the function's own assumption) -- a real, if
+    # small, independent check on the construction logic itself.
+    hi32 = (bits64 >> 32) & 0xFFFFFFFF
+    lo32 = bits64 & 0xFFFFFFFF
+    MASK64 = (1 << 64) - 1
+
+    def sext32(v):
+        v &= 0xFFFFFFFF
+        return v - (1 << 32) if v & 0x80000000 else v
+
+    rd = sext32(hi32) & MASK64          # const_to_reg_instrs(rd, hi32) -- sign-extends to 64 bits
+    rd = (rd << 32) & MASK64             # slli rd,rd,32
+    scratch = sext32(lo32) & MASK64      # const_to_reg_instrs(rd_scratch, lo32)
+    scratch = (scratch << 32) & MASK64   # slli rd_scratch,rd_scratch,32
+    scratch = scratch >> 32              # srli rd_scratch,rd_scratch,32 (logical, zero-fills)
+    rd = (rd | scratch) & MASK64         # or rd,rd,rd_scratch
+    assert rd == (bits64 & MASK64), f"const64_to_reg_instrs self-check failed: got {rd:#x}, expected {bits64 & MASK64:#x}"
+
+
+for _v in (0, 0xFFFFFFFFFFFFFFFF, 0x8000000000000000, 0x7FFFFFFFFFFFFFFF,
+           0x123456789ABCDEF0, 0xFFFFFFFF00000001, 0x00000000FFFFFFFF, 0xDEADBEEF00000000):
+    _self_check_const64(_v)
+
+
 def const_to_reg_instrs(rd, bits32):
     # Standard "build an arbitrary 32-bit constant" idiom: lui supplies the
     # upper 20 bits, addi's sign-extended 12-bit immediate corrects the
@@ -106,8 +159,19 @@ def const_to_reg_instrs(rd, bits32):
     return lines
 
 
-def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, mmu=False):
-    """docs/adr/00NN-mmu-sv32.md (Phase F7). mmu=True (opt-in, default False
+def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, mmu=False, xlen=32):
+    """xlen (Generation 2, docs/adr/0028-rv64-migration-phase-m.md): 32
+    (default, every existing call site's exact behavior, unaffected) or 64
+    -- gates in the "w"-suffixed instruction family (addw/subw/sllw/srlw/
+    sraw/mulw/divw/divuw/remw/remuw/addiw/slliw/srliw/sraiw) and ld/sd/lwu
+    into the random instruction mix, and seeds one scratch register with a
+    genuine wide 64-bit pattern via const64_to_reg_instrs (mirroring the
+    float-seeding rationale above -- ordinary add/sub/etc. alone rarely
+    produce a register value with both meaningfully-set upper AND lower
+    32-bit halves, under-exercising exactly the truncation/sign-extension
+    boundary this generation's own RTL changes are about).
+
+    docs/adr/00NN-mmu-sv32.md (Phase F7). mmu=True (opt-in, default False
     -- every existing call site unaffected): prepend a real, M-mode-built
     Sv32 page table and drop to U-mode via mret before any of the
     random-generated instructions run, so every one of them (fetch, load,
@@ -185,21 +249,32 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     interrupt_prefix_cost = 0
     if interrupt is not None:
         # Common: addi+csrrw(mtvec)=2, addi+csrrw(mie)=2, csrrsi(mstatus)=1
-        # -> 5. Timer-specific: TIMER_BASE's lui+addi(2), the mtimecmp
-        # constant (up to 2, lui+addi) + its sw(1) -> up to 5. UART-specific:
-        # MMIO_BASE's lui(1) + enable-value addi(1) + its sw(1) -> 3. "both"
-        # needs both sources armed -- their own lui's each target a
+        # -> 5. Timer-specific: TIMER_BASE+CLINT_OFF_MTIMECMP's single lui
+        # (1, Phase R -- real CLINT address, low 12 bits 0), the mtimecmp
+        # constant (up to 2, lui+addi) + its sw(1) -> up to 4. UART-specific:
+        # UART_BASE's lui(1) + enable-value addi(1) + its sw(1) -> 3.
+        # MSI-specific (Phase R): TIMER_BASE's single lui (1, CLINT_OFF_MSIP
+        # == 0) + enable-value addi(1) + its sw(1) -> 3, same shape as UART.
+        # "both" needs both sources armed -- their own lui's each target a
         # different register (x1 vs x2), so neither can be shared -> up to
-        # 5 + 3 = 8. Handler (all cases): csrrw(mie<-0) + mret -> 2.
-        source_cost = {"timer": 5, "uart": 3, "both": 8}[interrupt]
+        # 4 + 3 = 7. Handler (all cases): csrrw(mie<-0) + mret -> 2.
+        source_cost = {"timer": 4, "uart": 3, "msi": 3, "both": 7}[interrupt]
         interrupt_prefix_cost = 5 + source_cost + 2
     # docs/adr/00NN-mmu-sv32.md (Phase F7): level-1 PDE (const_to_reg, up to
     # 2, + sw = 3) + level-0 table address (lui = 1) + level-0 PTE (up to 2,
     # + sw = 3) + satp (up to 2, + csrrw = 3) + mepc placeholder+csrrw+mret
     # (3) = up to 13, generous upper bound (mem_size=8192 leaves enormous
     # headroom regardless).
-    mmu_prefix_cost = 13 if mmu else 0
-    budget = 1 + 2 * len(FLOAT_SEED_BITS) + n_instrs + 1 + interrupt_prefix_cost + mmu_prefix_cost
+    #
+    # docs/adr/00NN-sv39-mmu-phase-p.md (Phase P5): xlen=64's Sv39 prefix
+    # has one more table level (level-2/level-1/level-0, each up to 2 +
+    # lui/sw) plus a genuinely 64-bit satp constant (const64_to_reg_instrs,
+    # up to 8 -- same upper bound the RV64 seeding cost above already uses)
+    # -- generous upper bound, mem_size is generous there too (see below).
+    mmu_prefix_cost = (24 if xlen >= 64 else 13) if mmu else 0
+    xlen64_seed_cost = 8 if xlen >= 64 else 0  # const64_to_reg_instrs's own upper bound, see above
+    budget = (1 + 2 * len(FLOAT_SEED_BITS) + xlen64_seed_cost + n_instrs + 1
+              + interrupt_prefix_cost + mmu_prefix_cost)
     if budget > mem_size // 4:
         raise ValueError(f"n_instrs={n_instrs} would overflow the {mem_size}-byte budget "
                           f"(everything else already uses {budget - n_instrs} instructions)")
@@ -221,6 +296,12 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
         fr = i + 1  # f1, f2, ... -- f0 deliberately left at its 0.0 reset default
         seed_lines.extend(const_to_reg_instrs(30, bits))
         seed_lines.append(f"fmv.w.x f{fr}, x30")
+    if xlen >= 64:
+        # Generation 2 (Phase M15): x29 lands in the ordinary GP_REGS pool
+        # afterward (fair game for any later random instruction, same as
+        # every other register) -- x30 is transient scratch here only, same
+        # convention the float seeding above already uses.
+        seed_lines.extend(const64_to_reg_instrs(29, 30, 0xDEADBEEF12345678))
     labels_at = {}  # instruction index -> label name, resolved into text at the end
 
     # docs/adr/0020-soc-integration.md (Phase D10/D11). mstatus/mepc/mcause
@@ -267,19 +348,34 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
 
     # Build a flat instruction list first (as dicts), then assign forward-only
     # branch/jump targets once every instruction's final index is known.
+    # Generation 2 (Phase M15): "rw"/"iw" (the "w"-suffixed family) and
+    # widened load/store mnemonic pools only exist in the choice list when
+    # xlen>=64 -- at xlen=32 the exact same list/weights as every prior
+    # phase, so existing seeds reproduce bit-exact programs.
+    kind_names = ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
+                  "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
+                  "fp_cvt_to_int", "fp_cvt_from_int", "fp_madd", "fload", "fstore", "fcsr"]
+    kind_weights = [24, 16, 8, 10, 10, 8, 5, csr_weight,
+                     10, 4, 4, 4, 4,
+                     4, 4, 6, 6, 6, 4]
+    if xlen >= 64:
+        kind_names = kind_names + ["rw", "iw"]
+        kind_weights = kind_weights + [12, 8]
+    load_mnemonics = ["lb", "lh", "lw", "lbu", "lhu"] + (["ld", "lwu"] if xlen >= 64 else [])
+    store_mnemonics = ["sb", "sh", "sw"] + (["sd"] if xlen >= 64 else [])
+    load_widths = {"lb": 1, "lbu": 1, "lh": 2, "lhu": 2, "lw": 4, "lwu": 4, "ld": 8}
+    store_widths = {"sb": 1, "sh": 2, "sw": 4, "sd": 8}
+
     instrs = []
     for _ in range(n_instrs):
-        kind = rnd.choices(
-            ["r", "i", "shift", "load", "store", "branch", "jal", "csr",
-             "fp_arith", "fp_sqrt", "fp_sgnj", "fp_minmax", "fp_cmp",
-             "fp_cvt_to_int", "fp_cvt_from_int", "fp_madd", "fload", "fstore", "fcsr"],
-            weights=[24, 16, 8, 10, 10, 8, 5, csr_weight,
-                     10, 4, 4, 4, 4,
-                     4, 4, 6, 6, 6, 4],
-        )[0]
+        kind = rnd.choices(kind_names, weights=kind_weights)[0]
 
         if kind == "r":
             mn = rnd.choice(R_TYPE)
+            rd, rs1, rs2 = rnd.choice(GP_REGS), rnd.choice(GP_REGS), rnd.choice(GP_REGS)
+            instrs.append(f"{mn} x{rd}, x{rs1}, x{rs2}")
+        elif kind == "rw":  # Generation 2: addw/subw/sllw/srlw/sraw/mulw/divw/divuw/remw/remuw
+            mn = rnd.choice(R_TYPE_W)
             rd, rs1, rs2 = rnd.choice(GP_REGS), rnd.choice(GP_REGS), rnd.choice(GP_REGS)
             instrs.append(f"{mn} x{rd}, x{rs1}, x{rs2}")
         elif kind == "i":
@@ -287,22 +383,32 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
             rd, rs1 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
             imm = rnd.randint(-2048, 2047)
             instrs.append(f"{mn} x{rd}, x{rs1}, {imm}")
+        elif kind == "iw":  # Generation 2: addiw/slliw/srliw/sraiw
+            mn = rnd.choice(I_TYPE_W)
+            rd, rs1 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
+            if mn == "addiw":
+                imm = rnd.randint(-2048, 2047)
+            else:
+                imm = rnd.randint(0, 31)  # shamt always 5 bits regardless of xlen, see I_TYPE_W's own comment
+            instrs.append(f"{mn} x{rd}, x{rs1}, {imm}")
         elif kind == "shift":
             mn = rnd.choice(SHIFT_I)
             rd, rs1 = rnd.choice(GP_REGS), rnd.choice(GP_REGS)
-            shamt = rnd.randint(0, 31)
+            # Generation 2: 6-bit shamt range at xlen=64 (design/ImmGen.v/
+            # design/ALUCtrl.v's own widened split), 5-bit at 32 (bit-exact).
+            shamt = rnd.randint(0, 63) if xlen >= 64 else rnd.randint(0, 31)
             instrs.append(f"{mn} x{rd}, x{rs1}, {shamt}")
         elif kind == "load":
-            mn = rnd.choice(["lb", "lh", "lw", "lbu", "lhu"])
+            mn = rnd.choice(load_mnemonics)
             rd = rnd.choice(GP_REGS)
-            width = {"lb": 1, "lbu": 1, "lh": 2, "lhu": 2, "lw": 4}[mn]
+            width = load_widths[mn]
             max_off = min(addr_space - base_addr - width, 2047)  # 12-bit signed load/store immediate
             off = rnd.randrange(0, max_off + 1, width) if max_off >= 0 else 0
             instrs.append(f"{mn} x{rd}, {off}(x{BASE_REG})")
         elif kind == "store":
-            mn = rnd.choice(["sb", "sh", "sw"])
+            mn = rnd.choice(store_mnemonics)
             rs2 = rnd.choice(GP_REGS)
-            width = {"sb": 1, "sh": 2, "sw": 4}[mn]
+            width = store_widths[mn]
             max_off = min(addr_space - base_addr - width, 2047)  # 12-bit signed load/store immediate
             off = rnd.randrange(0, max_off + 1, width) if max_off >= 0 else 0
             instrs.append(f"{mn} x{rs2}, {off}(x{BASE_REG})")
@@ -424,6 +530,38 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     out.append("__halt:")
     out.append("jal x0, __halt")
 
+    if mmu and xlen >= 64:
+        # docs/adr/00NN-sv39-mmu-phase-p.md (Phase P5). Sv39 twin of the
+        # Sv32 prefix below (same "generator-guaranteed-valid identity
+        # mapping" philosophy, same M-mode-builds-then-mret-to-U shape) --
+        # one more table level (level-2/level-1/level-0, all index 0, since
+        # the random body stays confined to page 0 the same way Sv32's own
+        # addr_space restriction does), and a genuinely 64-bit satp
+        # constant (const64_to_reg_instrs, not const_to_reg_instrs -- Sv39's
+        # MODE field sits at bit 60). x1/x2/x3/x6 are reused as scratch here
+        # (x6 is const64_to_reg_instrs's own required second/clobbered
+        # register), visible to the random body afterward like any other
+        # pre-existing register value both RTL and ISS agree on.
+        pde2_lines = const_to_reg_instrs(1, 0x401)   # level-2 PDE: level-1 table at PPN=1, V=1 (non-leaf)
+        pde1_lines = const_to_reg_instrs(2, 0x801)   # level-1 PDE: level-0 table at PPN=2, V=1 (non-leaf)
+        pte0_lines = const_to_reg_instrs(3, 0x1F)    # level-0 PTE: PPN=0 (identity), V|R|W|X|U -- guaranteed-permitted
+        satp_lines = const64_to_reg_instrs(1, 6, 8 << 60)  # satp: MODE=8/Sv39, PPN=0
+        prefix = (
+            pde2_lines + ["sw x1, 0(x0)"] +                        # level-2[VPN2=0] <- PDE (satp_ppn=0 -> table at addr 0)
+            ["lui x4, 0x1"] + pde1_lines + ["sw x2, 0(x4)"] +         # level-1[VPN1=0] <- PDE (table @ 0x1000)
+            ["lui x5, 0x2"] + pte0_lines + ["sw x3, 0(x5)"] +           # level-0[VPN0=0] <- identity PTE (table @ 0x2000)
+            # docs/adr/0023-caches.md (Phase G6) fence requirement, same
+            # reasoning as the Sv32 prefix's own comment below -- Ptw39.v's
+            # bus-master reads bypass DCache.v the same way Ptw.v's do.
+            ["fence"] +
+            satp_lines + ["csrrw x0, 0x180, x1"] +
+            ["addi x1, x0, __MEPC_PLACEHOLDER__", "csrrw x0, mepc, x1", "mret"]
+        )
+        prefix_instr_count = sum(1 for l in prefix if not l.rstrip().endswith(":"))
+        mepc_target = prefix_instr_count * 4
+        prefix = [l.replace("__MEPC_PLACEHOLDER__", str(mepc_target)) for l in prefix]
+        return "\n".join(prefix + out) + "\n", None
+
     if mmu:
         # docs/adr/00NN-mmu-sv32.md (Phase F7). Runs entirely in M-mode
         # (physical addressing, bypasses translation) before `out` (the
@@ -489,15 +627,14 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
     if interrupt == "timer":
         mtimecmp_est = 100 + interrupt_k * 10  # generous, not precise -- see docstring
         prefix = [
-            "lui   x2, 0x10000",
-            "addi  x2, x2, 16",       # x2 = TIMER_BASE
+            "lui   x2, 0x10104",      # x2 = TIMER_BASE + CLINT_OFF_MTIMECMP (Phase R -- real CLINT address, low 12 bits 0)
             "addi  x5, x0, __MTVEC_PLACEHOLDER__",
             "csrrw x0, mtvec, x5",
             "addi  x6, x0, 128",      # MIE_MTIE_BIT
             "csrrw x0, mie, x6",
         ]
         prefix.extend(const_to_reg_instrs(7, mtimecmp_est))
-        prefix.append("sw    x7, 4(x2)")
+        prefix.append("sw    x7, 0(x2)")   # MTIMECMP low half
         prefix.append("csrrsi x0, mstatus, 8")
         cause = 0x80000007
     elif interrupt == "uart":
@@ -505,37 +642,52 @@ def gen_program(seed, n_instrs=16, base_addr=32, mem_size=128, interrupt=None, m
             "lui   x1, 0x10000",      # x1 = UART_BASE
             "addi  x5, x0, __MTVEC_PLACEHOLDER__",
             "csrrw x0, mtvec, x5",
-            "addi  x6, x0, -2048",    # MIE_MEIE_BIT, sign-extended (harmless -- CSR.v's mie_masked only reads bits 7/11)
+            "addi  x6, x0, -2048",    # MIE_MEIE_BIT, sign-extended (harmless -- CSR.v's mie_masked only reads bits 3/7/11)
             "csrrw x0, mie, x6",
             "addi  x8, x0, 1",
-            "sw    x8, 12(x1)",       # CONTROL.rx_irq_enable <- 1
+            "sw    x8, 4(x1)",        # IER.ERBFI <- 1 (Phase R)
             "csrrsi x0, mstatus, 8",
         ]
         cause = 0x8000000B
+    elif interrupt == "msi":
+        # docs/adr/0034-uart-clint-register-compat-phase-r.md (Phase R).
+        # Mirrors the "timer" case exactly, arming the new CLINT `msip`
+        # register (offset 0x0000, always a plain 32-bit access
+        # regardless of XLEN) instead of mtimecmp.
+        prefix = [
+            "lui   x2, 0x10100",      # x2 = TIMER_BASE (CLINT_OFF_MSIP == 0, so this IS the msip address)
+            "addi  x5, x0, __MTVEC_PLACEHOLDER__",
+            "csrrw x0, mtvec, x5",
+            "addi  x6, x0, 8",        # MIE_MSIE_BIT
+            "csrrw x0, mie, x6",
+            "addi  x7, x0, 1",
+            "sw    x7, 0(x2)",        # msip <- 1
+            "csrrsi x0, mstatus, 8",
+        ]
+        cause = 0x80000003
     elif interrupt == "both":
         # docs/adr/0020-soc-integration.md (Phase D11). Both sources armed
         # and pended simultaneously -- the real interrupt taken must be the
-        # external one, MEI-over-MTI priority (D9's own already-proven
-        # redirect condition), so the ISS is told to expect that cause
-        # directly rather than derive it, the same way this generator
-        # doesn't re-derive div/rem or float special-case results either
-        # (design/*.v and iss.py are independently checked against each
-        # other, not against a from-scratch re-implementation of the
-        # priority logic here).
+        # external one, MEI-over-MSI-over-MTI priority (D9's own already-
+        # proven redirect condition, extended by Phase R), so the ISS is
+        # told to expect that cause directly rather than derive it, the
+        # same way this generator doesn't re-derive div/rem or float
+        # special-case results either (design/*.v and iss.py are
+        # independently checked against each other, not against a
+        # from-scratch re-implementation of the priority logic here).
         mtimecmp_est = 100 + interrupt_k * 10
         prefix = [
             "lui   x1, 0x10000",      # x1 = UART_BASE
-            "lui   x2, 0x10000",
-            "addi  x2, x2, 16",       # x2 = TIMER_BASE
+            "lui   x2, 0x10104",      # x2 = TIMER_BASE + CLINT_OFF_MTIMECMP (Phase R)
             "addi  x5, x0, __MTVEC_PLACEHOLDER__",
             "csrrw x0, mtvec, x5",
             "addi  x6, x0, -1920",    # MIE_MTIE_BIT|MIE_MEIE_BIT, sign-extended (harmless, same masking reasoning)
             "csrrw x0, mie, x6",
         ]
         prefix.extend(const_to_reg_instrs(7, mtimecmp_est))
-        prefix.append("sw    x7, 4(x2)")
+        prefix.append("sw    x7, 0(x2)")   # MTIMECMP low half
         prefix.append("addi  x8, x0, 1")
-        prefix.append("sw    x8, 12(x1)")   # CONTROL.rx_irq_enable <- 1
+        prefix.append("sw    x8, 4(x1)")   # IER.ERBFI <- 1 (Phase R)
         prefix.append("csrrsi x0, mstatus, 8")
         cause = 0x8000000B
     else:
@@ -557,12 +709,18 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--n", type=int, default=16)
     ap.add_argument("--mem-size", type=int, default=None)
-    ap.add_argument("--interrupt", choices=["timer", "uart", "both"], default=None)
-    ap.add_argument("--mmu", action="store_true", help="docs/adr/00NN-mmu-sv32.md Phase F7: opt-in Sv32 translation mode")
+    ap.add_argument("--interrupt", choices=["timer", "uart", "msi", "both"], default=None)
+    ap.add_argument("--mmu", action="store_true",
+                     help="opt-in translation mode: Sv32 at XLEN=32 (docs/adr/00NN-mmu-sv32.md Phase F7) "
+                          "or Sv39 at XLEN=64 (docs/adr/00NN-sv39-mmu-phase-p.md Phase P5)")
+    ap.add_argument("--xlen", type=int, default=32, choices=[32, 64],
+                     help="Generation 2 (docs/adr/0028-rv64-migration-phase-m.md): 32=default, 64=RV64")
     ap.add_argument("-o", "--output")
     args = ap.parse_args()
-    mem_size = args.mem_size if args.mem_size is not None else (8192 if args.mmu else 128)
-    text, interrupt_info = gen_program(args.seed, args.n, mem_size=mem_size, interrupt=args.interrupt, mmu=args.mmu)
+    mem_size = args.mem_size if args.mem_size is not None else \
+        ((16384 if args.xlen == 64 else 8192) if args.mmu else 128)
+    text, interrupt_info = gen_program(args.seed, args.n, mem_size=mem_size, interrupt=args.interrupt,
+                                        mmu=args.mmu, xlen=args.xlen)
     if interrupt_info is not None:
         print(f"# interrupt scheduled after instruction {interrupt_info['after']}, "
               f"cause={interrupt_info['cause']:#010x}")
