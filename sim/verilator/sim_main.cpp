@@ -96,6 +96,7 @@ int main(int argc, char **argv) {
     uint64_t max_cycles = 0;      // 0 = unbounded (relies on external timeout/kill)
     uint64_t progress_every = 10000000ULL;
     uint64_t pc_trace_every = 0;  // docs/adr/0036: 0 = off; a real diagnostic aid, not a normal-run feature -- distinguishing "slow but real forward progress" from "stuck oscillating in a tight loop" needs a PC trajectory, not just a last-changed timestamp.
+    uint32_t pc_trace_min = 0;  // Phase W: optional gate -- skip tracing until debug_pc first reaches this, so a targeted investigation doesn't have to wade through firmware-boot trace output to reach the kernel region of interest.
     const char *console_log_path = "sim/verilator/boot_console.log";
 
     for (int i = 1; i < argc; i++) {
@@ -107,6 +108,8 @@ int main(int argc, char **argv) {
             console_log_path = argv[i] + 13;
         else if (strncmp(argv[i], "+pc-trace-every=", 16) == 0)
             pc_trace_every = strtoull(argv[i] + 16, nullptr, 10);
+        else if (strncmp(argv[i], "+pc-trace-min=", 14) == 0)
+            pc_trace_min = (uint32_t)strtoull(argv[i] + 14, nullptr, 16);
     }
 
     FILE *console_log = fopen(console_log_path, "ab");
@@ -151,7 +154,7 @@ int main(int argc, char **argv) {
             warned_stuck = true;
         }
 
-        if (pc_trace_every != 0 && cycle % pc_trace_every == 0) {
+        if (pc_trace_every != 0 && pc >= pc_trace_min && cycle % pc_trace_every == 0) {
             fprintf(stderr, "[pc] cycle=%llu pc=%#x priv=%u mcause=%#llx jump_regde=%u imm_sum=%#llx inst_regfd=%#x "
                     "inst_raw=%#x is_compressed=%u inst_final=%#x illegal_regde=%u inst_regde=%#x pc_o_regde=%#x trap_src=%#x\n",
                     (unsigned long long)cycle, pc, (unsigned)dut->debug_priv_mode,
@@ -160,11 +163,15 @@ int main(int argc, char **argv) {
                     (unsigned)dut->debug_inst_raw, (unsigned)dut->debug_is_compressed, (unsigned)dut->debug_inst_final,
                     (unsigned)dut->debug_illegal_regde, (unsigned)dut->debug_inst_regde, (unsigned)dut->debug_pc_o_regde,
                     (unsigned)dut->debug_trap_src);
-            fprintf(stderr, "    exception_taken=%u trap_cause_raw=%#llx x1=%#llx amo_active=%u amo_wp=%u amo_wd=%u amo_stall=%u amo_read=%#llx\n",
+            fprintf(stderr, "    exception_taken=%u trap_cause_raw=%#llx x1=%#llx amo_active=%u amo_wp=%u amo_wd=%u amo_stall=%u amo_read=%#llx "
+                    "x2(sp)=%#llx x4(tp)=%#llx x10(a0)=%#llx x11(a1)=%#llx x12(a2)=%#llx x13(a3)=%#llx\n",
                     (unsigned)dut->debug_exception_taken, (unsigned long long)dut->debug_trap_cause_raw,
                     (unsigned long long)dut->debug_x1, (unsigned)dut->debug_amo_active,
                     (unsigned)dut->debug_amo_write_phase, (unsigned)dut->debug_amo_write_done,
-                    (unsigned)dut->debug_amo_stall, (unsigned long long)dut->debug_amo_captured_read);
+                    (unsigned)dut->debug_amo_stall, (unsigned long long)dut->debug_amo_captured_read,
+                    (unsigned long long)dut->debug_x2, (unsigned long long)dut->debug_x4,
+                    (unsigned long long)dut->debug_x10, (unsigned long long)dut->debug_x11,
+                    (unsigned long long)dut->debug_x12, (unsigned long long)dut->debug_x13);
         }
 
         if (cycle % progress_every == 0) {

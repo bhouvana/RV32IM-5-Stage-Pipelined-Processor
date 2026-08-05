@@ -184,7 +184,16 @@ module PIPELINED #(
     output debug_amo_write_phase,
     output debug_amo_write_done,
     output debug_amo_stall,
-    output [XLEN-1:0] debug_amo_captured_read
+    output [XLEN-1:0] debug_amo_captured_read,
+    // Phase W (sp/tp polling-loop investigation, docs/adr/0036's own parked-
+    // loop gap): same "unconnected changes nothing" tap shape as debug_x10 --
+    // a1/a2/a3/sp/tp are the exact registers the kernel's own hart-lottery
+    // amoadd + secondary-hart wait_for_cpu_up loop reads.
+    output [XLEN-1:0] debug_x2,
+    output [XLEN-1:0] debug_x4,
+    output [XLEN-1:0] debug_x11,
+    output [XLEN-1:0] debug_x12,
+    output [XLEN-1:0] debug_x13
 );
 // Register-address field width, derived once and reused on every
 // pipeline-register/Register.v/Forward.v/Hazard.v instantiation below.
@@ -787,7 +796,21 @@ wire [6:0] funct7_control;
         Hazard #(.NUM_REGS(NUM_REGS)) m_Hazard(
             .readReg1_fd(inst_regfd[19:15]),
             .readReg2_fd(inst_regfd[24:20]),
-            .la_memRead(memRead_regde),
+            // Phase W (real kernel-boot bug, docs/adr/0038's own hart-lottery
+            // amoadd.w): Control.v deliberately leaves memRead_regde=0 for
+            // OPCODE_AMO (isAmo's own MEM-stage interlock drives the real
+            // bus instead) -- but that same 0 also blinded THIS, separate,
+            // earlier-staged load-use detector to an AMO's own multi-cycle
+            // rd latency. An immediately-following instruction reading an
+            // AMO's rd (the pre-modification value) advanced into EX one
+            // cycle before amo_stall/reg2_hold could catch it, capturing
+            // the stale pre-AMO register-file value instead -- real,
+            // reproduced by the actual kernel's own aliased `amoadd.w
+            // a3,a2,(a3)` / `bnez a3,...` hart-lottery pair (rd==rs1, the
+            // very next instruction depends on rd). Same fix shape as an
+            // ordinary load-use hazard: treat an AMO in "regde" as a hazard
+            // source too, not just a real load.
+            .la_memRead(memRead_regde | isAmo_regde),
             .la_dest(write_to_Reg_regde),
             .flush(flush),
             .stall(stall)
@@ -3228,6 +3251,11 @@ wire isAmo_regwb;  // docs/adr/0038-a-extension-phase-v.md
     assign debug_amo_write_done = amo_write_done_r;
     assign debug_amo_stall = amo_stall;
     assign debug_amo_captured_read = amo_captured_read_r;
+    assign debug_x2 = m_Register.regs[2];
+    assign debug_x4 = m_Register.regs[4];
+    assign debug_x11 = m_Register.regs[11];
+    assign debug_x12 = m_Register.regs[12];
+    assign debug_x13 = m_Register.regs[13];
 
 endmodule
 

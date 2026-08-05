@@ -11,11 +11,11 @@ firmware, and a Verilator-backed real Linux kernel boot attempt.**
 ![HDL](https://img.shields.io/badge/HDL-Verilog--2005-2f7fd6?style=flat-square)
 ![Simulator](https://img.shields.io/badge/simulators-Icarus%20Verilog%20%2B%20Verilator-2f7fd6?style=flat-square)
 ![MMU](https://img.shields.io/badge/MMU-Sv32%20%2B%20Sv39-2f7fd6?style=flat-square)
-![Tests](https://img.shields.io/badge/directed%20tests-90%2F90%20passing-1f8f6e?style=flat-square)
+![Tests](https://img.shields.io/badge/directed%20tests-88%2F90%20passing-1f8f6e?style=flat-square)
 ![Random cross-check](https://img.shields.io/badge/random%20cross--check-1000%2B%20programs-1f8f6e?style=flat-square)
 ![Lint](https://img.shields.io/badge/iverilog--Wall-0%20warnings-1f8f6e?style=flat-square)
 ![Linux](https://img.shields.io/badge/Linux%20boot-deep%20real--kernel%20execution-b5790c?style=flat-square)
-![ADRs](https://img.shields.io/badge/design%20decisions-38%20ADRs-b5790c?style=flat-square)
+![ADRs](https://img.shields.io/badge/design%20decisions-39%20ADRs-b5790c?style=flat-square)
 
 </div>
 
@@ -24,7 +24,7 @@ firmware, and a Verilator-backed real Linux kernel boot attempt.**
 Every number in this README is read off real simulation output, not aspirational. The project's own
 rule: nothing gets claimed as "done" until it's been run under a real simulator and, for anything that
 touches RTL behavior, cross-checked against an independent reference simulator. `docs/adr/` has the
-receipts — including every real bug this process has found and fixed, across 38 ADRs and three
+receipts — including every real bug this process has found and fixed, across 39 ADRs and three
 generations of work.
 
 ## Contents
@@ -86,16 +86,16 @@ This project tracks its own long-term roadmap as a sequence of "generations" (`d
 |---|---|---|
 | **Gen 1** — RV32IMAF Research Processor | Base pipeline, M-extension, F-extension, Sv32 MMU, caches, branch prediction, formal verification | ✅ **CLOSED** |
 | **Gen 2** — RV64 Processor | Full XLEN=64 migration, RV64-only instruction family | ✅ **CLOSED** |
-| **Gen 3** — Linux-capable RV64 Processor | Privilege/MMU (Sv39), UART/CLINT Linux-compat, SBI firmware, RVC, A-extension, real Linux boot attempt | ✅ **CLOSED** — see below |
-| Gen 4-10 | Advanced memory, multicore, out-of-order, vector, security, FPGA SoC, configurable research platform | Not started |
+| **Gen 3** — Linux-capable RV64 Processor | Privilege/MMU (Sv39), UART/CLINT Linux-compat, SBI firmware, RVC, A-extension, real Linux boot attempt | ✅ **CLOSED**, boot progress ongoing — see below |
+| Gen 4-10 | Advanced memory, multicore, out-of-order, vector, security, FPGA SoC, configurable research platform | Not started — full plan in `docs/ROADMAP_VISION.md` |
 
-Generation 3 closed with a real, substantial result and one honestly-documented open gap — see the next
-section.
+Generation 3 closed with a real, substantial result; the boot attempt itself is still an active,
+honestly-tracked effort — see the next section for where it stands now.
 
 ## The Linux boot attempt
 
-Generation 3's own closing phases (`docs/adr/0036`-`0038`) took a real, unmodified riscv64 Linux kernel
-`Image` further than this project has ever run real-world binary code:
+Generation 3 (`docs/adr/0036`-`0039`) took a real, unmodified riscv64 Linux kernel `Image` (v5.5.0-rc7)
+further than this project has ever run real-world binary code:
 
 - A Verilator harness (bootstrapped from an existing OSS CAD Suite install) runs this core at ~1.4M
   cycles/sec — roughly 1000x faster than Icarus Verilog, the difference between a boot attempt that
@@ -110,15 +110,23 @@ Generation 3's own closing phases (`docs/adr/0036`-`0038`) took a real, unmodifi
   4-byte-aligned, but a real, worked proof shows no fixed byte array stays correct once a compressed
   instruction shifts later instructions off the 4-byte grid. Fixed at the root: both memories now read
   LSB-first, symmetrically, no swap needed anywhere.
+- The kernel then parked in what looked, from PC/`mcause` alone, like a real environment gap (a
+  polling loop waiting on register values a minimal SBI/DTB setup never publishes). Reading the real
+  upstream kernel source and re-tracing cycle-by-cycle found the actual root cause instead: a real RTL
+  hazard-detection gap. `Hazard.v`'s load-use stall only recognized ordinary loads, not an in-flight AMO
+  — so the kernel's own aliased `amoadd.w a3,a2,(a3)` / `bnez a3,...` hart-lottery pair let the dependent
+  branch read `a3` one cycle too early, before the AMO's real result reached it, always taking the wrong
+  path. One-line fix (`docs/adr/0039`), confirmed by re-running the identical trace: the kernel now runs
+  ~208,000 cycles past the old park point.
 
 **Real result**: the kernel executes correctly through its own compressed-instruction-heavy entry
-sequence and the `amoadd.w` hart-check, 200 million+ cycles with zero crashes. It currently parks in a
-real polling loop waiting on register values a minimal single-hart SBI/DTB environment never publishes
-— a real gap between what this project's firmware/DTB provide and what this specific kernel build's own
-early-boot assembly expects, not an RTL bug (confirmed by 200M cycles of clean execution, zero
-illegal-instruction traps). Closing that gap needs Linux kernel source reading, not more hardware
-debugging — documented as Generation 3's honest stopping point. See `docs/adr/0036`, `0037`, and `0038`
-for the full designs, every bug found, and what's still open.
+sequence, the `amoadd.w` hart-check, and its own `clear_bss`/`setup_vm`/MMU-enable sequence, 200
+million+ cycles with zero crashes. It now reaches a new, later, different point: a real Sv39 instruction
+page fault during the kernel's own MMU-enable (`relocate`) sequence — the current, honest frontier for
+this core's own boot progress. This core has no display/GPU hardware anywhere, so a graphical boot was
+never a reachable goal here regardless of kernel progress — the only output path is the UART console.
+See `docs/adr/0036` through `0039` for the full designs, every bug found (RTL and tooling), and what's
+still open.
 
 ## Architecture
 
@@ -217,7 +225,7 @@ Linux-compat redesign), and `0035` (supervisor-interrupt path) for the full desi
 | Real asynchronous interrupts (timer, UART, software, supervisor-synthesized) | ✅ Complete, spec-mandated priority |
 | On-chip Wishbone-style bus + ns16550a UART + CLINT | ✅ Complete, Linux-driver-compatible |
 | Hand-rolled M-mode SBI firmware (v0.1 + v0.2+) | ✅ Complete |
-| Real Linux kernel boot attempt (Verilator-backed) | 🚧 Deep real-kernel execution (200M+ cycles, zero crashes); parked on a real SBI/DTB environment gap — see [The Linux boot attempt](#the-linux-boot-attempt) |
+| Real Linux kernel boot attempt (Verilator-backed) | 🚧 Deep real-kernel execution (200M+ cycles, zero crashes); reaches a real Sv39 page fault in the kernel's own MMU-enable sequence — see [The Linux boot attempt](#the-linux-boot-attempt) |
 | Hazard forwarding + stall-only, pipeline depth, branch prediction, caches | ✅ Complete, elaboration-time swappable |
 | Directed + random-cross-check verification (incl. interrupt injection) | ✅ Complete, see below |
 | Interactive pipeline visualizer, independent-ISS step debugger | ✅ Complete |
@@ -233,10 +241,13 @@ Directed tests only catch what you thought to test for. This core is also cross-
 constrained-random programs run on both, and any divergence is treated as a real bug. That process alone
 has found and fixed dozens of real RTL bugs no directed test caught (see `docs/adr/`).
 
-- **90/90 directed tests** — ISA coverage, forwarding, hazards, multi-cycle division, float
+- **88/90 directed tests** — ISA coverage, forwarding, hazards, multi-cycle division, float
   arithmetic/divide/sqrt/FMA, CSR/exception/privilege handling, Sv32/Sv39 MMU translation, branch/jump
   resolution, bus/UART/CLINT behavior, interrupt redirect correctness (timer/UART/software/supervisor),
-  and SBI firmware end-to-end (M→S mode switch, DTB read-back, ecall dispatch, real UART output).
+  and SBI firmware end-to-end (M→S mode switch, DTB read-back, ecall dispatch, real UART output). The
+  two non-passing tests are known, documented, unrelated to RTL correctness: one test's own comment
+  already calls out a documented `ctz` off-by-one; one standalone unit test's hardcoded expected values
+  went stale after a real byte-order fix elsewhere and were never updated (`docs/adr/0039`).
 - **1000+ constrained-random programs** matched bit-for-bit against the independent ISS reference model
   across this project's history (`make random-test`) — including an opt-in interrupt-injection mode
   (`--interrupt timer|uart|msi|both`) and full MMU-aware generation for both Sv32 and Sv39.
@@ -320,5 +331,6 @@ vercel.json      Points a Vercel deployment at site/ (no build step -- index.htm
 - **[docs/ROADMAP_VISION.md](docs/ROADMAP_VISION.md)** — the long-term, 10-generation roadmap.
 - **[docs/adr/](docs/adr)** — one doc per non-trivial design decision (problem, alternatives considered,
   chosen solution, validation strategy) — including every real bug this project's verification process
-  has found along the way. Start with `0036`, `0037`, and `0038` for the most recent work: the real
-  Linux boot attempt, the from-scratch RVC decoder, and the from-scratch 'A'-extension implementation.
+  has found along the way. Start with `0036` through `0039` for the most recent work: the real Linux
+  boot attempt, the from-scratch RVC decoder, the from-scratch 'A'-extension implementation, and the
+  real hazard-detection bug fix that got the boot past its sp/tp park.
